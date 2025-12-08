@@ -126,6 +126,20 @@ pub fn fr_from_u64(val: u64) -> Fr {
     fr
 }
 
+/// Convert a hex string (without 0x prefix) to Fr
+/// The hex string should be 64 characters (32 bytes)
+pub fn fr_from_hex(hex: &str) -> Fr {
+    let mut fr = SCALAR_ZERO;
+    // Pad with zeros if shorter than 64 chars
+    let padded = format!("{:0>64}", hex);
+    for (i, chunk) in padded.as_bytes().chunks(2).enumerate() {
+        let s = core::str::from_utf8(chunk).unwrap_or("00");
+        let byte = u8::from_str_radix(s, 16).unwrap_or(0);
+        fr[i] = byte;
+    }
+    fr
+}
+
 // --- Internal functions for limb arithmetic ---
 
 /// r - 2 (for computing inverse via Fermat's little theorem)

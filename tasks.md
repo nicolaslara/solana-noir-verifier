@@ -84,28 +84,45 @@ cargo test -p example-verifier --test integration_test
 - [x] **Proof DOES contain sumcheck data inline**
 - [x] **Sumcheck round verification (barycentric interpolation)**
 - [x] **All 6 sumcheck rounds pass!** Fixed challenge gen to match Solidity verifier
-- [x] **All 26 subrelations implemented (relations.rs)**
+- [x] **All 28 subrelations implemented (relations.rs)** Updated from 26 to match Solidity
 - [x] **Shplemini structure implemented (shplemini.rs)**
 - [x] **Pairing check wired up**
 - [x] **📚 Theoretical documentation (docs/theory.md)**
 - [x] **🧪 Validation script (scripts/validate_theory.py)**
-- [ ] **Debug: validate challenges match bb exactly**
+- [x] **Challenge matching verified** - All challenges (eta, beta, gamma, alpha, etc.) correct
+- [x] **Sumcheck rounds all pass** - 6/6 rounds verify correctly
+- [ ] **Final relation check** - grand_relation != target
 - [ ] **Full MSM computation in shplemini**
 - [ ] **End-to-end verification passing**
 
-### Debugging Priority (See docs/theory.md Section 13)
+### Current Debugging Focus: Relation Accumulation
 
-1. **Challenge Matching** - Most likely source of failures
-   - VK hash computation
-   - Transcript element ordering
-   - Challenge split boundaries (127-bit)
-2. **Sumcheck Verification** - Round-by-round check
-   - Initial target for ZK = libra_sum × libra_challenge
-   - Barycentric interpolation for next_target
-3. **Relation Evaluation** - 26 subrelations
+The sumcheck rounds pass but the final relation check fails:
+
+- Expected grand_before_ZK: 0x2dc50ff0...
+- Actual grand_before_ZK: 0x0e8fbe33...
+
+**Root cause identified:** For simple_square circuit:
+
+- Only 4 subrelations should be non-zero (arith 0-1, perm 2-3)
+- Actually seeing 21 non-zero: [0-12, 20-27]
+- Leaking relations: lookup, range, elliptic, poseidon
+- Correctly zero: memory (13-18), NNF (19)
+
+**Next step:** Use Foundry to compare individual subrelation values with Solidity
+
+### Completed Debugging (All Verified Correct)
+
+1. ✅ **Challenge generation** - All matches Solidity
+2. ✅ **Wire enum indices** - All 41 match Solidity WIRE enum
+3. ✅ **NUM_SUBRELATIONS = 28, NUMBER_OF_ALPHAS = 27**
+4. ✅ **public_input_delta** - Fixed to use 1<<28 separator
+5. ✅ **Sumcheck round verification** - All 6 pass
+6. ✅ **ZK adjustment formula** - Matches Solidity exactly
+7. **Relation Evaluation** - 26 subrelations
    - Arithmetic (0-1) and Permutation (2-3) are critical
    - Many others may be zero for simple circuits
-4. **Shplemini MSM** - Final pairing point computation
+8. **Shplemini MSM** - Final pairing point computation
    - Currently using simplified placeholder
    - Needs full ~70 commitment MSM
 
@@ -251,11 +268,12 @@ See `experiments/groth16-alternative/` for a complete experiment comparing Groth
 
 ### Key Results
 
-| Metric            | UltraHonk | Groth16                      |
-| ----------------- | --------- | ---------------------------- |
-| **Proof Size**    | ~5 KB     | **256 bytes** (20x smaller!) |
-| **Solana CU**     | ~200-400K | **~200K**                    |
-| **Trusted Setup** | Universal | Per-circuit                  |
+| Metric             | UltraHonk | Groth16                        |
+| ------------------ | --------- | ------------------------------ |
+| **Proof Size**     | ~5 KB     | **256 bytes** (20x smaller!)   |
+| **Solana CU**      | ~200-400K | **81K** (measured on Surfpool) |
+| **Trusted Setup**  | Universal | Per-circuit                    |
+| **1M constraints** | TBD       | **~4 seconds** proving time    |
 
 ### Files
 
@@ -266,6 +284,45 @@ See `experiments/groth16-alternative/` for a complete experiment comparing Groth
 
 ---
 
+## zkVerify Compression Experiment 🚧
+
+See `experiments/zkverify-compression/` for proof compression via zkVerify.
+
+### Pipeline
+
+```
+Noir → UltraHonk proof → zkVerify → Groth16 receipt → Solana
+```
+
+### Why This Matters
+
+| Aspect            | Direct UltraHonk | zkVerify Compression           |
+| ----------------- | ---------------- | ------------------------------ |
+| **Proof Size**    | ~5 KB            | **256 bytes**                  |
+| **Solana CU**     | ~200-400K        | **~81K**                       |
+| **Trusted Setup** | Universal        | Per-circuit (zkVerify handles) |
+| **Latency**       | Instant          | ~minutes                       |
+| **Noir Support**  | ✅ Full          | ✅ Full                        |
+
+### Status
+
+- [x] Set up experiment structure
+- [x] Create sample Noir circuit
+- [x] Create proof generation scripts
+- [x] Create zkVerify submission scripts
+- [x] Create Solana verification scripts
+- [ ] Test end-to-end with zkVerify testnet
+- [ ] Document aggregation receipt format
+- [ ] Integrate with existing groth16-solana verifier
+
+### Files
+
+- `experiments/zkverify-compression/circuits/` - Noir circuits
+- `experiments/zkverify-compression/scripts/` - Pipeline scripts
+- `experiments/zkverify-compression/TESTING.md` - Step-by-step guide
+
+---
+
 ## Key References
 
 - [Barretenberg Docs](https://barretenberg.aztec.network/docs/getting_started/)
@@ -273,3 +330,4 @@ See `experiments/groth16-alternative/` for a complete experiment comparing Groth
 - [groth16-solana](https://github.com/Lightprotocol/groth16-solana)
 - [noir_backend_using_gnark](https://github.com/lambdaclass/noir_backend_using_gnark) - Noir → gnark (old Noir)
 - [zkVerify ultraplonk_verifier](https://github.com/zkVerify/ultraplonk_verifier) (for reference, different format)
+- [zkVerify Documentation](https://docs.zkverify.io) - Proof aggregation service

@@ -321,6 +321,32 @@ pub fn verify_sumcheck(
     crate::dbg_fr!("grand_relation", &grand);
     crate::dbg_fr!("target", &target);
 
+    // Debug: compute expected grand_before_ZK from target
+    #[cfg(feature = "debug")]
+    if proof.is_zk {
+        if let (Some(libra_eval), Some(libra_chal)) = (proof.libra_evaluation(), libra_challenge) {
+            let mut evaluation = SCALAR_ONE;
+            for i in 2..proof.log_n {
+                evaluation = fr_mul(&evaluation, &challenges.sumcheck_u_challenges[i]);
+            }
+            let one_minus_eval = fr_sub(&SCALAR_ONE, &evaluation);
+            let libra_term = fr_mul(&libra_eval, libra_chal);
+
+            // target = grand * (1-eval) + libra_term
+            // grand = (target - libra_term) / (1-eval)
+            let numerator = fr_sub(&target, &libra_term);
+            if let Some(expected_grand) = crate::field::fr_div(&numerator, &one_minus_eval) {
+                crate::trace!("===== EXPECTED VS ACTUAL =====");
+                crate::dbg_fr!("expected grand_before_ZK (from target)", &expected_grand);
+                crate::dbg_fr!(
+                    "actual grand_before_ZK",
+                    &accumulate_relations(proof, relation_params, &challenges.alphas, &pow_partial)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
     // Step 4: Check that grand == target
     if grand == target {
         crate::trace!("SUMCHECK PASSED!");

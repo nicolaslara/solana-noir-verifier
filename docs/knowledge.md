@@ -234,11 +234,25 @@ let result = alt_bn128_pairing_be(&pairing_input)?;
    - Formula matches Solidity's `computePublicInputDelta`
 
 7. **Sumcheck Verification** (`sumcheck.rs`)
-   - ✅ Round-by-round verification passing
+
+   - ✅ Round-by-round verification passing (all 6 rounds)
    - ✅ pow_partial computation correct
    - ✅ ZK adjustment formula correct
+   - ✅ Batching formula correct (28 subrels, 27 alphas)
    - ⚠️ Final relation check failing - grand_relation != target
-   - Need to debug individual subrelation computations
+
+   **Debugging findings:**
+
+   - Expected grand_before_ZK (from target): 0x2dc50ff0...
+   - Actual grand_before_ZK (from relations): 0x0e8fbe33...
+   - For simple_square, only 4 subrelations should be non-zero (arith 0-1, perm 2-3)
+   - Actually seeing 21 non-zero: [0-12, 20-27]
+   - Memory (13-18) and NNF (19) correctly produce ZERO
+   - Lookup, Range, Elliptic, Poseidon are "leaking" non-zero values
+
+   **Root cause:** One or more relation formulas have subtle differences from Solidity
+
+   **Next step:** Use Foundry to generate expected subrelation values from Solidity verifier, then compare with our values to identify the exact discrepancy
 
 ### Pending ❌
 

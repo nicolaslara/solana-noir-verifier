@@ -224,13 +224,14 @@ fn generate_challenges(
     }
 
     // Compute public_input_delta (includes pairing point object)
+    // Note: offset = 1, matching Solidity's pubInputsOffset = 1
     let public_input_delta = compute_public_input_delta_with_ppo(
         public_inputs,
         &ppo_array,
         &beta,
         &gamma,
         vk.circuit_size(),
-        0,
+        1, // pubInputsOffset = 1 in Solidity
     );
 
     let relation_params = RelationParameters {
