@@ -1,0 +1,17 @@
+[package]
+name = "plonk-solana-vk-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool to generate Rust VK constants from Barretenberg vk.json"
+
+[[bin]]
+name = "vk-codegen"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

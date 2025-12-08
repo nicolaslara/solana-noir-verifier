@@ -1,0 +1,30 @@
+[package]
+name = "example-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Example Solana verifier program for a specific Noir circuit"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+test-sbf = []
+
+# Silence warnings about cfg values used by solana entrypoint macro
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(target_os, values(\"solana\"))",
+    "cfg(feature, values(\"custom-heap\", \"custom-panic\"))",
+] }
+
+[dependencies]
+plonk-solana-core = { path = "../../crates/plonk-core" }
+solana-program = { workspace = true }
+
+[dev-dependencies]
+solana-program-test = { workspace = true }
+solana-sdk = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,6 @@
+[package]
+name = "simple_square"
+type = "bin"
+authors = [""]
+
+[dependencies]

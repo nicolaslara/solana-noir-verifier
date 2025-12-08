@@ -1,0 +1,63 @@
+---
+description: External references and resources for implementation
+globs:
+alwaysApply: false
+---
+
+# Key External References
+
+When implementing features, consult these resources:
+
+## Primary References
+
+### ultraplonk_verifier (zkVerify)
+
+- **GitHub**: `https://github.com/zkVerify/ultraplonk_verifier`
+- Complete UltraPlonk verifier in Rust that works with Noir proofs
+- Has `noir-cli` tool for proof/VK conversion
+- MIT/Apache-2.0 licensed - can adapt code
+- **Key files**:
+  - Transcript implementation (Keccak256)
+  - Plonk verification logic
+  - Test resources with proof.bin/vk.bin
+
+### groth16-solana (Light Protocol)
+
+- **GitHub**: `https://github.com/Lightprotocol/groth16-solana`
+- Reference for Solana BN254 syscall usage
+- ~200k compute units for Groth16 verification
+- **Key patterns**:
+  - VK parser
+  - Proof parser
+  - Syscall integration
+
+### Solana BN254 Syscalls
+
+- `solana-bn254` crate (v3.1+)
+- Active on mainnet since Solana 1.18.x
+- Operations: addition, multiplication, pairing
+
+### Barretenberg
+
+- **GitHub**: `https://github.com/AztecProtocol/barretenberg`
+- Source of truth for Noir proof format
+- UltraPlonk/UltraHonk implementation details
+- Solidity verifier generator (for VK layout inspiration)
+
+## Version Compatibility
+
+| Component    | Version                  |
+| ------------ | ------------------------ |
+| Noir/Nargo   | v0.31.0 - v1.0.0-beta.1+ |
+| Solana SDK   | 3.0+                     |
+| solana-bn254 | 3.1+                     |
+| Rust         | 1.75+ stable             |
+
+## Test Resources
+
+Test vectors available from ultraplonk_verifier:
+
+- `tests/resources/v1.0.0-beta.1/proof.bin`
+- `tests/resources/v1.0.0-beta.1/vk.bin`
+
+Always verify new implementations against these test vectors.

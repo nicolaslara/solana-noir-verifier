@@ -1,0 +1,30 @@
+[package]
+name = "plonk-solana-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UltraPlonk verifier for Noir proofs on Solana"
+
+[features]
+default = []
+debug = []   # Enable debug logging for challenge validation
+
+[dependencies]
+# Solana BN254 syscalls
+solana-bn254 = { workspace = true }
+
+# Hashing (Keccak256 for Fiat-Shamir transcript)
+sha3 = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Hex literals for constants
+hex-literal = "0.4"
+
+[dev-dependencies]
+hex = { workspace = true }
+# Arkworks only for generating test vectors / cross-checking
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-ec = "0.5"

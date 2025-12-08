@@ -1,0 +1,24 @@
+# Rust
+target/
+Cargo.lock
+
+# Solana
+/test-ledger/
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.log
+
+# Generated files
+programs/*/src/vk.rs
+

@@ -1,0 +1,57 @@
+---
+description: Development patterns for Rust/Solana BN254 verification
+globs: crates/**/*.rs, programs/**/*.rs
+alwaysApply: false
+---
+
+# Development Rules
+
+## Solana BN254 Syscalls
+
+Use `solana-bn254` crate for all heavy curve operations:
+
+- `alt_bn128_addition` - G1 point addition
+- `alt_bn128_multiplication` - G1 scalar multiplication
+- `alt_bn128_pairing` - Pairing check
+
+**Never** use pure Rust arkworks pairing in on-chain code - it will exceed compute limits.
+
+## Field/Curve Serialization
+
+- Match Barretenberg's wire format for G1/G2/Fr elements
+- G1 points: big-endian coordinates (x, y), 64 bytes total
+- Fr scalars: big-endian, 32 bytes
+- All serialization must round-trip correctly with Barretenberg exports
+
+## Transcript (Fiat-Shamir)
+
+- Hash function: **Keccak256** (matching Barretenberg/ultraplonk_verifier)
+- Absorb order must exactly match Barretenberg:
+  1. VK commitments
+  2. Public inputs
+  3. Proof commitments
+  4. Evaluations
+- Test transcript outputs against Barretenberg challenge values
+
+## no_std Compatibility
+
+Core verification code in `plonk-core` must be `no_std` compatible for Solana BPF:
+
+```rust
+#![cfg_attr(not(feature = "std"), no_std)]
+```
+
+Use `alloc` crate for heap allocations when needed.
+
+## Error Handling
+
+- Use custom error types, not panics
+- Return `ProgramError::Custom(code)` in Solana programs
+- Surface verification failures clearly, don't mask them
+
+## Testing Strategy
+
+1. Unit tests with `#[cfg(test)]` - can use std
+2. Feature-gate arkworks testing: `--features test-utils`
+3. Integration tests with `solana-program-test`
+4. Always test both valid proofs AND tampered proofs

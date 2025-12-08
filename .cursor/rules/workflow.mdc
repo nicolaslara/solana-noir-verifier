@@ -1,0 +1,55 @@
+---
+description: Main development workflow for Solana Noir Verifier
+globs:
+alwaysApply: true
+---
+
+# Solana Noir Verifier Workflow
+
+This rule applies to ALL interactions with this codebase.
+
+## 1. Reference the Spec First
+
+Before implementing or modifying any verification logic, transcript handling, KZG operations, or Plonk-related code:
+
+- **Always consult `SPEC.md`** - This is the canonical specification for the project
+- Cross-reference with the Barretenberg/ultraplonk_verifier approach documented in `tasks.md`
+- For transcript/Fiat-Shamir: match Barretenberg's exact challenge derivation (Keccak256)
+
+## 2. Update Tasks After Every Session
+
+After completing work or making significant discoveries:
+
+- **Update `tasks.md`** with:
+  - Checked items (`[x]`) for completed tasks
+  - New tasks discovered during implementation
+  - Updated "Current Status" section
+  - New insights added to "Key Insights" section
+- Keep the task list current - it's the source of truth for progress
+
+## 3. Keep README Updated
+
+When making significant changes:
+
+- Update `README.md` if:
+  - New crates/modules are added
+  - Build/test commands change
+  - Dependencies are updated
+  - Project structure changes
+  - Usage instructions need clarification
+
+## 4. Document Learnings
+
+When discovering important implementation details, edge cases, or solutions:
+
+- **Add to `docs/knowledge.md`** - This is the project's learned knowledge base
+- Include code patterns, gotchas, and working solutions
+- Reference external resources when relevant
+
+## 5. Test Against Spec
+
+When implementing features:
+
+- Use test vectors from `tests/resources/` (ultraplonk_verifier test files)
+- Verify against Barretenberg as ground truth
+- Document any deviations or compatibility notes

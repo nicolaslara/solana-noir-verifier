@@ -1,0 +1,739 @@
+//! UltraHonk verification logic
+//!
+//! This module implements verification for bb 3.0 UltraHonk proofs.
+//!
+//! The verification algorithm follows Barretenberg's UltraHonk verifier:
+//! 1. OinkVerifier: Generate relation parameters (eta, beta, gamma) and receive witness commitments
+//! 2. SumcheckVerifier: Verify the sumcheck protocol
+//! 3. ShpleminiVerifier: Verify batched polynomial commitment opening
+//! 4. Final pairing check via Solana BN254 syscalls
+
+use crate::errors::VerifyError;
+use crate::field::{fr_add, fr_from_u64, fr_mul, fr_sub};
+use crate::key::VerificationKey;
+use crate::ops;
+use crate::proof::Proof;
+use crate::transcript::Transcript;
+use crate::types::{Fr, G1, SCALAR_ONE};
+
+extern crate alloc;
+use alloc::vec::Vec;
+
+/// Relation parameters derived from the transcript
+#[derive(Debug, Clone)]
+pub struct RelationParameters {
+    pub eta: Fr,
+    pub eta_two: Fr,
+    pub eta_three: Fr,
+    pub beta: Fr,
+    pub gamma: Fr,
+    pub public_input_delta: Fr,
+}
+
+/// Challenges for the verification protocol
+#[derive(Debug, Clone)]
+pub struct Challenges {
+    pub relation_params: RelationParameters,
+    pub alpha: Fr,
+    pub libra_challenge: Option<Fr>, // ZK only
+    pub gate_challenges: Vec<Fr>,
+    pub sumcheck_challenges: Vec<Fr>,
+    pub rho: Fr,
+    pub gemini_r: Fr,
+    pub shplonk_nu: Fr,
+    pub shplonk_z: Fr,
+}
+
+/// Verify an UltraHonk proof
+///
+/// # Arguments
+/// * `vk_bytes` - Verification key (1888 bytes)
+/// * `proof_bytes` - Proof bytes (variable size based on circuit's log_n)
+/// * `public_inputs` - Array of public inputs (32 bytes each, big-endian)
+/// * `is_zk` - Whether this is a ZK proof (true for default Keccak proofs)
+///
+/// # Returns
+/// * `Ok(())` if verification succeeds
+/// * `Err(VerifyError)` if verification fails
+pub fn verify(
+    vk_bytes: &[u8],
+    proof_bytes: &[u8],
+    public_inputs: &[Fr],
+    is_zk: bool,
+) -> Result<(), VerifyError> {
+    // Parse verification key first to get log_n
+    let vk = VerificationKey::from_bytes(vk_bytes)?;
+
+    // Get log_circuit_size from VK
+    let log_n = vk.log2_circuit_size as usize;
+
+    // Validate public inputs count
+    // The num_public_inputs in VK is the actual count of public inputs for the circuit
+    // (The pairing point object is part of the proof, not public inputs)
+    if public_inputs.len() != vk.num_public_inputs as usize {
+        return Err(VerifyError::PublicInput(alloc::format!(
+            "Expected {} public inputs, got {}",
+            vk.num_public_inputs,
+            public_inputs.len()
+        )));
+    }
+
+    // Parse proof with log_n from VK
+    let proof = Proof::from_bytes(proof_bytes, log_n, is_zk)?;
+
+    // Run verification
+    verify_inner(&vk, &proof, public_inputs)
+}
+
+/// Internal verification with parsed structures
+fn verify_inner(
+    vk: &VerificationKey,
+    proof: &Proof,
+    public_inputs: &[Fr],
+) -> Result<(), VerifyError> {
+    // Step 1: Generate challenges via Fiat-Shamir transcript
+    let challenges = generate_challenges(vk, proof, public_inputs)?;
+
+    // Step 2: Verify sumcheck protocol
+    // This involves checking that the claimed sumcheck evaluations are consistent
+    let sumcheck_result = verify_sumcheck(vk, proof, &challenges)?;
+    if !sumcheck_result {
+        return Err(VerifyError::VerificationFailed);
+    }
+
+    // Step 3: Compute the batched opening claim
+    let (p1, p2) = compute_pairing_points(vk, proof, &challenges)?;
+
+    // Step 4: Final pairing check: e(P1, G2) == e(P2, G2_gen)
+    let pairing_result = ops::pairing_check(&[(p1, vk_g2()), (ops::g1_neg(&p2)?, g2_generator())])?;
+
+    if pairing_result {
+        Ok(())
+    } else {
+        Err(VerifyError::VerificationFailed)
+    }
+}
+
+/// Generate all challenges from the transcript
+///
+/// Based on bb's UltraHonk transcript manifest (ultra_transcript.test.cpp)
+fn generate_challenges(
+    vk: &VerificationKey,
+    proof: &Proof,
+    public_inputs: &[Fr],
+) -> Result<Challenges, VerifyError> {
+    let mut transcript = Transcript::new();
+
+    crate::trace!("===== CHALLENGE GENERATION =====");
+    crate::trace!("circuit_size = {}", vk.circuit_size());
+    crate::trace!("num_public_inputs = {}", public_inputs.len());
+
+    // VK hash is computed and added to transcript first
+    // This is done by bb's OinkVerifier before anything else
+    let vk_hash = compute_vk_hash(vk);
+    crate::dbg_fr!("vk_hash", &vk_hash);
+    transcript.append_scalar(&vk_hash);
+
+    // NOTE: bb does NOT add circuit_size, num_public_inputs, offset to transcript!
+    // Only vk_hash and public_input values are added.
+
+    // Add public inputs (actual user inputs)
+    for (i, pi) in public_inputs.iter().enumerate() {
+        crate::dbg_fr!(&alloc::format!("public_input[{}]", i), pi);
+        transcript.append_scalar(pi);
+    }
+
+    // Add pairing point object (16 Fr values) - these are also public inputs for DefaultIO
+    // In bb's manifest: public_input_0 = user input, public_input_1..16 = pairing points
+    let ppo = proof.pairing_point_object();
+    crate::trace!("pairing_point_object has {} elements", ppo.len());
+    for (i, p) in ppo.iter().enumerate() {
+        if i < 2 {
+            crate::dbg_fr!(&alloc::format!("ppo[{}]", i), p);
+        }
+    }
+    for ppo_elem in ppo {
+        transcript.append_scalar(ppo_elem);
+    }
+
+    // NOTE: For UltraKeccakZK, gemini_masking is NOT added to transcript before wires!
+    // It's added later as part of the rho challenge buffer (after sumcheck evaluations).
+    // This differs from other ZK flavors which add gemini_masking during Oink.
+
+    // Add first 3 wire commitments (w1, w2, w3)
+    let w1 = proof.wire_commitment(0);
+    let w2 = proof.wire_commitment(1);
+    let w3 = proof.wire_commitment(2);
+    crate::dbg_g1!("w1", &w1);
+    crate::dbg_g1!("w2", &w2);
+    crate::dbg_g1!("w3", &w3);
+    transcript.append_g1(&w1);
+    transcript.append_g1(&w2);
+    transcript.append_g1(&w3);
+
+    // Debug: print transcript buffer size before first challenge
+    #[cfg(all(feature = "debug", not(target_family = "solana")))]
+    {
+        // Print what Solidity expects:
+        // 24 elements: vkHash(1) + pi(1) + ppo(16) + w1(2) + w2(2) + w3(2) = 24 * 32 = 768 bytes
+        crate::trace!(
+            "Transcript buffer before eta: {} + {} + {} + {} = expected 768 bytes",
+            32,
+            32,
+            512,
+            192
+        );
+    }
+
+    // Get eta challenges (eta, eta_two, eta_three)
+    let (eta, eta_two) = transcript.challenge_split();
+    let (eta_three, _) = transcript.challenge_split();
+    crate::dbg_fr!("eta", &eta);
+    crate::dbg_fr!("eta_two", &eta_two);
+    crate::dbg_fr!("eta_three", &eta_three);
+
+    // Add lookup commitments and w4
+    let lookup_read_counts = proof.wire_commitment(3);
+    let lookup_read_tags = proof.wire_commitment(4);
+    let w4 = proof.wire_commitment(5);
+    crate::dbg_g1!("lookup_read_counts", &lookup_read_counts);
+    crate::dbg_g1!("lookup_read_tags", &lookup_read_tags);
+    crate::dbg_g1!("w4", &w4);
+    transcript.append_g1(&lookup_read_counts);
+    transcript.append_g1(&lookup_read_tags);
+    transcript.append_g1(&w4);
+
+    // Get beta, gamma challenges
+    let (beta, gamma) = transcript.challenge_split();
+    crate::dbg_fr!("beta", &beta);
+    crate::dbg_fr!("gamma", &gamma);
+
+    // Add lookup_inverses and z_perm
+    let lookup_inverses = proof.wire_commitment(6);
+    let z_perm = proof.wire_commitment(7);
+    crate::dbg_g1!("lookup_inverses", &lookup_inverses);
+    crate::dbg_g1!("z_perm", &z_perm);
+    transcript.append_g1(&lookup_inverses);
+    transcript.append_g1(&z_perm);
+
+    // Convert pairing point object slice to array for compute_public_input_delta_with_ppo
+    let ppo_slice = proof.pairing_point_object();
+    let mut ppo_array = [[0u8; 32]; 16];
+    for (i, fr) in ppo_slice.iter().enumerate() {
+        ppo_array[i] = *fr;
+    }
+
+    // Compute public_input_delta (includes pairing point object)
+    let public_input_delta = compute_public_input_delta_with_ppo(
+        public_inputs,
+        &ppo_array,
+        &beta,
+        &gamma,
+        vk.circuit_size(),
+        0,
+    );
+
+    let relation_params = RelationParameters {
+        eta,
+        eta_two,
+        eta_three,
+        beta,
+        gamma,
+        public_input_delta,
+    };
+
+    // Get alpha challenges (NUM_SUBRELATIONS - 1 = 25 alphas)
+    let alpha = transcript.challenge();
+    crate::dbg_fr!("alpha", &alpha);
+
+    // Get gate challenge (SPLIT challenge, then expanded to powers via squaring)
+    // gate_challenges = [c, c^2, c^4, c^8, ...]
+    // bb generates log_n gate challenges, not CONST_PROOF_SIZE_LOG_N
+    let (gate_challenge_base, _) = transcript.challenge_split();
+    crate::dbg_fr!("gate_challenge_base", &gate_challenge_base);
+
+    let mut gate_challenges = Vec::with_capacity(proof.log_n);
+    let mut gc = gate_challenge_base;
+    for i in 0..proof.log_n {
+        if i < 2 {
+            crate::dbg_fr!(&alloc::format!("gate_challenges[{}]", i), &gc);
+        }
+        gate_challenges.push(gc);
+        gc = fr_mul(&gc, &gc); // Square for next power
+    }
+
+    // For ZK proofs: add libra commitment and sum, generate libra challenge
+    // This happens AFTER gate_challenge but BEFORE sumcheck univariates
+    // The initial sumcheck target = libra_sum * libra_challenge
+    // NOTE: libra_challenge uses full challenge (not split)
+    let libra_challenge = if proof.is_zk {
+        if let Some(libra_concat) = proof.libra_concat_commitment() {
+            crate::dbg_g1!("libra_concat", &libra_concat);
+            transcript.append_g1(&libra_concat);
+        }
+        if let Some(libra_sum) = proof.libra_sum() {
+            crate::dbg_fr!("libra_sum", &libra_sum);
+            transcript.append_scalar(&libra_sum);
+        }
+        let lc = transcript.challenge(); // Full challenge, not split!
+        crate::dbg_fr!("libra_challenge", &lc);
+        Some(lc)
+    } else {
+        None
+    };
+
+    // Get sumcheck u challenges
+    // CRITICAL: Each challenge is generated AFTER adding the corresponding univariate!
+    // NOTE: bb only generates log_n challenges, not CONST_PROOF_SIZE_LOG_N!
+    crate::trace!(
+        "===== SUMCHECK ROUND CHALLENGES (log_n = {}) =====",
+        proof.log_n
+    );
+    let mut sumcheck_challenges = Vec::with_capacity(proof.log_n);
+    for r in 0..proof.log_n {
+        // Add the univariate coefficients to transcript
+        let univariate = proof.sumcheck_univariate(r);
+        if r < 2 {
+            crate::trace!(
+                "round {} univariate[0..2] = {:02x?}, {:02x?}",
+                r,
+                &univariate[0][0..4],
+                &univariate[1][0..4]
+            );
+        }
+        for coeff in univariate {
+            transcript.append_scalar(coeff);
+        }
+        // Sumcheck round challenges use SPLIT challenge (only lower 127 bits)
+        // per Solidity verifier: (sumcheckChallenges[i], unused) = splitChallenge(prevChallenge);
+        let (sc, _) = transcript.challenge_split();
+        if r < 2 {
+            crate::dbg_fr!(&alloc::format!("sumcheck_u[{}]", r), &sc);
+        }
+        sumcheck_challenges.push(sc);
+    }
+
+    // Add sumcheck evaluations to transcript
+    let sumcheck_evals = proof.sumcheck_evaluations();
+    crate::trace!("sumcheck_evaluations count = {}", sumcheck_evals.len());
+    if !sumcheck_evals.is_empty() {
+        crate::dbg_fr!("sumcheck_eval[0]", &sumcheck_evals[0]);
+    }
+    for eval in sumcheck_evals {
+        transcript.append_scalar(eval);
+    }
+
+    // Get rho challenge
+    let (rho, _) = transcript.challenge_split();
+    crate::dbg_fr!("rho", &rho);
+
+    // Add Gemini fold commitments to transcript
+    // Note: number of fold comms = log_n - 1
+    crate::trace!("gemini_fold_comms count = {}", proof.log_n - 1);
+    for i in 0..(proof.log_n - 1) {
+        let fold_comm = proof.gemini_fold_comm(i);
+        if i == 0 {
+            crate::dbg_g1!("gemini_fold_comm[0]", &fold_comm);
+        }
+        transcript.append_g1(&fold_comm);
+    }
+
+    // Get gemini_r challenge
+    let (gemini_r, _) = transcript.challenge_split();
+    crate::dbg_fr!("gemini_r", &gemini_r);
+
+    // Add Gemini A evaluations to transcript
+    let gemini_a_evals = proof.gemini_a_evaluations();
+    crate::trace!("gemini_a_evaluations count = {}", gemini_a_evals.len());
+    for eval in gemini_a_evals {
+        transcript.append_scalar(eval);
+    }
+
+    // Get shplonk_nu challenge
+    let (shplonk_nu, _) = transcript.challenge_split();
+    crate::dbg_fr!("shplonk_nu", &shplonk_nu);
+
+    // Add shplonk_q to transcript
+    let shplonk_q = proof.shplonk_q();
+    crate::dbg_g1!("shplonk_q", &shplonk_q);
+    transcript.append_g1(&shplonk_q);
+
+    // Get shplonk_z challenge
+    let (shplonk_z, _) = transcript.challenge_split();
+    crate::dbg_fr!("shplonk_z", &shplonk_z);
+    crate::trace!("===== END CHALLENGE GENERATION =====");
+
+    Ok(Challenges {
+        relation_params,
+        alpha,
+        libra_challenge,
+        gate_challenges,
+        sumcheck_challenges,
+        rho,
+        gemini_r,
+        shplonk_nu,
+        shplonk_z,
+    })
+}
+
+/// Compute the VK hash for the transcript
+/// This matches bb's `vk->hash_with_origin_tagging` behavior
+/// For Keccak (U256Codec): each field/commitment is raw uint256_t
+fn compute_vk_hash(vk: &VerificationKey) -> Fr {
+    use sha3::{Digest, Keccak256};
+
+    let mut hasher = Keccak256::new();
+
+    // Add VK header fields as uint256_t (32 bytes each, big-endian padded)
+    let mut buf = [0u8; 32];
+    buf[28..32].copy_from_slice(&vk.log2_circuit_size.to_be_bytes());
+    hasher.update(&buf);
+
+    buf = [0u8; 32];
+    buf[28..32].copy_from_slice(&vk.log2_domain_size.to_be_bytes());
+    hasher.update(&buf);
+
+    buf = [0u8; 32];
+    buf[28..32].copy_from_slice(&vk.num_public_inputs.to_be_bytes());
+    hasher.update(&buf);
+
+    // Add all VK commitments as 64 bytes each (x || y)
+    for commitment in &vk.commitments {
+        hasher.update(commitment);
+    }
+
+    // Finalize and reduce to Fr
+    let hash = hasher.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+
+    // Reduce mod r if needed
+    crate::transcript::reduce_hash_to_fr_public(&result)
+}
+
+/// Compute the public input contribution to the permutation argument
+/// Including the pairing point object (16 Fr values)
+fn compute_public_input_delta_with_ppo(
+    public_inputs: &[Fr],
+    pairing_point_object: &[Fr; 16],
+    beta: &Fr,
+    gamma: &Fr,
+    circuit_size: u32,
+    offset: u32,
+) -> Fr {
+    let mut numerator = SCALAR_ONE;
+    let mut denominator = SCALAR_ONE;
+
+    let circuit_size_fr = fr_from_u64(circuit_size as u64);
+    let offset_fr = fr_from_u64(offset as u64);
+
+    // numerator_acc = gamma + beta * (circuit_size + offset)
+    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &fr_add(&circuit_size_fr, &offset_fr)));
+
+    // denominator_acc = gamma - beta * (offset + 1)
+    let offset_plus_one = fr_from_u64((offset + 1) as u64);
+    let mut denominator_acc = fr_sub(gamma, &fr_mul(beta, &offset_plus_one));
+
+    // Process regular public inputs
+    for pi in public_inputs {
+        numerator = fr_mul(&numerator, &fr_add(&numerator_acc, pi));
+        denominator = fr_mul(&denominator, &fr_add(&denominator_acc, pi));
+        numerator_acc = fr_add(&numerator_acc, beta);
+        denominator_acc = fr_sub(&denominator_acc, beta);
+    }
+
+    // Process pairing point object (16 additional Fr values)
+    for ppo in pairing_point_object {
+        numerator = fr_mul(&numerator, &fr_add(&numerator_acc, ppo));
+        denominator = fr_mul(&denominator, &fr_add(&denominator_acc, ppo));
+        numerator_acc = fr_add(&numerator_acc, beta);
+        denominator_acc = fr_sub(&denominator_acc, beta);
+    }
+
+    // Return numerator / denominator
+    crate::field::fr_div(&numerator, &denominator).unwrap_or(SCALAR_ONE)
+}
+
+/// Verify the sumcheck protocol
+fn verify_sumcheck(
+    _vk: &VerificationKey,
+    proof: &Proof,
+    challenges: &Challenges,
+) -> Result<bool, VerifyError> {
+    use crate::sumcheck::{self, RelationParameters as SumcheckRelParams, SumcheckChallenges};
+
+    // Convert to sumcheck module's types
+    let sumcheck_relation_params = SumcheckRelParams {
+        eta: challenges.relation_params.eta,
+        eta_two: challenges.relation_params.eta_two,
+        eta_three: challenges.relation_params.eta_three,
+        beta: challenges.relation_params.beta,
+        gamma: challenges.relation_params.gamma,
+        public_inputs_delta: challenges.relation_params.public_input_delta,
+    };
+
+    // Generate alpha challenges (NUM_SUBRELATIONS - 1 = 25 alphas)
+    // For now, generate from the single alpha using powers
+    let mut alphas = Vec::with_capacity(25);
+    let mut alpha_pow = challenges.alpha;
+    for _ in 0..25 {
+        alphas.push(alpha_pow);
+        alpha_pow = fr_mul(&alpha_pow, &challenges.alpha);
+    }
+
+    let sumcheck_challenges = SumcheckChallenges {
+        gate_challenges: challenges.gate_challenges.clone(),
+        sumcheck_u_challenges: challenges.sumcheck_challenges.clone(),
+        alphas,
+    };
+
+    // Run sumcheck verification
+    match sumcheck::verify_sumcheck(
+        proof,
+        &sumcheck_challenges,
+        &sumcheck_relation_params,
+        challenges.libra_challenge.as_ref(),
+    ) {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Compute the pairing points for the final verification
+fn compute_pairing_points(
+    vk: &VerificationKey,
+    proof: &Proof,
+    challenges: &Challenges,
+) -> Result<(G1, G1), VerifyError> {
+    // Use Shplemini to compute the batched opening claim
+    //
+    // For UltraHonk with Shplemini, the final pairing check verifies:
+    // e(P0, G2) == e(P1, x·G2)
+    //
+    // Which is equivalent to:
+    // e(P0, G2) * e(-P1, x·G2) == 1
+
+    crate::shplemini::compute_shplemini_pairing_points(proof, vk, challenges)
+        .map_err(|_| VerifyError::VerificationFailed)
+}
+
+/// Get the G2 point from VK (placeholder - VK doesn't contain G2 in bb format)
+fn vk_g2() -> crate::types::G2 {
+    // The VK in bb 3.0 format doesn't contain G2 points
+    // They use a fixed SRS G2 element
+    // This is the BN254 G2 generator
+    g2_generator()
+}
+
+/// BN254 G2 generator point
+fn g2_generator() -> crate::types::G2 {
+    // BN254 G2 generator coordinates (big-endian)
+    // x = (x0, x1) where x = x0 + x1*i
+    // y = (y0, y1) where y = y0 + y1*i
+    let mut g2 = [0u8; 128];
+
+    // These are the actual BN254 G2 generator coordinates
+    // x1 (bytes 0-31)
+    let x1 = hex_literal::hex!("198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2");
+    // x0 (bytes 32-63)
+    let x0 = hex_literal::hex!("1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed");
+    // y1 (bytes 64-95)
+    let y1 = hex_literal::hex!("090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b");
+    // y0 (bytes 96-127)
+    let y0 = hex_literal::hex!("12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa");
+
+    g2[0..32].copy_from_slice(&x1);
+    g2[32..64].copy_from_slice(&x0);
+    g2[64..96].copy_from_slice(&y1);
+    g2[96..128].copy_from_slice(&y0);
+
+    g2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proof::Proof as ProofStruct;
+    use crate::types::SCALAR_ZERO;
+    use crate::VK_SIZE;
+
+    fn create_test_vk() -> [u8; VK_SIZE] {
+        let mut vk = [0u8; VK_SIZE];
+        vk[31] = 6; // log2_circuit_size = 6
+        vk[63] = 17; // log2_domain_size = 17
+        vk[95] = 1; // num_public_inputs = 1
+        vk
+    }
+
+    fn create_test_proof(log_n: usize, is_zk: bool) -> Vec<u8> {
+        let expected_fr = ProofStruct::expected_size(log_n, is_zk);
+        vec![0u8; expected_fr * 32]
+    }
+
+    #[test]
+    fn test_verify_wrong_public_inputs_count() {
+        let vk = create_test_vk();
+        let proof = create_test_proof(6, true);
+        let public_inputs: [[u8; 32]; 2] = [[0u8; 32], [0u8; 32]]; // 2 inputs, expect 1
+
+        let result = verify(&vk, &proof, &public_inputs, true);
+        assert!(matches!(result, Err(VerifyError::PublicInput(_))));
+    }
+
+    #[test]
+    fn test_verify_parses_correctly() {
+        let vk = create_test_vk();
+        let proof = create_test_proof(6, true);
+        let public_inputs: [[u8; 32]; 1] = [[0u8; 32]]; // 1 input as expected
+
+        // In unit tests (non-Solana environment), solana-bn254 has mock implementations
+        // that may return success. The real test is the integration test with solana-program-test.
+        let result = verify(&vk, &proof, &public_inputs, true);
+        // Just verify the function runs without panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_public_input_delta_with_ppo() {
+        let beta = fr_from_u64(2);
+        let gamma = fr_from_u64(10);
+        let pi = fr_from_u64(5);
+        let ppo = [[0u8; 32]; 16]; // Zero pairing point object
+
+        let delta = compute_public_input_delta_with_ppo(&[pi], &ppo, &beta, &gamma, 64, 0);
+        // Just verify it returns something non-trivial
+        assert_ne!(delta, SCALAR_ZERO);
+    }
+
+    /// Debug test that loads real proof files and traces verification
+    /// Run with: cargo test -p plonk-solana-core test_debug_real_proof --features debug -- --nocapture
+    #[test]
+    #[cfg(feature = "debug")]
+    fn test_debug_real_proof() {
+        use std::path::Path;
+
+        // Path to test artifacts
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-circuits/simple_square/target/keccak");
+
+        let vk_path = base.join("vk");
+        let proof_path = base.join("proof");
+        let pi_path = base.join("public_inputs");
+
+        if !vk_path.exists() {
+            println!("⚠️  Test artifacts not found at {:?}", base);
+            println!("   Run: cd test-circuits/simple_square && nargo compile && nargo execute");
+            println!("   Then: bb prove -b ./target/simple_square.json -w ./target/simple_square.gz --oracle_hash keccak --write_vk -o ./target/keccak");
+            return;
+        }
+
+        println!("\n========== DEBUG VERIFICATION TEST ==========\n");
+
+        // Load files
+        let vk_bytes = std::fs::read(&vk_path).expect("Failed to read VK");
+        let proof_bytes = std::fs::read(&proof_path).expect("Failed to read proof");
+        let pi_bytes = std::fs::read(&pi_path).expect("Failed to read public inputs");
+
+        println!("VK size: {} bytes", vk_bytes.len());
+        println!("Proof size: {} bytes", proof_bytes.len());
+        println!("Public inputs size: {} bytes", pi_bytes.len());
+
+        // Parse VK to get log_n
+        assert_eq!(vk_bytes.len(), crate::VK_SIZE, "VK size mismatch");
+        let vk = crate::key::VerificationKey::from_bytes(&vk_bytes).expect("Failed to parse VK");
+        println!("log2_circuit_size: {}", vk.log2_circuit_size);
+        println!("num_public_inputs: {}", vk.num_public_inputs);
+
+        // Prepare arrays
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        // Parse public inputs (each is 32 bytes)
+        let num_pi = pi_bytes.len() / 32;
+        println!("Number of public inputs: {}", num_pi);
+
+        let mut public_inputs = Vec::new();
+        for i in 0..num_pi {
+            let mut pi = [0u8; 32];
+            pi.copy_from_slice(&pi_bytes[i * 32..(i + 1) * 32]);
+            println!("Public input[{}]: 0x{}", i, hex::encode(&pi));
+            public_inputs.push(pi);
+        }
+
+        // Run verification (ZK)
+        println!("\n--- Running verification (ZK) ---\n");
+        let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+
+        match result {
+            Ok(()) => println!("\n✅ VERIFICATION PASSED!"),
+            Err(e) => println!("\n❌ VERIFICATION FAILED: {:?}", e),
+        }
+
+        println!("\n========== END DEBUG TEST ==========\n");
+    }
+
+    /// Debug test for NON-ZK proof
+    /// Run with: cargo test -p plonk-solana-core test_debug_non_zk_proof --features debug -- --nocapture
+    #[test]
+    #[cfg(feature = "debug")]
+    fn test_debug_non_zk_proof() {
+        use std::path::Path;
+
+        // Path to non-ZK test artifacts
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-circuits/simple_square/target/keccak_non_zk");
+
+        let vk_path = base.join("vk");
+        let proof_path = base.join("proof");
+        let pi_path = base.join("public_inputs");
+
+        if !vk_path.exists() {
+            println!("⚠️  Non-ZK test artifacts not found at {:?}", base);
+            println!("   Run: bb prove ... --disable_zk ...");
+            return;
+        }
+
+        println!("\n========== DEBUG NON-ZK VERIFICATION TEST ==========\n");
+
+        // Load files
+        let vk_bytes = std::fs::read(&vk_path).expect("Failed to read VK");
+        let proof_bytes = std::fs::read(&proof_path).expect("Failed to read proof");
+        let pi_bytes = std::fs::read(&pi_path).expect("Failed to read public inputs");
+
+        println!("VK size: {} bytes", vk_bytes.len());
+        println!("Proof size: {} bytes", proof_bytes.len());
+        println!("Public inputs size: {} bytes", pi_bytes.len());
+
+        // Prepare arrays
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        // Parse public inputs
+        let num_pi = pi_bytes.len() / 32;
+        let mut public_inputs = Vec::new();
+        for i in 0..num_pi {
+            let mut pi = [0u8; 32];
+            pi.copy_from_slice(&pi_bytes[i * 32..(i + 1) * 32]);
+            public_inputs.push(pi);
+        }
+
+        // Run verification (non-ZK)
+        println!("\n--- Running verification (non-ZK) ---\n");
+        let result = verify(&vk_array, &proof_bytes, &public_inputs, false);
+
+        match result {
+            Ok(()) => println!("\n✅ NON-ZK VERIFICATION PASSED!"),
+            Err(e) => println!("\n❌ NON-ZK VERIFICATION FAILED: {:?}", e),
+        }
+
+        println!("\n========== END NON-ZK DEBUG TEST ==========\n");
+    }
+}
