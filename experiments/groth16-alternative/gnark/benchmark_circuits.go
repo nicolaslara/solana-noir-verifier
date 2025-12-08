@@ -156,8 +156,8 @@ func runBenchmarks() {
 		results = append(results, result)
 	}
 
-	// 4. Iterated Squares
-	for _, iters := range []int{100, 1000, 10000} {
+	// 4. Iterated Squares (including large circuits up to 1M)
+	for _, iters := range []int{1000, 10000, 100000, 200000, 500000, 1000000} {
 		result := benchmarkIteratedSquare(iters)
 		results = append(results, result)
 	}

@@ -144,7 +144,7 @@ func mainBenchmark() {
 	fmt.Println("Testing different circuit sizes to measure proving time scaling")
 
 	// Default sizes to test
-	sizes := []int{100, 1000, 10000}
+	sizes := []int{100, 1000, 10000, 100000}
 
 	// Check if custom size provided
 	if len(os.Args) > 2 {

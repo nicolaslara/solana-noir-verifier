@@ -23,14 +23,18 @@ Simple square circuit: prove knowledge of `x` such that `x * x == y`
 | **VK size**                    | ~2 KB            | 488 bytes       |
 | **Solana CU**                  | ~200K-400K (est) | **<200K**       |
 
-### Scalability (gnark Groth16 benchmarks)
+### Scalability (gnark Groth16 benchmarks - Apple Silicon)
 
-| Constraints | Compile | Setup  | Prove      | Verify | Proof Size | Throughput |
-| ----------- | ------- | ------ | ---------- | ------ | ---------- | ---------- |
-| 101         | 440µs   | 11.7ms | **2.8ms**  | 1.5ms  | 256 bytes  | 36K c/s    |
-| 1,001       | 467µs   | 79.5ms | **11.6ms** | 1.1ms  | 256 bytes  | 87K c/s    |
-| 10,001      | 5.6ms   | 716ms  | **61.7ms** | 1.1ms  | 256 bytes  | 162K c/s   |
-| 100,001     | 52ms    | 5.5s   | **431ms**  | 1.1ms  | 256 bytes  | 232K c/s   |
+| Constraints   | Setup  | **Prove**  | Verify | Proof Size | Throughput |
+| ------------- | ------ | ---------- | ------ | ---------- | ---------- |
+| 1,001         | 78ms   | **10ms**   | 1ms    | 256 bytes  | 100K c/s   |
+| 10,001        | 591ms  | **60ms**   | 1ms    | 256 bytes  | 170K c/s   |
+| 100,001       | 6.2s   | **469ms**  | 1ms    | 256 bytes  | 213K c/s   |
+| 200,001       | 11.6s  | **898ms**  | 1ms    | 256 bytes  | 223K c/s   |
+| 500,001       | 26s    | **1.76s**  | 1ms    | 256 bytes  | 284K c/s   |
+| **1,000,001** | 53s    | **3.94s**  | 1ms    | 256 bytes  | 254K c/s   |
+
+### 🚀 Key Insight: 1 Million Constraints in ~4 seconds!
 
 ## Key Observations
 
