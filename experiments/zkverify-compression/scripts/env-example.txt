@@ -1,0 +1,16 @@
+# Copy this to .env and fill in the values
+
+# zkVerify SDK (for 3-submit-zkverify.mjs)
+# Get testnet $tVFY tokens from zkVerify faucet
+SEED_PHRASE="your twelve word seed phrase for zkverify volta testnet"
+
+# zkVerify Relayer API (for 3-submit-relayer.mjs)
+# Get API key from zkVerify dashboard
+API_KEY="your-relayer-api-key"
+
+# Solana Configuration (for 4-verify-solana.mjs)
+SOLANA_RPC="http://localhost:8899"
+
+# Groth16 Verifier Program ID (from groth16-alternative deployment)
+VERIFIER_PROGRAM_ID="Verify1111111111111111111111111111111111111"
+
