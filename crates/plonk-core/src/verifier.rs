@@ -283,17 +283,19 @@ fn generate_challenges(
     };
 
     // Get sumcheck u challenges
-    // CRITICAL: Each challenge is generated AFTER adding the corresponding univariate!
-    // NOTE: bb only generates log_n challenges, not CONST_PROOF_SIZE_LOG_N!
+    // Per Solidity verifier: ONE hash per round, take ONLY lower 128 bits, discard upper!
+    // See generateSumcheckChallenges in the generated HonkVerifier.sol
     crate::trace!(
         "===== SUMCHECK ROUND CHALLENGES (log_n = {}) =====",
         proof.log_n
     );
     let mut sumcheck_challenges = Vec::with_capacity(proof.log_n);
+
     for r in 0..proof.log_n {
-        // Add the univariate coefficients to transcript
         let univariate = proof.sumcheck_univariate(r);
-        if r < 2 {
+
+        // Add univariate to transcript (one hash per round)
+        if r < 3 {
             crate::trace!(
                 "round {} univariate[0..2] = {:02x?}, {:02x?}",
                 r,
@@ -304,13 +306,14 @@ fn generate_challenges(
         for coeff in univariate {
             transcript.append_scalar(coeff);
         }
-        // Sumcheck round challenges use SPLIT challenge (only lower 127 bits)
-        // per Solidity verifier: (sumcheckChallenges[i], unused) = splitChallenge(prevChallenge);
-        let (sc, _) = transcript.challenge_split();
-        if r < 2 {
-            crate::dbg_fr!(&alloc::format!("sumcheck_u[{}]", r), &sc);
+
+        // Hash and split - ONLY use lower 128 bits, discard upper (matches Solidity)
+        let (lo, _hi) = transcript.challenge_split();
+
+        if r < 3 {
+            crate::dbg_fr!(&alloc::format!("sumcheck_u[{}]", r), &lo);
         }
-        sumcheck_challenges.push(sc);
+        sumcheck_challenges.push(lo);
     }
 
     // Add sumcheck evaluations to transcript

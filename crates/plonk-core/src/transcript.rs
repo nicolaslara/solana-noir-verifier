@@ -178,80 +178,21 @@ fn sub_no_borrow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     }
     result
 }
-/// Split a 254-bit challenge into two 127-bit values.
-/// bb splits at bit 127: lo = bits[0..127], hi = bits[127..254]
-/// Returns (lower_127_bits, upper_127_bits) as Fr elements.
+/// Split a 256-bit challenge into two 128-bit values.
+/// Matches Solidity: lo = challengeU256 & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF (128 bits)
+///                   hi = challengeU256 >> 128
+/// Returns (lower_128_bits, upper_128_bits) as Fr elements.
 fn split_challenge(challenge: &Fr) -> (Fr, Fr) {
-    // Convert challenge from big-endian bytes to little-endian u64 limbs
-    // limbs[0] = bits 0-63, limbs[1] = bits 64-127, etc.
-    let limbs: [u64; 4] = [
-        u64::from_le_bytes([
-            challenge[31],
-            challenge[30],
-            challenge[29],
-            challenge[28],
-            challenge[27],
-            challenge[26],
-            challenge[25],
-            challenge[24],
-        ]),
-        u64::from_le_bytes([
-            challenge[23],
-            challenge[22],
-            challenge[21],
-            challenge[20],
-            challenge[19],
-            challenge[18],
-            challenge[17],
-            challenge[16],
-        ]),
-        u64::from_le_bytes([
-            challenge[15],
-            challenge[14],
-            challenge[13],
-            challenge[12],
-            challenge[11],
-            challenge[10],
-            challenge[9],
-            challenge[8],
-        ]),
-        u64::from_le_bytes([
-            challenge[7],
-            challenge[6],
-            challenge[5],
-            challenge[4],
-            challenge[3],
-            challenge[2],
-            challenge[1],
-            challenge[0],
-        ]),
-    ];
+    // Challenge is 32 bytes big-endian
+    // lo = lower 16 bytes (bytes 16..32), hi = upper 16 bytes (bytes 0..16)
 
-    // lo = bits 0..127 (127 bits)
-    // This is: all 64 bits of limbs[0] + lower 63 bits of limbs[1]
-    let lo_limb0 = limbs[0];
-    let lo_limb1 = limbs[1] & ((1u64 << 63) - 1);
-
-    // hi = bits 127..254 (127 bits)
-    // bit 127 is the MSB of limbs[1]
-    // bits 128-191 are limbs[2]
-    // bits 192-254 are lower 63 bits of limbs[3]
-    // We need to pack these into two 64-bit limbs for hi:
-    // hi_limb0 = bit127 (1 bit) | bits128-190 (63 bits from limbs[2]) = 64 bits
-    // hi_limb1 = bit191 (from limbs[2]) | bits192-253 (62 bits from limbs[3]) = 63 bits
-    let hi_limb0 = (limbs[1] >> 63) | ((limbs[2] & 0x7FFF_FFFF_FFFF_FFFF) << 1);
-    let hi_limb1 = (limbs[2] >> 63) | ((limbs[3] & 0x3FFF_FFFF_FFFF_FFFF) << 1);
-
-    // Convert back to big-endian Fr bytes
-    // For a value with limbs [l0, l1, 0, 0], the big-endian bytes are:
-    // [0..16] = zeros, [16..24] = l1 big-endian, [24..32] = l0 big-endian
+    // Lower 128 bits: bytes 16..32 of the big-endian representation
     let mut lower = SCALAR_ZERO;
-    lower[24..32].copy_from_slice(&lo_limb0.to_be_bytes());
-    lower[16..24].copy_from_slice(&lo_limb1.to_be_bytes());
+    lower[16..32].copy_from_slice(&challenge[16..32]);
 
+    // Upper 128 bits: bytes 0..16 of the big-endian representation
     let mut upper = SCALAR_ZERO;
-    upper[24..32].copy_from_slice(&hi_limb0.to_be_bytes());
-    upper[16..24].copy_from_slice(&hi_limb1.to_be_bytes());
+    upper[16..32].copy_from_slice(&challenge[0..16]);
 
     (lower, upper)
 }
@@ -762,6 +703,8 @@ fn test_full_challenge_chain() {
 
     // Compare with our debug output
     println!("\nExpected from debug:");
-    println!("gate_challenge_full: 16f6a95b6af3024dbea95d58c58ec7dc600583509d216a2b42494c3c9aeb4c42");
+    println!(
+        "gate_challenge_full: 16f6a95b6af3024dbea95d58c58ec7dc600583509d216a2b42494c3c9aeb4c42"
+    );
     println!("libra_challenge: 4fcd4587b42514cc22bab3a051962383");
 }

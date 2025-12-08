@@ -493,3 +493,8 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 | Dec 2024 | **🚨 VK HASH MISMATCH CONFIRMED** - our hash != bb's actual hash    |
 |          | bb's vk_hash: 0x093e299e...a85a75                                   |
 |          | Our computed: 0x208bd978...606d1d (WRONG!)                          |
+| Dec 2024 | **🔧 SUMCHECK CHALLENGE GENERATION FIXED!**                         |
+|          | Bug 1: split_challenge used 127 bits, Solidity uses 128 bits        |
+|          | Bug 2: We cached hi for odd rounds, Solidity discards hi every time |
+|          | All 6 sumcheck rounds now pass!                                     |
+|          | Next: Fix relation accumulation (grand != target)                   |

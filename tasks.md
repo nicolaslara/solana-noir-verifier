@@ -73,11 +73,12 @@ cargo test -p example-verifier --test integration_test
 - [x] Proof parsing for bb 3.0 format (now variable-size!)
 - [x] Field arithmetic (add, sub, mul, inv, div)
 - [x] Fiat-Shamir transcript with Keccak256
-- [x] Challenge split (lower/upper 128 bits)
+- [x] Challenge split (lower/upper 128 bits) **FIXED! Was 127 bits, Solidity uses 128**
 - [x] Public input delta calculation
 - [x] **Understand proof format: variable size based on log_circuit_size**
 - [x] **Proof DOES contain sumcheck data inline**
 - [x] **Sumcheck round verification (barycentric interpolation)**
+- [x] **All 6 sumcheck rounds pass!** Fixed challenge gen to match Solidity verifier
 - [x] **All 26 subrelations implemented (relations.rs)**
 - [x] **Shplemini structure implemented (shplemini.rs)**
 - [x] **Pairing check wired up**
