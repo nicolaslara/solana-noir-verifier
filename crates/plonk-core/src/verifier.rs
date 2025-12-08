@@ -327,6 +327,45 @@ fn generate_challenges(
         transcript.append_scalar(eval);
     }
 
+    // For ZK proofs, add additional elements before rho challenge:
+    // - libraEvaluation
+    // - libraCommitments[1] (x, y)
+    // - libraCommitments[2] (x, y)
+    // - geminiMaskingPoly (x, y)
+    // - geminiMaskingEval
+    if proof.is_zk {
+        // libraEvaluation
+        if let Some(libra_eval) = proof.libra_evaluation() {
+            transcript.append_scalar(&libra_eval);
+            crate::dbg_fr!("rho transcript: libra_eval", &libra_eval);
+        }
+
+        // libraCommitments[1] and [2] (these are the "grand sum" and "quotient" commitments)
+        // From Solidity: libraCommitments[1].x, libraCommitments[1].y, libraCommitments[2].x, libraCommitments[2].y
+        if let Some(libra_comms) = proof.libra_commitments() {
+            // libra_comms[0] is already included earlier
+            // libra_comms[1] and libra_comms[2] are added here
+            if libra_comms.len() >= 3 {
+                transcript.append_g1(&libra_comms[1]);
+                transcript.append_g1(&libra_comms[2]);
+                crate::dbg_g1!("rho transcript: libra_comm[1]", &libra_comms[1]);
+                crate::dbg_g1!("rho transcript: libra_comm[2]", &libra_comms[2]);
+            }
+        }
+
+        // geminiMaskingPoly
+        if let Some(masking_poly) = proof.gemini_masking_commitment() {
+            transcript.append_g1(&masking_poly);
+            crate::dbg_g1!("rho transcript: gemini_masking_poly", &masking_poly);
+        }
+
+        // geminiMaskingEval
+        if let Some(masking_eval) = proof.gemini_masking_eval() {
+            transcript.append_scalar(&masking_eval);
+            crate::dbg_fr!("rho transcript: gemini_masking_eval", &masking_eval);
+        }
+    }
+
     // Get rho challenge
     let (rho, _) = transcript.challenge_split();
     crate::dbg_fr!("rho", &rho);

@@ -250,6 +250,38 @@ impl Proof {
         Some(g1)
     }
 
+    /// Get all 3 libra commitments (ZK only)
+    /// Returns [libra_concat, libra_grand_sum, libra_quotient]
+    pub fn libra_commitments(&self) -> Option<[G1; 3]> {
+        if !self.is_zk {
+            return None;
+        }
+
+        // libra_concat (libraCommitments[0]) is at offset 32
+        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
+        let mut libra_concat = [0u8; 64];
+        libra_concat[0..32].copy_from_slice(&self.data[base_offset]);
+        libra_concat[32..64].copy_from_slice(&self.data[base_offset + 1]);
+
+        // libra_grand_sum (libraCommitments[1]) and libra_quotient (libraCommitments[2])
+        // are after: libra_concat(2) + libra_sum(1) + univariates + sumcheck_evals(41) + libra_eval(1)
+        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
+        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
+        let evals_size = NUM_ALL_ENTITIES;
+        // After evals: libra_eval is at +0, grand_sum is at +1, quotient is at +3
+        let grand_sum_offset = base_offset + zk_libra_start + univariates_size + evals_size + 1;
+
+        let mut libra_grand_sum = [0u8; 64];
+        libra_grand_sum[0..32].copy_from_slice(&self.data[grand_sum_offset]);
+        libra_grand_sum[32..64].copy_from_slice(&self.data[grand_sum_offset + 1]);
+
+        let mut libra_quotient = [0u8; 64];
+        libra_quotient[0..32].copy_from_slice(&self.data[grand_sum_offset + 2]);
+        libra_quotient[32..64].copy_from_slice(&self.data[grand_sum_offset + 3]);
+
+        Some([libra_concat, libra_grand_sum, libra_quotient])
+    }
+
     /// Get sumcheck univariates for a specific round
     /// Returns 8 Fr values for non-ZK or 9 Fr values for ZK
     pub fn sumcheck_univariate(&self, round: usize) -> &[Fr] {
@@ -324,6 +356,34 @@ impl Proof {
                 univariates_size,
                 evals_size
             );
+        }
+
+        Some(self.data[offset])
+    }
+
+    /// Get gemini masking evaluation (ZK only)
+    /// This is the batchedEvaluation starting point in Shplemini
+    pub fn gemini_masking_eval(&self) -> Option<Fr> {
+        if !self.is_zk {
+            return None;
+        }
+        // ZK structure after sumcheck_evaluations:
+        // libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
+        // masking_eval is at offset 7 (1 + 2 + 2 + 2 = 7)
+        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
+        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
+        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
+        let evals_size = NUM_ALL_ENTITIES;
+
+        let offset = base_offset + zk_libra_start + univariates_size + evals_size + 7;
+
+        #[cfg(feature = "debug")]
+        {
+            crate::trace!(
+                "gemini_masking_eval offset: {} (should be geminiMaskingEval)",
+                offset
+            );
+            crate::dbg_fr!("gemini_masking_eval", &self.data[offset]);
         }
 
         Some(self.data[offset])

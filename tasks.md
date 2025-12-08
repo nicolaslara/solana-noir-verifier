@@ -67,6 +67,16 @@ cargo test -p example-verifier --test integration_test
 - [x] **Fixed NUM_ALL_ENTITIES to 41 for both ZK and non-ZK**
 - [x] **Fixed public_input_delta: uses SEPARATOR (1<<28) not circuit_size**
 - [x] **Fixed subrelation index mapping (lookup 4-6, range 7-10, etc.)**
+- [x] **Fixed split_challenge to 128-bit (matching Solidity)**
+- [x] **Fixed public_inputs_delta offset (1, not 0)**
+- [x] **Fixed Poseidon internal diagonal matrix constants**
+- [x] **Implemented full Memory relation (subrel 13-18)**
+- [x] **Implemented full NNF relation (subrel 19)**
+- [x] **All 28 subrelations now match Solidity! ✅**
+- [x] **SUMCHECK VERIFICATION PASSES! ✅**
+- [x] **Fixed rho challenge generation (add ZK elements to transcript)**
+- [x] **batchedEvaluation matches Solidity**
+- [x] **P1 negation fixed (negate KZG quotient)**
 
 ---
 
@@ -95,21 +105,33 @@ cargo test -p example-verifier --test integration_test
 - [ ] **Full MSM computation in shplemini**
 - [ ] **End-to-end verification passing**
 
-### Current Debugging Focus: Relation Accumulation
+### Current Focus: Shplemini Verification (Pairing Check)
 
-The sumcheck rounds pass but the final relation check fails:
+**Status:** Sumcheck passes ✅, Shplemini failing ❌
 
-- Expected grand_before_ZK: 0x2dc50ff0...
-- Actual grand_before_ZK: 0x0e8fbe33...
+**What works:**
 
-**Root cause identified:** For simple_square circuit:
+- All 28 subrelation values match Solidity exactly
+- grand_relation computation correct
+- ZK adjustment applied correctly
+- Rho challenge matches Solidity
+- batchedEvaluation matches Solidity
+- P1 correctly negated
 
-- Only 4 subrelations should be non-zero (arith 0-1, perm 2-3)
-- Actually seeing 21 non-zero: [0-12, 20-27]
-- Leaking relations: lookup, range, elliptic, poseidon
-- Correctly zero: memory (13-18), NNF (19)
+**Remaining issues:**
 
-**Next step:** Use Foundry to compare individual subrelation values with Solidity
+1. **const_acc (constantTermAccumulator)** - Our implementation differs from Solidity
+   - Need to compute foldPosEvaluations correctly
+   - Need proper gemini A evaluation contributions
+2. **P0 computation** - Currently simplified, needs full MSM
+   - Need to include all VK commitments (28 points)
+   - Need to include all proof wire commitments (8 points)
+   - Need gemini fold commitments (log_n - 1 points)
+   - Need libra commitments (3 points)
+3. **Pairing point aggregation**
+   - Need to decode pairingPointObject to P_0_other, P_1_other
+   - Need recursionSeparator computation
+   - Need mulWithSeparator aggregation
 
 ### Completed Debugging (All Verified Correct)
 

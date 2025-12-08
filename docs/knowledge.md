@@ -570,4 +570,18 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 |          | Bug 1: split_challenge used 127 bits, Solidity uses 128 bits        |
 |          | Bug 2: We cached hi for odd rounds, Solidity discards hi every time |
 |          | All 6 sumcheck rounds now pass!                                     |
-|          | Next: Fix relation accumulation (grand != target)                   |
+| Dec 2024 | **✅ FULL SUMCHECK VERIFICATION PASSES!**                           |
+|          | Fixed: public_inputs_delta offset (1 not 0)                         |
+|          | Fixed: Poseidon internal diagonal matrix constants                  |
+|          | Fixed: Memory relation (subrel 13-18) - full implementation         |
+|          | Fixed: NNF relation (subrel 19) - full implementation               |
+|          | All 28 subrelations now match Solidity!                             |
+| Dec 2024 | **🔧 Rho challenge generation fixed for ZK proofs**                 |
+|          | Must append: libra_eval, libra_comms[1,2], geminiMaskingPoly/Eval   |
+|          | Rho now matches Solidity exactly!                                   |
+| Dec 2024 | **⏳ Shplemini verification in progress**                           |
+|          | batchedEvaluation matches Solidity                                  |
+|          | P1 negation fixed (negate KZG quotient)                             |
+|          | TODO: const_acc computation (fold evaluations)                      |
+|          | TODO: Full MSM with all VK/proof commitments                        |
+|          | TODO: Pairing point aggregation with proof.pairingPointObject       |
