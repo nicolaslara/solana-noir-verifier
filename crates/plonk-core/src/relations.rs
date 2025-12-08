@@ -608,16 +608,14 @@ pub fn accumulate_relation_evaluations(
     let mut out = vec![SCALAR_ZERO; NUM_SUBRELATIONS];
 
     accumulate_arithmetic(evals, &mut out, pow_partial);
-    // accumulate_permutation(evals, rp, &mut out, pow_partial);
-
-    // DEBUG: Disable ALL non-arithmetic relations
-    // accumulate_lookup(evals, rp, &mut out, pow_partial);
-    // accumulate_range(evals, &mut out, pow_partial);
-    // accumulate_elliptic(evals, &mut out, pow_partial);
-    // accumulate_memory(evals, rp, &mut out, pow_partial);
-    // accumulate_nnf(evals, &mut out, pow_partial);
-    // accumulate_poseidon_external(evals, &mut out, pow_partial);
-    // accumulate_poseidon_internal(evals, &mut out, pow_partial);
+    accumulate_permutation(evals, rp, &mut out, pow_partial);
+    accumulate_lookup(evals, rp, &mut out, pow_partial);
+    accumulate_range(evals, &mut out, pow_partial);
+    accumulate_elliptic(evals, &mut out, pow_partial);
+    accumulate_memory(evals, rp, &mut out, pow_partial);
+    accumulate_nnf(evals, &mut out, pow_partial);
+    accumulate_poseidon_external(evals, &mut out, pow_partial);
+    accumulate_poseidon_internal(evals, &mut out, pow_partial);
 
     // Debug: print non-zero subrelation values
     #[cfg(feature = "debug")]

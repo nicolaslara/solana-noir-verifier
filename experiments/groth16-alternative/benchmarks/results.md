@@ -13,15 +13,15 @@ Simple square circuit: prove knowledge of `x` such that `x * x == y`
 
 ### Small Circuit (simple_square, 2 constraints)
 
-| Metric                         | UltraHonk (bb)   | Groth16 (gnark)   |
-| ------------------------------ | ---------------- | ----------------- |
-| **Compile time**               | ~50ms            | ~300µs            |
-| **Setup time**                 | N/A (universal)  | ~2ms              |
-| **Proving time**               | ~100ms           | ~800µs            |
-| **Verification time (native)** | ~1ms             | ~1ms              |
-| **Proof size**                 | **~5,184 bytes** | **256 bytes** 🏆  |
-| **VK size**                    | ~2 KB            | 576 bytes         |
-| **Solana CU (measured)**       | ~200K-400K (est) | **81K CU** 🏆     |
+| Metric                         | UltraHonk (bb)   | Groth16 (gnark)  |
+| ------------------------------ | ---------------- | ---------------- |
+| **Compile time**               | ~50ms            | ~300µs           |
+| **Setup time**                 | N/A (universal)  | ~2ms             |
+| **Proving time**               | ~100ms           | ~800µs           |
+| **Verification time (native)** | ~1ms             | ~1ms             |
+| **Proof size**                 | **~5,184 bytes** | **256 bytes** 🏆 |
+| **VK size**                    | ~2 KB            | 576 bytes        |
+| **Solana CU (measured)**       | ~200K-400K (est) | **81K CU** 🏆    |
 
 ### Scalability (gnark Groth16 benchmarks - Apple Silicon)
 
