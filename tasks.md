@@ -81,9 +81,27 @@ cargo test -p example-verifier --test integration_test
 - [x] **All 26 subrelations implemented (relations.rs)**
 - [x] **Shplemini structure implemented (shplemini.rs)**
 - [x] **Pairing check wired up**
+- [x] **📚 Theoretical documentation (docs/theory.md)**
+- [x] **🧪 Validation script (scripts/validate_theory.py)**
 - [ ] **Debug: validate challenges match bb exactly**
 - [ ] **Full MSM computation in shplemini**
 - [ ] **End-to-end verification passing**
+
+### Debugging Priority (See docs/theory.md Section 13)
+
+1. **Challenge Matching** - Most likely source of failures
+   - VK hash computation
+   - Transcript element ordering
+   - Challenge split boundaries (127-bit)
+2. **Sumcheck Verification** - Round-by-round check
+   - Initial target for ZK = libra_sum × libra_challenge
+   - Barycentric interpolation for next_target
+3. **Relation Evaluation** - 26 subrelations
+   - Arithmetic (0-1) and Permutation (2-3) are critical
+   - Many others may be zero for simple circuits
+4. **Shplemini MSM** - Final pairing point computation
+   - Currently using simplified placeholder
+   - Needs full ~70 commitment MSM
 
 ---
 

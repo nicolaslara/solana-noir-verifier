@@ -434,9 +434,38 @@ We've updated the proof parser to handle variable-size proofs:
 
 ### Remaining Work
 
-- Fix VK hash computation to match bb's exactly
+- **🚨 CRITICAL: Fix VK hash computation** - See finding below
 - Verify all transcript fields are in correct order
 - Verify encoding of all fields matches bb
+
+---
+
+## 🚨 CRITICAL: VK Hash Mismatch (Dec 2024)
+
+**Discovery:** Running `bb verify -d ...` shows the actual VK hash used internally:
+
+```bash
+bb verify -d -p ./target/keccak/proof -k ./target/keccak/vk \
+  -i ./target/keccak/public_inputs --oracle_hash keccak
+
+# Output includes:
+# vk hash in Oink verifier: 0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
+```
+
+**Our computed value is DIFFERENT:**
+
+```
+Our compute_vk_hash():    0x208bd97838d91de580261bed943ed295c712c7fb7851189c7dedae7473606d1d
+bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
+```
+
+**Impact:** This is the ROOT CAUSE of all verification failures. The VK hash is the first thing added to the transcript, so if it's wrong, ALL subsequent challenges (η, β, γ, α, etc.) will be wrong.
+
+**Next Steps:**
+
+1. Study bb's source code for VK hash computation
+2. Look at generated Solidity verifiers for reference
+3. The hash likely includes different field encoding or additional metadata
 
 ---
 
@@ -459,3 +488,8 @@ We've updated the proof parser to handle variable-size proofs:
 | Dec 2024 | **G1 uses 136-bit split in transcript (128 bytes, not 64!)**        |
 | Dec 2024 | **ZK initial target = libra_sum × libra_challenge**                 |
 | Dec 2024 | **VK hash must be added to transcript first**                       |
+| Dec 2024 | 📚 Created docs/theory.md - complete UltraHonk theory walkthrough   |
+| Dec 2024 | 🧪 Created scripts/validate_theory.py - proof data validation       |
+| Dec 2024 | **🚨 VK HASH MISMATCH CONFIRMED** - our hash != bb's actual hash    |
+|          | bb's vk_hash: 0x093e299e...a85a75                                   |
+|          | Our computed: 0x208bd978...606d1d (WRONG!)                          |

@@ -66,6 +66,29 @@ const BARY_8: [[u8; 32]; 8] = [
     hex_to_bytes32("00000000000000000000000000000000000000000000000000000000000013b0"),
 ];
 
+/// Barycentric interpolation coefficients for 9-point evaluation (ZK proofs)
+/// d_i = product((i-j) for j != i) for i in 0..9
+const BARY_9: [[u8; 32]; 9] = [
+    // d_0 = 40320 = 8!
+    hex_to_bytes32("0000000000000000000000000000000000000000000000000000000000009d80"),
+    // d_1 = -5040 mod r
+    hex_to_bytes32("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffec51"),
+    // d_2 = 1440
+    hex_to_bytes32("00000000000000000000000000000000000000000000000000000000000005a0"),
+    // d_3 = -720 mod r
+    hex_to_bytes32("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effffd31"),
+    // d_4 = 576
+    hex_to_bytes32("0000000000000000000000000000000000000000000000000000000000000240"),
+    // d_5 = -720 mod r
+    hex_to_bytes32("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effffd31"),
+    // d_6 = 1440
+    hex_to_bytes32("00000000000000000000000000000000000000000000000000000000000005a0"),
+    // d_7 = -5040 mod r
+    hex_to_bytes32("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffec51"),
+    // d_8 = 40320
+    hex_to_bytes32("0000000000000000000000000000000000000000000000000000000000009d80"),
+];
+
 /// Convert hex string to 32-byte array at compile time
 const fn hex_to_bytes32(hex: &str) -> [u8; 32] {
     let bytes = hex.as_bytes();
@@ -98,12 +121,14 @@ fn check_round_sum(univariate: &[Fr], target: &Fr) -> bool {
 }
 
 /// Calculate next target using barycentric interpolation
-/// B(χ) = ∏(χ - i) for i in 0..8
+/// B(χ) = ∏(χ - i) for i in 0..n
 /// result = B(χ) * Σ(u[i] / (BARY[i] * (χ - i)))
-fn next_target(univariate: &[Fr], chi: &Fr) -> Result<Fr, &'static str> {
-    // Compute B(χ) = ∏(χ - i) for i in 0..8
+fn next_target(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
+    let n = if is_zk { 9 } else { 8 };
+
+    // Compute B(χ) = ∏(χ - i) for i in 0..n
     let mut b = SCALAR_ONE;
-    for i in 0..8 {
+    for i in 0..n {
         let i_fr = fr_from_u64(i as u64);
         let chi_minus_i = fr_sub(chi, &i_fr);
         b = fr_mul(&b, &chi_minus_i);
@@ -111,12 +136,15 @@ fn next_target(univariate: &[Fr], chi: &Fr) -> Result<Fr, &'static str> {
 
     // Compute Σ(u[i] / (BARY[i] * (χ - i)))
     let mut acc = SCALAR_ZERO;
-    for i in 0..8 {
+    for i in 0..n {
         let i_fr = fr_from_u64(i as u64);
         let chi_minus_i = fr_sub(chi, &i_fr);
 
+        // Get barycentric coefficient (use BARY_9 for ZK, BARY_8 otherwise)
+        let bary_i = if is_zk { &BARY_9[i] } else { &BARY_8[i] };
+
         // denom = BARY[i] * (χ - i)
-        let denom = fr_mul(&BARY_8[i], &chi_minus_i);
+        let denom = fr_mul(bary_i, &chi_minus_i);
 
         // inv = 1 / denom
         let inv = fr_inv(&denom).ok_or("denominator is zero in barycentric")?;
@@ -211,7 +239,8 @@ fn verify_sumcheck_rounds(
         }
 
         // Compute next target using barycentric interpolation
-        target = next_target(univariate, chi).map_err(|_| "barycentric interpolation failed")?;
+        target =
+            next_target(univariate, chi, proof.is_zk).map_err(|_| "barycentric interpolation failed")?;
         if round < 3 {
             crate::dbg_fr!("next_target", &target);
         }
