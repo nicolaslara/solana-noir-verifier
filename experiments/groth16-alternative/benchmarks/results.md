@@ -13,26 +13,26 @@ Simple square circuit: prove knowledge of `x` such that `x * x == y`
 
 ### Small Circuit (simple_square, 2 constraints)
 
-| Metric                         | UltraHonk (bb)   | Groth16 (gnark) |
-| ------------------------------ | ---------------- | --------------- |
-| **Compile time**               | ~50ms            | ~300µs          |
-| **Setup time**                 | N/A (universal)  | ~2ms            |
-| **Proving time**               | ~100ms           | ~800µs          |
-| **Verification time (native)** | ~1ms             | ~1.1ms          |
-| **Proof size**                 | **~5,184 bytes** | **256 bytes**   |
-| **VK size**                    | ~2 KB            | 488 bytes       |
-| **Solana CU**                  | ~200K-400K (est) | **<200K**       |
+| Metric                         | UltraHonk (bb)   | Groth16 (gnark)   |
+| ------------------------------ | ---------------- | ----------------- |
+| **Compile time**               | ~50ms            | ~300µs            |
+| **Setup time**                 | N/A (universal)  | ~2ms              |
+| **Proving time**               | ~100ms           | ~800µs            |
+| **Verification time (native)** | ~1ms             | ~1ms              |
+| **Proof size**                 | **~5,184 bytes** | **256 bytes** 🏆  |
+| **VK size**                    | ~2 KB            | 576 bytes         |
+| **Solana CU (measured)**       | ~200K-400K (est) | **81K CU** 🏆     |
 
 ### Scalability (gnark Groth16 benchmarks - Apple Silicon)
 
-| Constraints   | Setup  | **Prove**  | Verify | Proof Size | Throughput |
-| ------------- | ------ | ---------- | ------ | ---------- | ---------- |
-| 1,001         | 78ms   | **10ms**   | 1ms    | 256 bytes  | 100K c/s   |
-| 10,001        | 591ms  | **60ms**   | 1ms    | 256 bytes  | 170K c/s   |
-| 100,001       | 6.2s   | **469ms**  | 1ms    | 256 bytes  | 213K c/s   |
-| 200,001       | 11.6s  | **898ms**  | 1ms    | 256 bytes  | 223K c/s   |
-| 500,001       | 26s    | **1.76s**  | 1ms    | 256 bytes  | 284K c/s   |
-| **1,000,001** | 53s    | **3.94s**  | 1ms    | 256 bytes  | 254K c/s   |
+| Constraints   | Setup | **Prove** | Verify | Proof Size | Throughput |
+| ------------- | ----- | --------- | ------ | ---------- | ---------- |
+| 1,001         | 78ms  | **10ms**  | 1ms    | 256 bytes  | 100K c/s   |
+| 10,001        | 591ms | **60ms**  | 1ms    | 256 bytes  | 170K c/s   |
+| 100,001       | 6.2s  | **469ms** | 1ms    | 256 bytes  | 213K c/s   |
+| 200,001       | 11.6s | **898ms** | 1ms    | 256 bytes  | 223K c/s   |
+| 500,001       | 26s   | **1.76s** | 1ms    | 256 bytes  | 284K c/s   |
+| **1,000,001** | 53s   | **3.94s** | 1ms    | 256 bytes  | 254K c/s   |
 
 ### 🚀 Key Insight: 1 Million Constraints in ~4 seconds!
 
@@ -40,20 +40,22 @@ Simple square circuit: prove knowledge of `x` such that `x * x == y`
 
 ### ✅ Groth16 Verification is CONSTANT
 
-- **Verification time: ~1.1ms** regardless of circuit size
+- **Verification time: ~1ms** regardless of circuit size
 - **Proof size: 256 bytes** regardless of circuit size
-- **Solana CU: <200K** (documented by groth16-solana)
+- **Solana CU: ~81K** (measured on Surfpool!)
 
-### 📈 Groth16 Proving Scales Linearly
+### 📈 Groth16 Proving Scales Sub-Linearly
 
-- Throughput improves with larger circuits (better parallelization)
-- 100K constraints: ~430ms proving time
-- 1M constraints would estimate to ~4-5 seconds
+- Throughput **improves** with larger circuits (better parallelization)
+- 100K constraints: ~469ms proving time
+- 500K constraints: ~1.76s proving time
+- **1M constraints: ~3.94s proving time** ✅
 
 ### ⚠️ Trusted Setup Scales with Circuit Size
 
-- Setup time grows significantly: 2ms → 5.5s for 100K constraints
+- Setup time grows significantly: 78ms → 53s for 1M constraints
 - This is a **one-time cost** per circuit
+- Can be pre-computed and stored
 
 ## Key Findings
 
@@ -103,10 +105,10 @@ Simple square circuit: prove knowledge of `x` such that `x * x == y`
 
 | Proof System | Proof Size | Verification CU | Est. Cost (per verify) |
 | ------------ | ---------- | --------------- | ---------------------- |
-| **Groth16**  | 256 bytes  | ~200K           | **~0.0002 SOL**        |
+| **Groth16**  | 256 bytes  | **81K** ✅      | **~0.00008 SOL**       |
 | UltraHonk    | ~5KB       | ~200-400K       | ~0.0002-0.0004 SOL     |
 
-_Note: Solana costs are minimal for both. The main advantage of Groth16 is proof size, not verification cost._
+_Note: Groth16 verification is 2-5x cheaper AND 20x smaller proof size!_
 
 ## Detailed Logs
 
@@ -146,45 +148,20 @@ Proof size:      256 bytes
 VK size:         488 bytes
 ```
 
-### gnark Scalability Benchmark
+### gnark Large Circuit Benchmarks (Iterated Squares)
 
 ```
-=== Benchmark: 100 iterations ===
-Constraints: 101
-Compile:     440.875µs
-Setup:       11.686209ms
-Prove:       2.768ms
-Verify:      1.474167ms
-Proof size:  256 bytes
-Throughput:  36488 constraints/sec
-
-=== Benchmark: 1000 iterations ===
-Constraints: 1001
-Compile:     467.375µs
-Setup:       79.527917ms
-Prove:       11.559042ms
-Verify:      1.111ms
-Proof size:  256 bytes
-Throughput:  86599 constraints/sec
-
-=== Benchmark: 10000 iterations ===
-Constraints: 10001
-Compile:     5.591084ms
-Setup:       716.641791ms
-Prove:       61.742ms
-Verify:      1.084875ms
-Proof size:  256 bytes
-Throughput:  161980 constraints/sec
-
-=== Benchmark: 100000 iterations ===
-Constraints: 100001
-Compile:     52.324584ms
-Setup:       5.532900958s
-Prove:       431.280125ms
-Verify:      1.129291ms
-Proof size:  256 bytes
-Throughput:  231870 constraints/sec
+Constraints          Setup        Prove       Verify   Throughput
+-------------------- ------------ ------------ -------- ------------
+1,001                78ms         10ms         1ms      100,614/s
+10,001               591ms        59ms         1ms      170,228/s
+100,001              6.2s         474ms        1ms      211,151/s
+200,001              11.6s        803ms        1ms      249,088/s
+500,001              26s          1.78s        1ms      281,650/s
+1,000,001            53s          3.94s        1ms      253,858/s
 ```
+
+**Run command:** `cd gnark && go run . circuits`
 
 ## Completed ✅
 
