@@ -9,7 +9,7 @@ OUTPUT_DIR="$SCRIPT_DIR/../output"
 echo "=== Step 2: Convert to zkVerify Hex Format ==="
 echo ""
 
-PROOF_TYPE="ZK"  # or "Plain" for non-ZK Honk
+PROOF_TYPE="Plain"  # "Plain" for non-ZK, "ZK" for zero-knowledge
 PROOF_FILE_PATH="$OUTPUT_DIR/ultrahonk_proof.bin"
 VK_FILE_PATH="$OUTPUT_DIR/ultrahonk_vk.bin"
 PUBS_FILE_PATH="$OUTPUT_DIR/public_inputs.bin"

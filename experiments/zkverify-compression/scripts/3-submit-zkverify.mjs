@@ -66,8 +66,9 @@ async function main() {
     console.log("  ✓ Public inputs loaded");
     console.log("");
 
-    // Parse the proof JSON to get the actual hex string
+    // Parse the proof JSON to get the actual hex string and determine variant
     const proofJson = JSON.parse(proofHex);
+    const variant = proofJson.ZK ? UltrahonkVariant.ZK : UltrahonkVariant.Plain;
     const proofData = proofJson.ZK || proofJson.Plain;
     
     // Parse VK (it's just a quoted hex string)
@@ -86,9 +87,9 @@ async function main() {
     
     console.log("  ✓ Connected to zkVerify testnet");
     console.log("");
-
+    
     console.log("Submitting UltraHonk proof...");
-    console.log(`  Variant: ZK (zero-knowledge)`);
+    console.log(`  Variant: ${variant}`);
     console.log(`  Proof size: ${proofData.length} chars`);
     console.log(`  Public inputs: ${pubsData.length}`);
     console.log("");
@@ -98,7 +99,7 @@ async function main() {
         // API: session.verify().ultrahonk({ variant }).execute({ proofData })
         const { events, transactionResult } = await session.verify()
             .ultrahonk({
-                variant: UltrahonkVariant.ZK  // ZK mode (not Plain)
+                variant: variant
             })
             .execute({
                 proofData: {
