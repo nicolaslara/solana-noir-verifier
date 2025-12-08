@@ -239,8 +239,8 @@ fn verify_sumcheck_rounds(
         }
 
         // Compute next target using barycentric interpolation
-        target =
-            next_target(univariate, chi, proof.is_zk).map_err(|_| "barycentric interpolation failed")?;
+        target = next_target(univariate, chi, proof.is_zk)
+            .map_err(|_| "barycentric interpolation failed")?;
         if round < 3 {
             crate::dbg_fr!("next_target", &target);
         }

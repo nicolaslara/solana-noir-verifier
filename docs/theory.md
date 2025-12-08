@@ -751,51 +751,17 @@ Our transcript may not exactly match bb's challenge derivation. This is the most
 - Pairing point object handling in transcript
 - Challenge split logic (127-bit vs 128-bit boundaries)
 
-#### Issue 2: VK Hash Computation (🚨 CONFIRMED BUG)
+#### Issue 2: VK Hash Computation (✅ FIXED)
 
 The VK hash is added to transcript first in `verifier.rs:compute_vk_hash()`.
 
-**CONFIRMED:** Our VK hash computation is **WRONG**!
-
+**STATUS:** Now matches bb's output:
 ```
-bb verify -d ... shows:
-  vk hash in Oink verifier: 0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
-
-Our compute_vk_hash() returns:
-  0x208bd97838d91de580261bed943ed295c712c7fb7851189c7dedae7473606d1d
+bb verify shows:  0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
+Our implementation: 0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75 ✅
 ```
 
-**Our Current (Wrong) Implementation:**
-
-```rust
-fn compute_vk_hash(vk: &VerificationKey) -> Fr {
-    // Hash: log2_circuit_size || log2_domain_size || num_public_inputs || commitments
-    let mut hasher = Keccak256::new();
-    hasher.update(&vk.log2_circuit_size.to_be_bytes());  // 4 bytes
-    hasher.update(&vk.log2_domain_size.to_be_bytes());   // 4 bytes
-    hasher.update(&vk.num_public_inputs.to_be_bytes());  // 4 bytes
-    for commitment in &vk.commitments {
-        hasher.update(commitment);  // 64 bytes each
-    }
-    // ...reduce to Fr
-}
-```
-
-**What bb Actually Does:**
-The VK hash computation likely includes:
-
-1. Domain separator or protocol identifier
-2. Different field ordering or encoding
-3. Possibly uses 32-byte padding for each header field
-4. May include additional VK fields we're missing
-
-**Action Required:**
-
-- Study bb's `verification_key.cpp` to understand exact hashing
-- Or use the Solidity verifier as reference (HonkVerifier.sol)
-- The exact hash must match for all subsequent challenges to be correct
-
-This is the **root cause** of verification failures - all challenges derived after this will be wrong.
+The VK hash is computed by hashing: header fields (as 32-byte BE) || all commitments (64 bytes each).
 
 #### Issue 3: Gemini Masking Position (ZK Only)
 
