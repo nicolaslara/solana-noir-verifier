@@ -265,7 +265,8 @@ fn verify_sumcheck_rounds(
 /// This performs:
 /// 1. Round-by-round univariate checks
 /// 2. Final relation accumulation
-/// 3. Check that accumulated value equals final target
+/// 3. ZK adjustment (for ZK proofs)
+/// 4. Check that accumulated value equals final target
 pub fn verify_sumcheck(
     proof: &Proof,
     challenges: &SumcheckChallenges,
@@ -283,13 +284,44 @@ pub fn verify_sumcheck(
     crate::dbg_fr!("gamma", &relation_params.gamma);
     crate::dbg_fr!("public_inputs_delta", &relation_params.public_inputs_delta);
 
-    let grand = accumulate_relations(proof, relation_params, &challenges.alphas, &pow_partial)?;
+    let mut grand = accumulate_relations(proof, relation_params, &challenges.alphas, &pow_partial)?;
+
+    crate::dbg_fr!("grand_relation (before ZK adjustment)", &grand);
+
+    // Step 3: ZK adjustment (for ZK proofs)
+    // Solidity: grandHonkRelationSum = grandHonkRelationSum * (1 - evaluation) + libraEvaluation * libraChallenge
+    // where evaluation = product(sumCheckUChallenges[2..LOG_N])
+    if proof.is_zk {
+        if let (Some(libra_eval), Some(libra_chal)) = (proof.libra_evaluation(), libra_challenge) {
+            // Compute evaluation = product(sumcheck_challenges[2..log_n])
+            let mut evaluation = SCALAR_ONE;
+            for i in 2..log_n {
+                evaluation = fr_mul(&evaluation, &challenges.sumcheck_u_challenges[i]);
+            }
+            crate::dbg_fr!("ZK evaluation (prod of u[2..])", &evaluation);
+
+            // grand = grand * (1 - evaluation) + libraEvaluation * libraChallenge
+            let one_minus_eval = fr_sub(&SCALAR_ONE, &evaluation);
+            let libra_term = fr_mul(&libra_eval, libra_chal);
+            let grand_scaled = fr_mul(&grand, &one_minus_eval);
+
+            crate::dbg_fr!("1 - evaluation", &one_minus_eval);
+            crate::dbg_fr!("libra_term (eval*challenge)", &libra_term);
+            crate::dbg_fr!("grand * (1-eval)", &grand_scaled);
+
+            grand = fr_add(&grand_scaled, &libra_term);
+
+            crate::dbg_fr!("libra_evaluation", &libra_eval);
+            crate::dbg_fr!("libra_challenge", libra_chal);
+            crate::dbg_fr!("grand_relation (after ZK adjustment)", &grand);
+        }
+    }
 
     crate::trace!("===== FINAL CHECK =====");
     crate::dbg_fr!("grand_relation", &grand);
     crate::dbg_fr!("target", &target);
 
-    // Step 3: Check that grand == target
+    // Step 4: Check that grand == target
     if grand == target {
         crate::trace!("SUMCHECK PASSED!");
         Ok(())

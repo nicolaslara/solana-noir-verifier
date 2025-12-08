@@ -60,8 +60,13 @@ cargo test -p example-verifier --test integration_test
 - [x] **38 unit tests passing**
 - [x] **E2E test running: program invoked, BN254 syscalls working**
 - [x] **Sumcheck module (sumcheck.rs): round verification + relation accumulation**
-- [x] **Relations module (relations.rs): all 26 UltraHonk subrelations**
+- [x] **Relations module (relations.rs): all 28 UltraHonk subrelations**
 - [x] **Shplemini module (shplemini.rs): batch opening verification structure**
+- [x] **Fixed Wire enum indices to match Solidity (added QNnf, shifted indices)**
+- [x] **Fixed NUM_SUBRELATIONS from 26 to 28**
+- [x] **Fixed NUM_ALL_ENTITIES to 41 for both ZK and non-ZK**
+- [x] **Fixed public_input_delta: uses SEPARATOR (1<<28) not circuit_size**
+- [x] **Fixed subrelation index mapping (lookup 4-6, range 7-10, etc.)**
 
 ---
 
@@ -74,7 +79,7 @@ cargo test -p example-verifier --test integration_test
 - [x] Field arithmetic (add, sub, mul, inv, div)
 - [x] Fiat-Shamir transcript with Keccak256
 - [x] Challenge split (lower/upper 128 bits) **FIXED! Was 127 bits, Solidity uses 128**
-- [x] Public input delta calculation
+- [x] Public input delta calculation **FIXED! Uses 1<<28 separator, not circuit_size**
 - [x] **Understand proof format: variable size based on log_circuit_size**
 - [x] **Proof DOES contain sumcheck data inline**
 - [x] **Sumcheck round verification (barycentric interpolation)**

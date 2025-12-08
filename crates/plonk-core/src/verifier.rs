@@ -421,21 +421,42 @@ fn compute_public_input_delta_with_ppo(
     pairing_point_object: &[Fr; 16],
     beta: &Fr,
     gamma: &Fr,
-    circuit_size: u32,
+    _circuit_size: u32,
     offset: u32,
 ) -> Fr {
+    // CRITICAL: Solidity uses PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28, NOT circuit_size!
+    const PERMUTATION_ARGUMENT_VALUE_SEPARATOR: u64 = 1 << 28;
+
     let mut numerator = SCALAR_ONE;
     let mut denominator = SCALAR_ONE;
 
-    let circuit_size_fr = fr_from_u64(circuit_size as u64);
     let offset_fr = fr_from_u64(offset as u64);
 
-    // numerator_acc = gamma + beta * (circuit_size + offset)
-    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &fr_add(&circuit_size_fr, &offset_fr)));
+    // numerator_acc = gamma + beta * (SEPARATOR + offset)
+    // Solidity: Fr numeratorAcc = gamma + (beta * FrLib.from(PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset));
+    let separator_plus_offset = fr_from_u64(PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset as u64);
+    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &separator_plus_offset));
 
     // denominator_acc = gamma - beta * (offset + 1)
     let offset_plus_one = fr_from_u64((offset + 1) as u64);
     let mut denominator_acc = fr_sub(gamma, &fr_mul(beta, &offset_plus_one));
+
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== PUBLIC_INPUT_DELTA COMPUTATION =====");
+        crate::dbg_fr!("beta", beta);
+        crate::dbg_fr!("gamma", gamma);
+        crate::trace!(
+            "separator + offset = {}",
+            PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset as u64
+        );
+        crate::dbg_fr!("initial numerator_acc", &numerator_acc);
+        crate::dbg_fr!("initial denominator_acc", &denominator_acc);
+        crate::trace!(
+            "processing {} public inputs + 16 pairing points",
+            public_inputs.len()
+        );
+    }
 
     // Process regular public inputs
     for pi in public_inputs {
@@ -453,8 +474,21 @@ fn compute_public_input_delta_with_ppo(
         denominator_acc = fr_sub(&denominator_acc, beta);
     }
 
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("final numerator", &numerator);
+        crate::dbg_fr!("final denominator", &denominator);
+    }
+
     // Return numerator / denominator
-    crate::field::fr_div(&numerator, &denominator).unwrap_or(SCALAR_ONE)
+    let result = crate::field::fr_div(&numerator, &denominator).unwrap_or(SCALAR_ONE);
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("public_input_delta (result)", &result);
+    }
+
+    result
 }
 
 /// Verify the sumcheck protocol
@@ -475,11 +509,11 @@ fn verify_sumcheck(
         public_inputs_delta: challenges.relation_params.public_input_delta,
     };
 
-    // Generate alpha challenges (NUM_SUBRELATIONS - 1 = 25 alphas)
-    // For now, generate from the single alpha using powers
-    let mut alphas = Vec::with_capacity(25);
+    // Generate alpha challenges (NUM_SUBRELATIONS - 1 = 27 alphas)
+    // Solidity: NUMBER_OF_ALPHAS = NUMBER_OF_SUBRELATIONS - 1 = 28 - 1 = 27
+    let mut alphas = Vec::with_capacity(27);
     let mut alpha_pow = challenges.alpha;
-    for _ in 0..25 {
+    for _ in 0..27 {
         alphas.push(alpha_pow);
         alpha_pow = fr_mul(&alpha_pow, &challenges.alpha);
     }

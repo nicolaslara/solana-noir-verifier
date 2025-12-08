@@ -37,11 +37,10 @@ pub const NUM_PAIRING_POINT_FRS: usize = 16;
 /// Number of witness commitments
 pub const NUM_WITNESS_COMMS: usize = 8;
 
-/// Number of all entities for sumcheck evaluations (ZK flavor)
-pub const NUM_ALL_ENTITIES_ZK: usize = 41;
-
-/// Number of all entities for sumcheck evaluations (non-ZK flavor)
-pub const NUM_ALL_ENTITIES_NON_ZK: usize = 40;
+/// Number of all entities for sumcheck evaluations
+/// Matches Solidity's NUMBER_OF_ENTITIES = 41
+/// Wire enum has 41 entries (0-40: Q_M through Z_PERM_SHIFT)
+pub const NUM_ALL_ENTITIES: usize = 41;
 
 /// Batched relation partial length (sumcheck univariate degree + 1)
 pub const BATCHED_RELATION_PARTIAL_LENGTH: usize = 8;
@@ -101,12 +100,8 @@ impl Proof {
         };
         size += log_n * univariate_len;
 
-        // Sumcheck evaluations
-        size += if is_zk {
-            NUM_ALL_ENTITIES_ZK
-        } else {
-            NUM_ALL_ENTITIES_NON_ZK
-        };
+        // Sumcheck evaluations (41 entities for both ZK and non-ZK)
+        size += NUM_ALL_ENTITIES;
 
         if is_zk {
             // Libra claimed evaluation (1 Fr)
@@ -199,7 +194,7 @@ impl Proof {
         let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
         let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
         let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES_ZK;
+        let evals_size = NUM_ALL_ENTITIES;
         let zk_libra_eval_and_comms = 5; // libra_eval(1) + grand_sum(2) + quotient(2)
 
         let offset =
@@ -288,12 +283,50 @@ impl Proof {
         let univariates_size = self.log_n * univariate_len;
 
         let offset = base_offset + zk_libra + univariates_size;
-        let num_evals = if self.is_zk {
-            NUM_ALL_ENTITIES_ZK
-        } else {
-            NUM_ALL_ENTITIES_NON_ZK
-        };
-        &self.data[offset..offset + num_evals]
+
+        #[cfg(feature = "debug")]
+        {
+            crate::trace!(
+                "sumcheck_evaluations offset: {} (base={}, zk_libra={}, univariates={})",
+                offset,
+                base_offset,
+                zk_libra,
+                univariates_size
+            );
+        }
+
+        &self.data[offset..offset + NUM_ALL_ENTITIES]
+    }
+
+    /// Get libra evaluation (ZK only)
+    /// This is the libraEvaluation used in the ZK adjustment:
+    /// grandHonkRelationSum = grandHonkRelationSum * (1 - evaluation) + libraEvaluation * libraChallenge
+    pub fn libra_evaluation(&self) -> Option<Fr> {
+        if !self.is_zk {
+            return None;
+        }
+        // ZK structure after sumcheck_evaluations:
+        // libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
+        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
+        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
+        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
+        let evals_size = NUM_ALL_ENTITIES;
+
+        let offset = base_offset + zk_libra_start + univariates_size + evals_size;
+
+        #[cfg(feature = "debug")]
+        {
+            crate::trace!(
+                "libra_evaluation offset: {} (base={}, zk_start={}, univs={}, evals={})",
+                offset,
+                base_offset,
+                zk_libra_start,
+                univariates_size,
+                evals_size
+            );
+        }
+
+        Some(self.data[offset])
     }
 
     /// Get gemini fold commitment at index (0 to log_n-2)
@@ -311,11 +344,7 @@ impl Proof {
             BATCHED_RELATION_PARTIAL_LENGTH
         };
         let univariates_size = self.log_n * univariate_len;
-        let evals_size = if self.is_zk {
-            NUM_ALL_ENTITIES_ZK
-        } else {
-            NUM_ALL_ENTITIES_NON_ZK
-        };
+        let evals_size = NUM_ALL_ENTITIES;
         // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
         let zk_post_evals = if self.is_zk { 8 } else { 0 };
 
@@ -341,11 +370,7 @@ impl Proof {
             BATCHED_RELATION_PARTIAL_LENGTH
         };
         let univariates_size = self.log_n * univariate_len;
-        let evals_size = if self.is_zk {
-            NUM_ALL_ENTITIES_ZK
-        } else {
-            NUM_ALL_ENTITIES_NON_ZK
-        };
+        let evals_size = NUM_ALL_ENTITIES;
         // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
         let zk_post_evals = if self.is_zk { 8 } else { 0 };
         let gemini_fold_size = (self.log_n - 1) * 2;
@@ -372,11 +397,7 @@ impl Proof {
             BATCHED_RELATION_PARTIAL_LENGTH
         };
         let univariates_size = self.log_n * univariate_len;
-        let evals_size = if self.is_zk {
-            NUM_ALL_ENTITIES_ZK
-        } else {
-            NUM_ALL_ENTITIES_NON_ZK
-        };
+        let evals_size = NUM_ALL_ENTITIES;
         // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
         let zk_post_evals = if self.is_zk { 8 } else { 0 };
         let gemini_fold_size = (self.log_n - 1) * 2;
@@ -500,7 +521,7 @@ mod tests {
 
         // Check we can access sumcheck evaluations
         let evals = proof.sumcheck_evaluations();
-        assert_eq!(evals.len(), NUM_ALL_ENTITIES_ZK);
+        assert_eq!(evals.len(), NUM_ALL_ENTITIES);
 
         // Check we can access shplonk and kzg
         let _shplonk = proof.shplonk_q();

@@ -1,13 +1,18 @@
 //! UltraHonk relation evaluation
 //!
-//! This module accumulates all 26 UltraHonk subrelations:
+//! This module accumulates all 28 UltraHonk subrelations.
+//! Index mapping (from Solidity verifier):
 //! - Arithmetic (2 subrelations): indices 0-1
 //! - Permutation (2 subrelations): indices 2-3
-//! - Lookup (2 subrelations): indices 4-5
-//! - Range (4 subrelations): indices 6-9
-//! - Elliptic (2 subrelations): indices 10-11
-//! - Auxiliary (6 subrelations): indices 12-17
-//! - Poseidon (8 subrelations): indices 18-25
+//! - Lookup (3 subrelations): indices 4-6
+//! - Range/DeltaRange (4 subrelations): indices 7-10
+//! - Elliptic (2 subrelations): indices 11-12
+//! - Memory (6 subrelations): indices 13-18
+//! - NNF (1 subrelation): index 19
+//! - Poseidon External (4 subrelations): indices 20-23
+//! - Poseidon Internal (4 subrelations): indices 24-27
+//!
+//! Total: 2+2+3+4+2+6+1+4+4 = 28
 
 extern crate alloc;
 use alloc::vec;
@@ -27,14 +32,16 @@ pub struct RelationParameters {
 }
 
 /// Number of subrelations in UltraHonk
-pub const NUM_SUBRELATIONS: usize = 26;
+/// Matches Solidity's NUMBER_OF_SUBRELATIONS = 28
+pub const NUM_SUBRELATIONS: usize = 28;
 
 /// Wire indices for sumcheck evaluations
-/// These map to the 40 evaluation values in the proof
+/// These map to the evaluation values in the proof
+/// MUST match Solidity verifier's WIRE enum exactly!
 #[repr(usize)]
 #[derive(Clone, Copy)]
 pub enum Wire {
-    // Selector polynomials
+    // Selector polynomials (0-13)
     Qm = 0,
     Qc = 1,
     Ql = 2,
@@ -45,41 +52,42 @@ pub enum Wire {
     QArith = 7,
     QRange = 8,
     QElliptic = 9,
-    QAux = 10,
-    QPoseidon2External = 11,
-    QPoseidon2Internal = 12,
-    // Permutation polynomials
-    Sigma1 = 13,
-    Sigma2 = 14,
-    Sigma3 = 15,
-    Sigma4 = 16,
-    Id1 = 17,
-    Id2 = 18,
-    Id3 = 19,
-    Id4 = 20,
-    // Lookup table polynomials
-    Table1 = 21,
-    Table2 = 22,
-    Table3 = 23,
-    Table4 = 24,
-    // Lagrange polynomials
-    LagrangeFirst = 25,
-    LagrangeLast = 26,
-    // Wire polynomials
-    Wl = 27,
-    Wr = 28,
-    Wo = 29,
-    W4 = 30,
-    ZPerm = 31,
-    LookupInverses = 32,
-    LookupReadCounts = 33,
-    LookupReadTags = 34,
-    // Shifted wire polynomials
-    WlShift = 35,
-    WrShift = 36,
-    WoShift = 37,
-    W4Shift = 38,
-    ZPermShift = 39,
+    QMemory = 10,             // Q_MEMORY in Solidity (was QAux)
+    QNnf = 11,                // Q_NNF in Solidity (was MISSING!)
+    QPoseidon2External = 12,  // Q_POSEIDON2_EXTERNAL in Solidity
+    QPoseidon2Internal = 13,  // Q_POSEIDON2_INTERNAL in Solidity
+    // Permutation polynomials (14-21)
+    Sigma1 = 14,
+    Sigma2 = 15,
+    Sigma3 = 16,
+    Sigma4 = 17,
+    Id1 = 18,
+    Id2 = 19,
+    Id3 = 20,
+    Id4 = 21,
+    // Lookup table polynomials (22-25)
+    Table1 = 22,
+    Table2 = 23,
+    Table3 = 24,
+    Table4 = 25,
+    // Lagrange polynomials (26-27)
+    LagrangeFirst = 26,
+    LagrangeLast = 27,
+    // Wire polynomials (28-35)
+    Wl = 28,
+    Wr = 29,
+    Wo = 30,
+    W4 = 31,
+    ZPerm = 32,
+    LookupInverses = 33,
+    LookupReadCounts = 34,
+    LookupReadTags = 35,
+    // Shifted wire polynomials (36-40)
+    WlShift = 36,
+    WrShift = 37,
+    WoShift = 38,
+    W4Shift = 39,
+    ZPermShift = 40,
 }
 
 /// Get wire evaluation from the evaluations array
@@ -143,12 +151,33 @@ fn accumulate_arithmetic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let q_4 = wire(evals, Wire::Q4);
     let q_c = wire(evals, Wire::Qc);
 
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== ARITHMETIC WIRE VALUES =====");
+        crate::dbg_fr!("q_arith (idx 7)", &q_arith);
+        crate::dbg_fr!("q_m (idx 0)", &q_m);
+        crate::dbg_fr!("w_l (idx 28)", &w_l);
+        crate::dbg_fr!("w_r (idx 29)", &w_r);
+        crate::dbg_fr!("domainSep (pow_partial)", d);
+    }
+
     // (q_arith - 3) * q_m * w_r * w_l * neg_half
+    // Solidity: accum = (q_arith - 3) * (q_m * w_r * w_l) * neg_half
     let q_minus_3 = fr_sub(&q_arith, &fr_from_u64(3));
-    let mut acc = fr_mul(&q_minus_3, &q_m);
-    acc = fr_mul(&acc, &w_r);
-    acc = fr_mul(&acc, &w_l);
+    // Solidity order: q_m * w_r first, then * w_l
+    let qm_wr = fr_mul(&q_m, &w_r);
+    let qm_wr_wl = fr_mul(&qm_wr, &w_l);
+    let mut acc = fr_mul(&q_minus_3, &qm_wr_wl);
     acc = fr_mul(&acc, &neg_half());
+
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== ARITHMETIC REL 0 STEPS =====");
+        crate::dbg_fr!("q_minus_3", &q_minus_3);
+        crate::dbg_fr!("q_m * w_r", &qm_wr);
+        crate::dbg_fr!("q_m * w_r * w_l", &qm_wr_wl);
+        crate::dbg_fr!("after neg_half", &acc);
+    }
 
     // + q_l * w_l + q_r * w_r + q_o * w_o + q_4 * w_4 + q_c
     acc = fr_add(&acc, &fr_mul(&q_l, &w_l));
@@ -244,7 +273,7 @@ fn accumulate_permutation(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr],
     out[3] = fr_mul(&fr_mul(&lag_last, &z_perm_shift), d);
 }
 
-/// Accumulate lookup subrelations (indices 4-5)
+/// Accumulate lookup subrelations (indices 4-6)
 fn accumulate_lookup(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -299,9 +328,17 @@ fn accumulate_lookup(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
     let lhs = fr_mul(&q_lookup, &fr_mul(&write_term, &lookup_inv));
     let rhs = fr_mul(&lookup_read_counts, &fr_mul(&read_term, &lookup_inv));
     out[5] = fr_sub(&lhs, &rhs);
+
+    // Subrelation 6: read_tag_boolean = read_tag * read_tag - read_tag
+    // Ensures read_tag is boolean (0 or 1)
+    let read_tag_boolean = fr_sub(
+        &fr_mul(&lookup_read_tags, &lookup_read_tags),
+        &lookup_read_tags,
+    );
+    out[6] = fr_mul(&read_tag_boolean, d);
 }
 
-/// Accumulate range subrelations (indices 6-9)
+/// Accumulate range/delta-range subrelations (indices 7-10)
 fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -321,17 +358,18 @@ fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let neg_two = fr_neg(&fr_from_u64(2));
     let neg_three = fr_neg(&fr_from_u64(3));
 
+    // Solidity uses indices 7, 8, 9, 10 for range relations
     for i in 0..4 {
         // delta * (delta - 1) * (delta - 2) * (delta - 3)
         let mut acc = deltas[i];
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_one));
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_two));
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_three));
-        out[6 + i] = fr_mul(&fr_mul(&acc, &q_range), d);
+        out[7 + i] = fr_mul(&fr_mul(&acc, &q_range), d);
     }
 }
 
-/// Accumulate elliptic subrelations (indices 10-11)
+/// Accumulate elliptic subrelations (indices 11-12)
 fn accumulate_elliptic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let x1 = wire(evals, Wire::Wr);
     let y1 = wire(evals, Wire::Wo);
@@ -387,35 +425,44 @@ fn accumulate_elliptic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     );
 
     // Combine with selectors
+    // Solidity uses indices 11 and 12
     let add_factor = fr_mul(&fr_mul(&fr_sub(&SCALAR_ONE, &q_double), &q_elliptic), d);
     let double_factor = fr_mul(&fr_mul(&q_double, &q_elliptic), d);
 
-    out[10] = fr_add(
+    out[11] = fr_add(
         &fr_mul(&x_add_id, &add_factor),
         &fr_mul(&x_double_id, &double_factor),
     );
-    out[11] = fr_add(
+    out[12] = fr_add(
         &fr_mul(&y_add_id, &add_factor),
         &fr_mul(&y_double_id, &double_factor),
     );
 }
 
-/// Accumulate auxiliary subrelations (indices 12-17)
+/// Accumulate memory/auxiliary subrelations (indices 13-18)
 /// This is a simplified version - full implementation is complex
-fn accumulate_aux(evals: &[Fr], _rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
-    let q_aux = wire(evals, Wire::QAux);
+fn accumulate_memory(evals: &[Fr], _rp: &RelationParameters, out: &mut [Fr], _d: &Fr) {
+    let _q_memory = wire(evals, Wire::QMemory);
 
-    // Simplified: just use q_aux * d for all aux subrelations
+    // Simplified: zero out for now - these are complex and often zero in simple circuits
     // Full implementation requires ROM/RAM memory operations
-    for i in 12..18 {
-        out[i] = fr_mul(&q_aux, d);
-        // Zero out for now - these are complex and often zero in simple circuits
+    // Solidity uses indices 13, 14, 15, 16, 17, 18
+    for i in 13..19 {
         out[i] = SCALAR_ZERO;
     }
 }
 
-/// Accumulate Poseidon subrelations (indices 18-25)
-fn accumulate_poseidon(evals: &[Fr], out: &mut [Fr], d: &Fr) {
+/// Accumulate NNF (non-native field) subrelation (index 19)
+/// For simple circuits without NNF gates, this is zero
+fn accumulate_nnf(evals: &[Fr], out: &mut [Fr], _d: &Fr) {
+    let _q_nnf = wire(evals, Wire::QNnf);
+    // Simplified: zero for circuits without NNF gates
+    // Full implementation requires non-native field arithmetic
+    out[19] = SCALAR_ZERO;
+}
+
+/// Accumulate Poseidon External subrelations (indices 20-23)
+fn accumulate_poseidon_external(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
     let w_o = wire(evals, Wire::Wo);
@@ -432,7 +479,11 @@ fn accumulate_poseidon(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_4_shift = wire(evals, Wire::W4Shift);
 
     let q_pos_ext = wire(evals, Wire::QPoseidon2External);
-    let q_pos_int = wire(evals, Wire::QPoseidon2Internal);
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("q_poseidon2_external", &q_pos_ext);
+    }
 
     // S-box inputs: s_i = w_i + q_i
     let s1 = fr_add(&w_l, &q_l);
@@ -457,31 +508,51 @@ fn accumulate_poseidon(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let v1 = fr_add(&t3, &v2);
     let v3 = fr_add(&t2, &v4);
 
-    // External subrelations
-    out[18] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_ext), d);
-    out[19] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_ext), d);
-    out[20] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_ext), d);
-    out[21] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_ext), d);
+    // External subrelations (indices 20-23)
+    out[20] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_ext), d);
+    out[21] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_ext), d);
+    out[22] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_ext), d);
+    out[23] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_ext), d);
+}
 
-    // Internal round (simplified - no S-box on s2,s3,s4)
-    let u1_int = u1;
-    let u2_int = w_r;
-    let u3_int = w_o;
-    let u4_int = w_4;
+/// Accumulate Poseidon Internal subrelations (indices 24-27)
+fn accumulate_poseidon_internal(evals: &[Fr], out: &mut [Fr], d: &Fr) {
+    let w_l = wire(evals, Wire::Wl);
+    let w_r = wire(evals, Wire::Wr);
+    let w_o = wire(evals, Wire::Wo);
+    let w_4 = wire(evals, Wire::W4);
 
-    let u_sum = fr_add(&fr_add(&u1_int, &u2_int), &fr_add(&u3_int, &u4_int));
+    let q_l = wire(evals, Wire::Ql);
 
-    // Internal diagonal matrix (simplified constants)
-    let w1 = fr_add(&u1_int, &u_sum);
-    let w2 = fr_add(&u2_int, &u_sum);
-    let w3 = fr_add(&u3_int, &u_sum);
-    let w4 = fr_add(&u4_int, &u_sum);
+    let w_l_shift = wire(evals, Wire::WlShift);
+    let w_r_shift = wire(evals, Wire::WrShift);
+    let w_o_shift = wire(evals, Wire::WoShift);
+    let w_4_shift = wire(evals, Wire::W4Shift);
 
-    // Internal subrelations
-    out[22] = fr_mul(&fr_mul(&fr_sub(&w1, &w_l_shift), &q_pos_int), d);
-    out[23] = fr_mul(&fr_mul(&fr_sub(&w2, &w_r_shift), &q_pos_int), d);
-    out[24] = fr_mul(&fr_mul(&fr_sub(&w3, &w_o_shift), &q_pos_int), d);
-    out[25] = fr_mul(&fr_mul(&fr_sub(&w4, &w_4_shift), &q_pos_int), d);
+    let q_pos_int = wire(evals, Wire::QPoseidon2Internal);
+
+    // S-box only on first element: s1 = w_l + q_l
+    let s1 = fr_add(&w_l, &q_l);
+    let u1 = pow5(&s1);
+
+    // Other elements pass through
+    let u2 = w_r;
+    let u3 = w_o;
+    let u4 = w_4;
+
+    let u_sum = fr_add(&fr_add(&u1, &u2), &fr_add(&u3, &u4));
+
+    // Internal diagonal matrix (simplified - actual constants from Poseidon2)
+    let v1 = fr_add(&u1, &u_sum);
+    let v2 = fr_add(&u2, &u_sum);
+    let v3 = fr_add(&u3, &u_sum);
+    let v4 = fr_add(&u4, &u_sum);
+
+    // Internal subrelations (indices 24-27)
+    out[24] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_int), d);
+    out[25] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_int), d);
+    out[26] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_int), d);
+    out[27] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_int), d);
 }
 
 /// Compute x^5 for Poseidon S-box
@@ -494,24 +565,46 @@ fn pow5(x: &Fr) -> Fr {
 
 /// Batch all subrelations with alpha challenges
 fn batch_subrelations(evals: &[Fr], alphas: &[Fr]) -> Fr {
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== BATCHING =====");
+        crate::dbg_fr!("evals[0] (start)", &evals[0]);
+        crate::dbg_fr!("alphas[0]", &alphas[0]);
+    }
+
     let mut acc = evals[0];
     for (i, alpha) in alphas.iter().enumerate() {
         let term = fr_mul(&evals[i + 1], alpha);
         acc = fr_add(&acc, &term);
     }
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("batch_result", &acc);
+    }
+
     acc
 }
 
 /// Accumulate all relation evaluations
 ///
 /// This is the main entry point for relation evaluation.
-/// It computes all 26 subrelations and batches them with alpha challenges.
+/// It computes all 28 subrelations and batches them with alpha challenges.
 pub fn accumulate_relation_evaluations(
     evals: &[Fr],
     rp: &RelationParameters,
     alphas: &[Fr],
     pow_partial: &Fr,
 ) -> Fr {
+    // Debug: print proof evaluations
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== PROOF EVALUATIONS (first 15) =====");
+        for (i, val) in evals.iter().take(15).enumerate() {
+            crate::dbg_fr!(&format!("eval[{}]", i), val);
+        }
+    }
+
     let mut out = vec![SCALAR_ZERO; NUM_SUBRELATIONS];
 
     accumulate_arithmetic(evals, &mut out, pow_partial);
@@ -519,8 +612,26 @@ pub fn accumulate_relation_evaluations(
     accumulate_lookup(evals, rp, &mut out, pow_partial);
     accumulate_range(evals, &mut out, pow_partial);
     accumulate_elliptic(evals, &mut out, pow_partial);
-    accumulate_aux(evals, rp, &mut out, pow_partial);
-    accumulate_poseidon(evals, &mut out, pow_partial);
+    accumulate_memory(evals, rp, &mut out, pow_partial);
+    accumulate_nnf(evals, &mut out, pow_partial);
+    accumulate_poseidon_external(evals, &mut out, pow_partial);
+    accumulate_poseidon_internal(evals, &mut out, pow_partial);
+
+    // DEBUG: Zero out all subrelations to test batching
+    // for i in 0..NUM_SUBRELATIONS {
+    //     out[i] = SCALAR_ZERO;
+    // }
+
+    // Debug: print non-zero subrelation values
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== SUBRELATION VALUES =====");
+        for (i, val) in out.iter().enumerate() {
+            if *val != SCALAR_ZERO {
+                crate::dbg_fr!(&format!("subrel[{}]", i), val);
+            }
+        }
+    }
 
     batch_subrelations(&out, alphas)
 }

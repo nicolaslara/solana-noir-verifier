@@ -221,19 +221,26 @@ let result = alt_bn128_pairing_be(&pairing_input)?;
 
 5. **Challenge Generation** (`verifier.rs`)
 
-   - Basic structure implemented
-   - Needs exact match with bb's transcript
+   - ✅ eta, eta_two, eta_three generation correct
+   - ✅ beta, gamma generation correct
+   - ✅ alpha generation correct
+   - ✅ gate_challenges generation correct
+   - ✅ sumcheck u_challenges generation correct
+   - ✅ libra_challenge generation correct
 
 6. **Public Input Delta**
-   - Formula implemented
-   - Needs verification against bb
+
+   - ✅ Fixed: Uses `PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28`, NOT `circuit_size`
+   - Formula matches Solidity's `computePublicInputDelta`
+
+7. **Sumcheck Verification** (`sumcheck.rs`)
+   - ✅ Round-by-round verification passing
+   - ✅ pow_partial computation correct
+   - ✅ ZK adjustment formula correct
+   - ⚠️ Final relation check failing - grand_relation != target
+   - Need to debug individual subrelation computations
 
 ### Pending ❌
-
-7. **Sumcheck Verification**
-
-   - Currently returns `Ok(true)` (placeholder)
-   - Need to implement relation evaluation
 
 8. **Shplemini Verification**
 
@@ -243,6 +250,58 @@ let result = alt_bn128_pairing_be(&pairing_input)?;
 9. **Complete Pairing Check**
    - Currently uses placeholder points
    - Need proper batched claim aggregation
+
+---
+
+## 🔑 Critical Implementation Details
+
+### Wire Enum Indices (MUST match Solidity exactly!)
+
+```rust
+// Solidity verifier's WIRE enum order:
+Q_M = 0, Q_C = 1, Q_L = 2, Q_R = 3, Q_O = 4, Q_4 = 5, Q_LOOKUP = 6, Q_ARITH = 7,
+Q_RANGE = 8, Q_ELLIPTIC = 9, Q_MEMORY = 10, Q_NNF = 11,
+Q_POSEIDON2_EXTERNAL = 12, Q_POSEIDON2_INTERNAL = 13,
+SIGMA_1 = 14, SIGMA_2 = 15, SIGMA_3 = 16, SIGMA_4 = 17,
+ID_1 = 18, ID_2 = 19, ID_3 = 20, ID_4 = 21,
+TABLE_1 = 22, TABLE_2 = 23, TABLE_3 = 24, TABLE_4 = 25,
+LAGRANGE_FIRST = 26, LAGRANGE_LAST = 27,
+W_L = 28, W_R = 29, W_O = 30, W_4 = 31, Z_PERM = 32,
+LOOKUP_INVERSES = 33, LOOKUP_READ_COUNTS = 34, LOOKUP_READ_TAGS = 35,
+W_L_SHIFT = 36, W_R_SHIFT = 37, W_O_SHIFT = 38, W_4_SHIFT = 39, Z_PERM_SHIFT = 40
+```
+
+### Subrelation Index Mapping (28 total)
+
+```
+- Arithmetic (2): indices 0-1
+- Permutation (2): indices 2-3
+- Lookup (3): indices 4-6
+- Range/DeltaRange (4): indices 7-10
+- Elliptic (2): indices 11-12
+- Memory (6): indices 13-18
+- NNF (1): index 19
+- Poseidon External (4): indices 20-23
+- Poseidon Internal (4): indices 24-27
+```
+
+### Constants from Solidity
+
+```
+NUMBER_OF_ENTITIES = 41
+NUMBER_OF_SUBRELATIONS = 28
+NUMBER_OF_ALPHAS = 27 (NUMBER_OF_SUBRELATIONS - 1)
+PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28 = 268435456
+ZK_BATCHED_RELATION_PARTIAL_LENGTH = 9
+```
+
+### Public Input Delta Formula
+
+```
+numerator_acc = gamma + beta * (SEPARATOR + offset)  // NOT circuit_size!
+denominator_acc = gamma - beta * (offset + 1)
+// Then iterate over public_inputs and pairing_point_object
+```
 
 ## Open Questions
 
