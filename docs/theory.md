@@ -756,6 +756,7 @@ Our transcript may not exactly match bb's challenge derivation. This is the most
 The VK hash is added to transcript first in `verifier.rs:compute_vk_hash()`.
 
 **STATUS:** Now matches bb's output:
+
 ```
 bb verify shows:  0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
 Our implementation: 0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75 ✅
