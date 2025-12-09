@@ -1,6 +1,6 @@
 ---
-name: solana-noir-verifier
-id: solana-noir-verifier
+name: solana-verifier
+id: solana-verifier
 runbooks:
   - name: deployment
     description: Deploy programs

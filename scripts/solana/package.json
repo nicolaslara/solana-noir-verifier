@@ -1,0 +1,12 @@
+{
+  "name": "ultrahonk-solana-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0"
+  }
+}
+

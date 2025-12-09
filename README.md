@@ -250,19 +250,30 @@ Note: bb 0.87 produces **fixed-size proofs** (16,224 bytes for ZK) regardless of
 ```
 solana-noir-verifier/
 ├── crates/
-│   ├── plonk-core/           # Core verifier library
-│   │   ├── ops.rs            # BN254 ops via syscalls
-│   │   ├── transcript.rs     # Fiat-Shamir (Keccak256)
-│   │   ├── key.rs            # VK parsing
-│   │   ├── proof.rs          # Proof parsing
-│   │   └── verifier.rs       # Verification logic
-│   └── vk-codegen/           # CLI: VK JSON → Rust constants
+│   ├── plonk-core/              # Core verifier library (56 tests ✅)
+│   │   ├── ops.rs               # BN254 ops via syscalls
+│   │   ├── transcript.rs        # Fiat-Shamir (Keccak256)
+│   │   ├── key.rs               # VK parsing (1,760 byte format)
+│   │   ├── proof.rs             # Proof parsing (16,224 byte format)
+│   │   ├── sumcheck.rs          # Sumcheck protocol
+│   │   ├── relations.rs         # 26 subrelations
+│   │   ├── shplemini.rs         # Batch opening verification
+│   │   └── verifier.rs          # Main verification logic
+│   └── vk-codegen/              # CLI: VK JSON → Rust constants
 ├── programs/
-│   └── example-verifier/     # Solana program template
-├── test-circuits/
-│   └── simple_square/        # Example Noir circuit
-└── tests/
-    └── resources/            # Test vectors
+│   ├── ultrahonk-verifier/      # Main Solana verifier program ✅
+│   └── example-verifier/        # Solana program template
+├── test-circuits/               # 7 verified circuits
+│   ├── simple_square/           # Basic x² = y
+│   ├── iterated_square_*/       # Scalability tests
+│   ├── hash_batch/              # Blake3 hashing
+│   └── merkle_membership/       # Merkle proofs
+├── scripts/
+│   └── solana/                  # Surfpool testing scripts
+└── docs/
+    ├── theory.md                # UltraHonk protocol docs
+    ├── knowledge.md             # Implementation notes
+    └── solana-testing.md        # On-chain testing guide
 ```
 
 ## 🔧 Development
@@ -276,11 +287,33 @@ cargo build --workspace
 ### Test
 
 ```bash
-# All tests
-cargo test --workspace
+# Core library tests (56 tests)
+cargo test -p plonk-solana-core
 
-# Integration tests only
-cargo test -p example-verifier --test integration_test
+# Test all 7 circuits
+cargo test -p plonk-solana-core test_all_available_circuits -- --nocapture
+
+# Solana program tests
+cd programs/ultrahonk-verifier
+cargo test -- --nocapture
+```
+
+### Test on Surfpool (Local Solana)
+
+```bash
+# Start Surfpool
+surfpool start
+
+# Build for Solana BPF
+cd programs/ultrahonk-verifier
+cargo build-sbf
+
+# Deploy
+solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:18899
+
+# Run verification script
+cd ../../scripts/solana
+npm install && node verify.mjs
 ```
 
 ### Generate VK Constants

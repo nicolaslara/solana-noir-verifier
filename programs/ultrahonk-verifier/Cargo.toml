@@ -1,0 +1,32 @@
+[package]
+name = "ultrahonk-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Solana UltraHonk verifier for Noir proofs"
+
+# Keep this package out of the parent workspace
+[workspace]
+members = []
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+plonk-solana-core = { path = "../../crates/plonk-core" }
+solana-program = "3.0"
+# Pin base64ct to avoid edition2024 requirement (1.8+ needs Rust 1.85)
+base64ct = "=1.6.0"
+
+[dev-dependencies]
+solana-program-test = "3.1"
+solana-sdk = "3.0"
+tokio = { version = "1", features = ["rt", "macros"] }
+hex = "0.4"
+
+[features]
+no-entrypoint = []
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

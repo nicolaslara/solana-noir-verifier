@@ -1,5 +1,5 @@
 ################################################################
-# Manage solana-noir-verifier deployment through Crypto Infrastructure as Code
+# Manage solana-verifier deployment through Crypto Infrastructure as Code
 ################################################################
 
 addon "svm" {
@@ -7,9 +7,9 @@ addon "svm" {
     network_id = input.network_id
 }
 
-action "deploy_example_verifier" "svm::deploy_program" {
-    description = "Deploy example_verifier program"
-    program = svm::get_program_from_native_project("example_verifier") 
+action "deploy_ultrahonk_verifier" "svm::deploy_program" {
+    description = "Deploy ultrahonk_verifier program"
+    program = svm::get_program_from_native_project("ultrahonk_verifier") 
     authority = signer.authority
     payer = signer.payer
     // Optional: if you want to deploy the program via a cheatcode when targeting a Surfnet, set `instant_surfnet_deployment = true`
