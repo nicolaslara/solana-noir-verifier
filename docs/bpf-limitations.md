@@ -4,11 +4,12 @@
 
 ### What Works
 
-- ✅ **Off-chain verification**: All 54 unit tests pass
+- ✅ **Off-chain verification**: All 54+ unit tests pass
 - ✅ **Integration tests**: `solana-program-test` simulator passes
 - ✅ **Program deployment**: Deploys successfully to Surfpool/Solana
 - ✅ **Proof upload**: Account-based chunked upload works
 - ✅ **Stack overflow fixed**: Using `#[inline(never)]` and heap allocation
+- ✅ **Keccak syscall**: Using `sol_keccak256` for Fiat-Shamir (~100 CUs each)
 
 ### What Doesn't Work
 
@@ -16,144 +17,142 @@
 
 ## Compute Unit Analysis
 
-| Metric        | Value              |
-| ------------- | ------------------ |
-| CUs requested | 1,400,000          |
-| CUs consumed  | 1,399,850+         |
-| Status        | **Exceeded limit** |
+| Metric        | Value                   |
+| ------------- | ----------------------- |
+| CUs requested | 1,400,000               |
+| CUs consumed  | 1,399,850+              |
+| Failure point | `generate_challenges()` |
+| Status        | **Exceeded limit**      |
 
-UltraHonk verification needs **more than 1.4M CUs** (the maximum per transaction).
+### Breakdown of Where CUs Go
 
-## The Problem
+```
+Program setup:           ~1,000 CUs
+VK parsing:              ~1,200 CUs
+Proof parsing:           ~500 CUs
+Challenge generation:    ~1,396,000+ CUs ← BOTTLENECK
+  - Keccak hashes (75+): ~7,500 CUs (syscall-optimized)
+  - Field operations:    ~1,388,000+ CUs ← ACTUAL PROBLEM
+```
 
-### BPF Stack Limits
+**UltraHonk verification needs >1.4M CUs (Solana's per-transaction maximum).**
 
-Solana's BPF (Berkeley Packet Filter) runtime has strict memory constraints:
+## The Real Problem: Field Arithmetic
 
-| Resource        | Limit           |
-| --------------- | --------------- |
-| Stack per frame | 4 KB            |
-| Total stack     | ~64 KB (varies) |
-| Heap            | 32 KB default   |
-| Compute Units   | 200,000 default |
+While we optimized Keccak hashing with syscalls, the bottleneck is **pure Rust field operations**:
 
-### Why UltraHonk Verification Exceeds Limits
+### Challenge Generation Operations
 
-UltraHonk verification involves several operations that consume significant stack space:
+| Operation           | Count | Notes                                  |
+| ------------------- | ----- | -------------------------------------- |
+| `challenge_split()` | ~75   | Each involves Keccak + field reduction |
+| `fr_mul`            | ~200+ | Modular multiplication (expensive)     |
+| `fr_add/fr_sub`     | ~300+ | Modular addition/subtraction           |
+| `fr_div`            | ~20+  | Modular division (very expensive)      |
 
-1. **Large Arrays** (Fixed-size allocations on stack)
+### Why Field Operations Are Expensive
 
-   ```rust
-   // These blow up the stack:
-   let gate_challenges: [Fr; 28] = ...;      // 28 × 32 = 896 bytes
-   let sumcheck_challenges: [Fr; 28] = ...;  // 28 × 32 = 896 bytes
-   let alphas: [Fr; 25] = ...;               // 25 × 32 = 800 bytes
-   let subrelations: [Fr; 26] = ...;         // 26 × 32 = 832 bytes
-   let evals: [Fr; 40] = ...;                // 40 × 32 = 1,280 bytes
-   ```
+Unlike BN254 curve operations (which use syscalls), **field arithmetic is pure Rust**:
 
-2. **Nested Function Calls**
+```rust
+// Each fr_mul does 512-bit multiplication + Barrett reduction
+// ~500-1000 CUs per multiplication
+pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
+    let a_limbs = fr_to_limbs(a);
+    let b_limbs = fr_to_limbs(b);
+    let result = mul_mod_wide(&a_limbs, &b_limbs);
+    limbs_to_fr(&result)
+}
 
-   ```
-   verify()
-   └─ verify_inner()
-      └─ generate_challenges()
-         └─ transcript operations (hash buffers)
-      └─ perform_sumcheck()
-         └─ accumulate_relation_evaluations()
-            └─ 8 sub-relation accumulators
-      └─ verify_shplemini()
-         └─ MSM operations
-   ```
-
-3. **Intermediate Computations**
-   - Each function call adds a new stack frame
-   - Local variables accumulate across nested calls
-   - Rust's optimizer may inline functions, combining stack frames
+// Each fr_div does extended Euclidean algorithm
+// ~2000-5000 CUs per division
+pub fn fr_div(a: &Fr, b: &Fr) -> Option<Fr> {
+    let b_inv = fr_inv(b)?;  // This is very expensive!
+    Some(fr_mul(a, &b_inv))
+}
+```
 
 ### Comparison: Why Groth16 Works
 
-| Aspect        | Groth16                          | UltraHonk                        |
-| ------------- | -------------------------------- | -------------------------------- |
-| Proof size    | 192 bytes                        | 16,224 bytes                     |
-| Public inputs | Small                            | 16 pairing points + user inputs  |
-| Verification  | 1 pairing check                  | Sumcheck + Shplemini + pairing   |
-| Stack usage   | ~500 bytes                       | ~10+ KB                          |
-| Library       | `groth16-solana` (BPF-optimized) | `plonk-core` (not BPF-optimized) |
+| Aspect                    | Groth16                      | UltraHonk                     |
+| ------------------------- | ---------------------------- | ----------------------------- |
+| Proof size                | 192 bytes                    | 16,224 bytes                  |
+| Field ops in verification | ~20                          | ~500+                         |
+| Curve ops in verification | 4 pairings                   | 70+ scalar muls + 1 pairing   |
+| Total CUs                 | ~350,000                     | >1,400,000                    |
+| Library                   | `groth16-solana` (optimized) | `plonk-core` (reference impl) |
 
-The `groth16-solana` library was specifically designed for Solana's constraints. Our `plonk-core` was ported from off-chain code without BPF optimization.
+Groth16 verification is dominated by pairing checks (syscalls), while UltraHonk has extensive field arithmetic in sumcheck.
 
-## Error Details
+## Potential Solutions
+
+### 1. Split Verification Across Multiple Transactions (Recommended)
+
+Store intermediate state in accounts and verify in phases:
 
 ```
-Program failed: Access violation in stack frame 3 at address 0x200003828 of size 8
+Transaction 1: Generate challenges → save to account
+Transaction 2: Verify sumcheck → save result to account
+Transaction 3: Compute pairing points → save to account
+Transaction 4: Final pairing check → return result
 ```
 
-This occurs when:
+This is how Light Protocol handles complex ZK verification on Solana.
 
-1. A function tries to allocate beyond its 4KB stack frame
-2. A write occurs to memory outside the valid stack region
-3. Nested calls exceed total stack budget
+### 2. Precompute More Off-Chain
 
-## Solutions
+Move expensive computations to the prover:
 
-### 1. Heap Allocation (Recommended)
+- Pre-compute all challenges
+- Pre-compute `public_input_delta`
+- Include intermediate values in proof
 
-Move large arrays to heap using `Box`:
+Requires protocol modifications.
 
-```rust
-// Before (stack):
-let challenges: [Fr; 28] = [SCALAR_ZERO; 28];
+### 3. Wait for Solana Improvements
 
-// After (heap):
-let challenges: Box<[Fr]> = vec![SCALAR_ZERO; 28].into_boxed_slice();
-```
+- Higher CU limits per transaction
+- Field arithmetic syscalls (like BN254 curve ops)
+- Better BPF compiler optimizations
 
-### 2. Break Up Stack Frames
+### 4. Use a Different Proof System
 
-Use `#[inline(never)]` to prevent stack frame combination:
+For Solana, consider:
 
-```rust
-#[inline(never)]
-fn compute_sumcheck(...) { ... }
+- **Groth16**: ~350K CUs, already works
+- **STARK**: Potentially splittable, hash-based
+- **Plonky2**: Designed for recursive verification
 
-#[inline(never)]
-fn compute_shplemini(...) { ... }
-```
+## Technical Details
 
-### 3. Reduce Intermediate Values
+### BPF Constraints
 
-Pre-compute values off-chain and pass them in.
+| Resource         | Limit           |
+| ---------------- | --------------- |
+| Stack per frame  | 4 KB            |
+| Total heap       | 32 KB           |
+| Compute Units    | 1,400,000 (max) |
+| Transaction size | ~1,232 bytes    |
 
-### 4. Use Solana's Heap API
+### What We Tried
 
-```rust
-use solana_program::entrypoint::HEAP_START_ADDRESS;
-// Manual heap management for large allocations
-```
+1. ✅ **Keccak syscalls**: `solana-keccak-hasher` (~100 CUs vs ~2000 for software)
+2. ✅ **Heap allocation**: `Box<[[u8; 64]; 27]>` for VK commitments
+3. ✅ **Stack frame breaking**: `#[inline(never)]` on all major functions
+4. ❌ **Field operation optimization**: Still software, still expensive
 
 ## Integration Test vs Real BPF
 
-Why do integration tests pass but real execution fails?
+| Environment           | Behavior                                |
+| --------------------- | --------------------------------------- |
+| `solana-program-test` | Uses native Rust, no CU limits enforced |
+| Real BPF/Surfpool     | Strict 1.4M CU cap per transaction      |
 
-| Environment           | Stack Behavior                        |
-| --------------------- | ------------------------------------- |
-| `solana-program-test` | Uses native Rust stack (MB available) |
-| Real BPF/SBF          | Strict 4KB per frame limit            |
-| Surfpool              | Real BPF constraints                  |
-
-The `solana-program-test` framework runs your program as native code, not actual BPF bytecode, so it doesn't enforce BPF stack limits.
-
-## Next Steps
-
-1. **Profile stack usage** with `cargo build-sbf -- -Z print-type-sizes`
-2. **Identify largest allocations** in hot paths
-3. **Box the big arrays** in `plonk-core`
-4. **Add `#[inline(never)]`** to deep call chains
-5. **Re-test on Surfpool**
+The `solana-program-test` framework simulates but doesn't enforce real BPF constraints.
 
 ## References
 
-- [Solana BPF Constraints](https://docs.solana.com/developing/on-chain-programs/limitations)
-- [Stack Frame Debugging](https://solana.stackexchange.com/questions/tagged/stack)
-- [groth16-solana approach](https://github.com/Lightprotocol/groth16-solana)
+- [Solana Compute Budget](https://solana.com/docs/core/fees#compute-budget)
+- [Light Protocol ZK on Solana](https://github.com/Lightprotocol/light-protocol)
+- [BN254 Syscalls](https://docs.solana.com/developing/runtime-facilities/programs#bn254)
+- [groth16-solana](https://github.com/Lightprotocol/groth16-solana)
