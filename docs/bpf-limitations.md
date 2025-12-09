@@ -59,10 +59,12 @@ While we optimized Keccak hashing with syscalls, the bottleneck is **pure Rust f
 ### The Core Issue
 
 Each `fr_mul` on BPF costs **~20,000-50,000 CUs** because it requires:
+
 1. 256×256 bit multiplication (schoolbook algorithm with 64-bit limbs = 16 multiplications + carries)
 2. 512-bit to 256-bit Barrett reduction (more multiplications + divisions)
 
 UltraHonk verification involves **thousands** of `fr_mul` calls across:
+
 - Challenge generation (~200 muls) - now split into 6 TXs ✅
 - Delta computation (~50 muls) - split into 2 TXs ✅
 - Sumcheck verification (~500+ muls) - exceeds 1.4M CUs ❌
@@ -88,6 +90,7 @@ pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
 ```
 
 The conversions alone add overhead. A Montgomery-based approach would:
+
 - Store values in Montgomery form permanently
 - Avoid byte↔limb conversions on every operation
 - Reduce modular reductions to single multiplication

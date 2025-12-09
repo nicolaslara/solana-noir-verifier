@@ -97,6 +97,48 @@ cargo test -p plonk-solana-core
 
 ---
 
+## On-Chain Verification (In Progress)
+
+### Challenge: BPF Compute Unit Limits
+
+Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires **millions of CUs** due to expensive pure-Rust field arithmetic (`fr_mul` costs ~20K-50K CUs each).
+
+### Completed ✅
+
+- [x] Solana program deployed to Surfpool
+- [x] Account-based proof storage (chunked upload)
+- [x] Challenge generation split into 6 transactions (~2M CUs total):
+  - Phase 1a: eta/beta/gamma (6K CUs)
+  - Phase 1b: alphas + gates (15K CUs)
+  - Phase 1c: sumcheck 0-13 (13K CUs)
+  - Phase 1d: sumcheck 14-27 + final (24K CUs)
+  - Phase 1e1: delta part 1 (915K CUs)
+  - Phase 1e2: delta part 2 (1.07M CUs)
+- [x] Binary extended GCD for `fr_inv` (faster than Fermat's theorem)
+
+### Blocked ❌
+
+- [ ] Phase 2 (Sumcheck verification) - exceeds 1.4M CUs
+- [ ] Phase 3 (MSM computation) - not yet tested
+- [ ] Phase 4 (Pairing check) - not yet tested
+
+### Root Cause: `fr_mul` is Too Expensive
+
+Each `fr_mul` on BPF costs ~20K-50K CUs because:
+
+1. 256×256 bit schoolbook multiplication
+2. Barrett reduction to 256 bits
+
+**Potential Optimizations:**
+
+- Montgomery multiplication (avoid repeated reductions)
+- Karatsuba algorithm (reduce multiplications)
+- Solana syscall proposal for Fr arithmetic
+
+See `docs/bpf-limitations.md` for detailed analysis.
+
+---
+
 ## Completed ✅
 
 ### UltraHonk Verification Implementation
