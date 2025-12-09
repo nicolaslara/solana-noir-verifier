@@ -25,6 +25,81 @@ pub const R2: [u64; 4] = [
 /// -r^{-1} mod 2^64 (Montgomery constant)
 pub const INV: u64 = 0xc2e1f593efffffff;
 
+/// Montgomery one: 1 in Montgomery form = R mod r
+pub const MONT_ONE: [u64; 4] = [
+    0xac96341c4ffffffb,
+    0x36fc76959f60cd29,
+    0x666ea36f7879462e,
+    0x0e0a77c19a07df2f,
+];
+
+// ============================================================================
+// Montgomery Arithmetic (faster modular multiplication)
+// ============================================================================
+
+/// Montgomery multiplication: computes a * b * R^-1 mod r
+/// If inputs are in Montgomery form (a' = a*R, b' = b*R), output is (a*b)*R (also in Montgomery form)
+#[inline(never)]
+fn mont_mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+    // CIOS (Coarsely Integrated Operand Scanning) Montgomery multiplication
+    let mut t = [0u64; 5]; // 5 limbs to handle overflow
+
+    for i in 0..4 {
+        // Multiply-accumulate: t += a * b[i]
+        let mut carry = 0u64;
+        for j in 0..4 {
+            let (lo, hi) = mac(t[j], a[j], b[i], carry);
+            t[j] = lo;
+            carry = hi;
+        }
+        let (t4, _) = t[4].overflowing_add(carry);
+        t[4] = t4;
+
+        // Montgomery reduction step
+        let m = t[0].wrapping_mul(INV);
+
+        // t += m * r
+        carry = 0;
+        let (_, hi) = mac(t[0], m, R[0], 0);
+        carry = hi;
+
+        for j in 1..4 {
+            let (lo, hi) = mac(t[j], m, R[j], carry);
+            t[j - 1] = lo;
+            carry = hi;
+        }
+        let (lo, hi) = t[4].overflowing_add(carry);
+        t[3] = lo;
+        t[4] = hi as u64;
+    }
+
+    // Final reduction
+    let mut result = [t[0], t[1], t[2], t[3]];
+    if t[4] != 0 || gte(&result, &R) {
+        result = sub_no_borrow(&result, &R);
+    }
+    result
+}
+
+/// Convert to Montgomery form: a -> a * R mod r
+#[inline]
+fn to_mont(a: &[u64; 4]) -> [u64; 4] {
+    mont_mul(a, &R2)
+}
+
+/// Convert from Montgomery form: a' -> a' * R^-1 mod r = a
+#[inline]
+fn from_mont(a: &[u64; 4]) -> [u64; 4] {
+    mont_mul(a, &[1, 0, 0, 0])
+}
+
+/// Multiply-accumulate: a + b * c + carry -> (lo, hi)
+#[inline(always)]
+fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+    let product = (a as u128) + (b as u128) * (c as u128) + (carry as u128);
+    (product as u64, (product >> 64) as u64)
+}
+
 /// Convert 32-byte big-endian Fr to 4 x u64 limbs (little-endian limbs)
 #[inline]
 pub fn fr_to_limbs(fr: &Fr) -> [u64; 4] {
@@ -121,10 +196,18 @@ pub fn fr_neg(a: &Fr) -> Fr {
 }
 
 /// Multiply two field elements: a * b mod r
+/// Uses Montgomery multiplication for efficiency
+/// Formula: mont_mul(mont_mul(a, b), R2) = a * b mod r
+/// Only 2 Montgomery multiplications instead of 4!
 pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
     let a_limbs = fr_to_limbs(a);
     let b_limbs = fr_to_limbs(b);
-    let result = mul_mod_wide(&a_limbs, &b_limbs);
+
+    // mont_mul(a, b) = a * b * R^-1 mod r
+    // mont_mul(result, R2) = a * b * R^-1 * R^2 * R^-1 = a * b mod r
+    let ab_div_r = mont_mul(&a_limbs, &b_limbs);
+    let result = mont_mul(&ab_div_r, &R2);
+
     limbs_to_fr(&result)
 }
 
@@ -146,6 +229,58 @@ pub fn fr_inv(a: &Fr) -> Option<Fr> {
     let a_limbs = fr_to_limbs(a);
     let result = binary_ext_gcd_inv(&a_limbs);
     Some(limbs_to_fr(&result))
+}
+
+/// Batch inversion using Montgomery's trick
+/// Given [a0, a1, ..., an-1], computes [1/a0, 1/a1, ..., 1/an-1] with only ONE inversion
+///
+/// Algorithm:
+/// 1. Compute prefix products: P[i] = a[0] * a[1] * ... * a[i-1]
+/// 2. Invert only P[n]: inv_all = 1 / (a[0] * a[1] * ... * a[n-1])
+/// 3. Walk backwards: a[i]^{-1} = P[i] * (product of a[j]^{-1} for j > i)
+///
+/// Cost: 3n-3 multiplications + 1 inversion (instead of n inversions)
+pub fn batch_inv(inputs: &[Fr]) -> Option<Vec<Fr>> {
+    let n = inputs.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+
+    // Check for zeros
+    for inp in inputs {
+        if *inp == SCALAR_ZERO {
+            return None;
+        }
+    }
+
+    if n == 1 {
+        return Some(vec![fr_inv(&inputs[0])?]);
+    }
+
+    // Step 1: Compute prefix products
+    // prefix[i] = inputs[0] * inputs[1] * ... * inputs[i-1]
+    let mut prefix = Vec::with_capacity(n);
+    prefix.push(crate::types::SCALAR_ONE);
+    for i in 0..n - 1 {
+        prefix.push(fr_mul(&prefix[i], &inputs[i]));
+    }
+
+    // Step 2: Compute product of all inputs and invert it
+    let all_product = fr_mul(&prefix[n - 1], &inputs[n - 1]);
+    let mut inv_suffix = fr_inv(&all_product)?;
+
+    // Step 3: Walk backwards to compute each inverse
+    // inv[i] = prefix[i] * inv_suffix
+    // Then update inv_suffix = inv_suffix * inputs[i]
+    let mut result = vec![SCALAR_ZERO; n];
+    for i in (0..n).rev() {
+        result[i] = fr_mul(&prefix[i], &inv_suffix);
+        if i > 0 {
+            inv_suffix = fr_mul(&inv_suffix, &inputs[i]);
+        }
+    }
+
+    Some(result)
 }
 
 /// Binary extended GCD for modular inverse

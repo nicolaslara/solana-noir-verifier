@@ -67,6 +67,12 @@ pub use verifier::{
     RelationParameters,
 };
 
+// Re-export incremental sumcheck types and functions
+pub use sumcheck::{
+    sumcheck_rounds_init, verify_sumcheck_relations, verify_sumcheck_rounds_partial,
+    SumcheckRoundsState,
+};
+
 /// VK size for new format (bb v0.84.0+)
 /// = 32-byte header + 27 G1 commitments (64 bytes each)
 /// = 32 + 1728 = 1760 bytes

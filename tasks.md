@@ -97,43 +97,45 @@ cargo test -p plonk-solana-core
 
 ---
 
-## On-Chain Verification (In Progress)
+g## On-Chain Verification (In Progress)
 
 ### Challenge: BPF Compute Unit Limits
 
-Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires **millions of CUs** due to expensive pure-Rust field arithmetic (`fr_mul` costs ~20K-50K CUs each).
+Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires splitting across multiple transactions.
 
 ### Completed ✅
 
 - [x] Solana program deployed to Surfpool
 - [x] Account-based proof storage (chunked upload)
-- [x] Challenge generation split into 6 transactions (~2M CUs total):
+- [x] Binary extended GCD for `fr_inv` (faster than Fermat's theorem)
+- [x] Karatsuba multiplication (~12% CU reduction)
+- [x] **Montgomery multiplication (~87% CU reduction, 7x faster!)** 🎉
+- [x] Challenge generation split into 6 transactions (**~296K CUs total**):
   - Phase 1a: eta/beta/gamma (6K CUs)
   - Phase 1b: alphas + gates (15K CUs)
   - Phase 1c: sumcheck 0-13 (13K CUs)
   - Phase 1d: sumcheck 14-27 + final (24K CUs)
-  - Phase 1e1: delta part 1 (915K CUs)
-  - Phase 1e2: delta part 2 (1.07M CUs)
-- [x] Binary extended GCD for `fr_inv` (faster than Fermat's theorem)
+  - Phase 1e1: delta part 1 (**104K CUs** - was 915K!)
+  - Phase 1e2: delta part 2 (**134K CUs** - was 1.07M!)
 
-### Blocked ❌
+### In Progress 🔧
 
-- [ ] Phase 2 (Sumcheck verification) - exceeds 1.4M CUs
+- [ ] Phase 2 (Sumcheck verification) - exceeds 1.4M CUs, needs splitting
+
+### Pending ⏳
+
 - [ ] Phase 3 (MSM computation) - not yet tested
 - [ ] Phase 4 (Pairing check) - not yet tested
 
-### Root Cause: `fr_mul` is Too Expensive
+### Optimization Progress
 
-Each `fr_mul` on BPF costs ~20K-50K CUs because:
-
-1. 256×256 bit schoolbook multiplication
-2. Barrett reduction to 256 bits
-
-**Potential Optimizations:**
-
-- Montgomery multiplication (avoid repeated reductions)
-- Karatsuba algorithm (reduce multiplications)
-- Solana syscall proposal for Fr arithmetic
+| Optimization              | Status         | Improvement       |
+| ------------------------- | -------------- | ----------------- |
+| Karatsuba multiplication  | ✅ Implemented | -12% CUs          |
+| Montgomery multiplication | ✅ Implemented | **-87% CUs (7x)** |
+| Binary Extended GCD       | ✅ Implemented | Much faster inv   |
+| BPF assembly              | ⏳ Pending     | Est. 2x more      |
+| Solana syscall            | ⏳ Proposal    | Est. 10x more     |
 
 See `docs/bpf-limitations.md` for detailed analysis.
 

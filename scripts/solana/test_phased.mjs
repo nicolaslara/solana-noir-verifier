@@ -35,11 +35,14 @@ const IX_PHASE1C = 22;
 const IX_PHASE1D = 23;
 const IX_PHASE1E1 = 24;
 const IX_PHASE1E2 = 25;
+// Sub-phased sumcheck verification
+const IX_PHASE2_ROUNDS = 40;  // Takes start_round, end_round in instruction data
+const IX_PHASE2D_RELATIONS = 43;
 
 // Constants
 const PROOF_SIZE = 16224;
 const BUFFER_HEADER_SIZE = 5;
-const STATE_SIZE = 3304;
+const STATE_SIZE = 3400; // Updated for sumcheck intermediate state
 const MAX_CHUNK_SIZE = 900;
 
 const proofPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/proof');
@@ -49,26 +52,30 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function executeWithCU(connection, tx, signers, description) {
+async function executeWithCU(connection, tx, signers, description, skipSimulation = false) {
     console.log(`\n${description}...`);
     try {
-        // First simulate to get CU estimate
-        const sim = await connection.simulateTransaction(tx);
-        const cus = sim.value.unitsConsumed || 0;
+        let cus = 0;
         
-        if (sim.value.err) {
-            console.log(`  ❌ Simulation Error: ${JSON.stringify(sim.value.err)}`);
-            console.log('  Logs:');
-            for (const log of (sim.value.logs || [])) {
-                console.log(`    ${log}`);
+        // Simulate only if not skipping (simulation uses stale state for dependent TXs)
+        if (!skipSimulation) {
+            const sim = await connection.simulateTransaction(tx);
+            cus = sim.value.unitsConsumed || 0;
+            
+            if (sim.value.err) {
+                console.log(`  ❌ Simulation Error: ${JSON.stringify(sim.value.err)}`);
+                console.log('  Logs:');
+                for (const log of (sim.value.logs || [])) {
+                    console.log(`    ${log}`);
+                }
+                return { success: false, cus };
             }
-            return { success: false, cus };
         }
         
         // Execute the transaction
         const sig = await connection.sendTransaction(tx, signers, { skipPreflight: true });
         
-        // Poll for confirmation
+        // Poll for confirmation and get logs
         for (let i = 0; i < 30; i++) {
             await sleep(500);
             const status = await connection.getSignatureStatus(sig);
@@ -76,8 +83,19 @@ async function executeWithCU(connection, tx, signers, description) {
                 status.value?.confirmationStatus === 'finalized') {
                 if (status.value?.err) {
                     console.log(`  ❌ TX Error: ${JSON.stringify(status.value.err)}`);
+                    // Try to get logs
+                    const txDetails = await connection.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
+                    if (txDetails?.meta?.logMessages) {
+                        console.log('  Logs:');
+                        for (const log of txDetails.meta.logMessages) {
+                            console.log(`    ${log}`);
+                        }
+                    }
                     return { success: false, cus };
                 }
+                // Get actual CU from transaction
+                const txDetails = await connection.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
+                cus = txDetails?.meta?.computeUnitsConsumed || cus;
                 console.log(`  ✅ Success! CUs: ${cus}`);
                 return { success: true, cus };
             }
@@ -180,9 +198,6 @@ async function main() {
     await Promise.all(uploadPromises);
     console.log(`Proof uploaded (${uploadPromises.length} chunks in parallel) ✓\n`);
     
-    // ===== SUB-PHASED CHALLENGE GENERATION =====
-    console.log('=== SUB-PHASED CHALLENGE GENERATION ===');
-    
     const results = {};
     
     // Helper to create a phased TX
@@ -202,46 +217,94 @@ async function main() {
         return executeWithCU(connection, tx, [payer], description);
     }
     
-    // Execute each phase sequentially (state persists between TXs)
-    results.phase1a = await createPhaseTx(IX_PHASE1A, 'Phase 1a: eta/beta/gamma');
-    if (!results.phase1a.success) console.log('  Stopping - phase failed');
+    // ===== PHASE 1: Challenge Generation (6 sub-phases, ~296K CUs total) =====
+    // Note: Unified Phase 1 hits BPF heap limit (32KB), so we use sub-phases
+    console.log('=== PHASE 1: CHALLENGE GENERATION ===');
     
+    results.phase1a = await createPhaseTx(IX_PHASE1A, 'Phase 1a: eta/beta/gamma');
     if (results.phase1a.success) {
         results.phase1b = await createPhaseTx(IX_PHASE1B, 'Phase 1b: alphas/gates');
-    } else {
-        results.phase1b = { success: false, cus: 0 };
     }
-    
-    if (results.phase1b.success) {
+    if (results.phase1b?.success) {
         results.phase1c = await createPhaseTx(IX_PHASE1C, 'Phase 1c: sumcheck 0-13');
-    } else {
-        results.phase1c = { success: false, cus: 0 };
     }
-    
-    if (results.phase1c.success) {
+    if (results.phase1c?.success) {
         results.phase1d = await createPhaseTx(IX_PHASE1D, 'Phase 1d: sumcheck 14-27 + final');
-    } else {
-        results.phase1d = { success: false, cus: 0 };
     }
-    
-    if (results.phase1d.success) {
+    if (results.phase1d?.success) {
         results.phase1e1 = await createPhaseTx(IX_PHASE1E1, 'Phase 1e1: delta part1');
-    } else {
-        results.phase1e1 = { success: false, cus: 0 };
     }
-    
-    if (results.phase1e1.success) {
+    if (results.phase1e1?.success) {
         results.phase1e2 = await createPhaseTx(IX_PHASE1E2, 'Phase 1e2: delta part2');
-    } else {
-        results.phase1e2 = { success: false, cus: 0 };
     }
     
-    // Phase 2: Verify Sumcheck
-    if (results.phase1e2.success) {
-        results.phase2 = await createPhaseTx(IX_PHASED_VERIFY_SUMCHECK, 'Phase 2: Verify Sumcheck');
-    } else {
-        results.phase2 = { success: false, cus: 0 };
+    const phase1Total = (results.phase1a?.cus || 0) + (results.phase1b?.cus || 0) + 
+                       (results.phase1c?.cus || 0) + (results.phase1d?.cus || 0) + 
+                       (results.phase1e1?.cus || 0) + (results.phase1e2?.cus || 0);
+    results.phase1 = { success: results.phase1e2?.success || false, cus: phase1Total };
+    
+    // Phase 2: Verify Sumcheck (split into many sub-phases: 2 rounds per TX)
+    console.log('\n=== PHASE 2: SUMCHECK VERIFICATION ===');
+    
+    // Helper to create round verification TX with round range in data
+    async function createRoundsTx(startRound, endRound, label) {
+        const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+        const ix = new TransactionInstruction({
+            keys: [
+                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
+                { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
+            ],
+            programId: PROGRAM_ID,
+            data: Buffer.from([IX_PHASE2_ROUNDS, startRound, endRound]),
+        });
+        const tx = new Transaction().add(computeIx).add(ix);
+        tx.feePayer = payer.publicKey;
+        tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+        
+        // Skip simulation for dependent TXs (state changes between TXs)
+        const skipSim = startRound > 0;
+        const result = await executeWithCU(connection, tx, [payer], label, skipSim);
+        return result;
     }
+    
+    // Read log_n from state account to know how many rounds to verify
+    let logN = 28; // Default to max
+    if (results.phase1.success) {
+        const stateData = await connection.getAccountInfo(stateBuffer.publicKey);
+        if (stateData) {
+            // log_n is at offset 3 in VerificationState (after phase, challenge_sub_phase, sumcheck_sub_phase)
+            logN = stateData.data[3];
+            console.log(`Circuit log_n: ${logN}`);
+        }
+    }
+    
+    // Verify 2 rounds per TX
+    const ROUNDS_PER_TX = 2;
+    const roundResults = [];
+    let allRoundsSuccess = results.phase1.success;
+    
+    for (let r = 0; r < logN && allRoundsSuccess; r += ROUNDS_PER_TX) {
+        const endRound = Math.min(r + ROUNDS_PER_TX, logN);
+        const result = await createRoundsTx(r, endRound, `Phase 2: rounds ${r}-${endRound-1}`);
+        roundResults.push({ start: r, end: endRound, ...result });
+        allRoundsSuccess = result.success;
+    }
+    
+    // Phase 2d: Relations
+    if (allRoundsSuccess) {
+        results.phase2d = await createPhaseTx(IX_PHASE2D_RELATIONS, 'Phase 2d: relations');
+    } else {
+        results.phase2d = { success: false, cus: 0 };
+    }
+    
+    // Calculate totals
+    const roundsCUs = roundResults.reduce((sum, r) => sum + (r.cus || 0), 0);
+    const phase2Total = roundsCUs + (results.phase2d?.cus || 0);
+    results.phase2 = { 
+        success: results.phase2d?.success || false, 
+        cus: phase2Total,
+        roundResults 
+    };
     
     // Phase 3: Compute MSM
     if (results.phase2.success) {
@@ -255,7 +318,7 @@ async function main() {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
         const ix = new TransactionInstruction({
             keys: [
-                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
+                { pubkey: activeStateBuffer.publicKey, isSigner: false, isWritable: true },
             ],
             programId: PROGRAM_ID,
             data: Buffer.from([IX_PHASED_FINAL_CHECK]),
@@ -270,31 +333,40 @@ async function main() {
     
     // Summary
     console.log('\n=== SUMMARY ===');
-    console.log('Challenge Generation Sub-Phases:');
-    console.log(`  1a (eta/beta/gamma):  ${results.phase1a.success ? '✅' : '❌'} ${results.phase1a.cus?.toLocaleString()} CUs`);
-    console.log(`  1b (alphas/gates):    ${results.phase1b.success ? '✅' : '❌'} ${results.phase1b.cus?.toLocaleString()} CUs`);
-    console.log(`  1c (sumcheck 0-13):   ${results.phase1c.success ? '✅' : '❌'} ${results.phase1c.cus?.toLocaleString()} CUs`);
-    console.log(`  1d (sumcheck 14-27):  ${results.phase1d.success ? '✅' : '❌'} ${results.phase1d.cus?.toLocaleString()} CUs`);
-    console.log(`  1e1 (delta part1):    ${results.phase1e1.success ? '✅' : '❌'} ${results.phase1e1.cus?.toLocaleString()} CUs`);
-    console.log(`  1e2 (delta part2):    ${results.phase1e2.success ? '✅' : '❌'} ${results.phase1e2.cus?.toLocaleString()} CUs`);
-    console.log('Verification Phases:');
-    console.log(`  2 (Sumcheck):         ${results.phase2.success ? '✅' : '❌'} ${results.phase2.cus?.toLocaleString()} CUs`);
+    
+    console.log('Phase 1 - Challenge Generation (6 TXs):');
+    console.log(`  1a (eta/beta/gamma):  ${results.phase1a?.success ? '✅' : '❌'} ${(results.phase1a?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  1b (alphas/gates):    ${results.phase1b?.success ? '✅' : '❌'} ${(results.phase1b?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  1c (sumcheck 0-13):   ${results.phase1c?.success ? '✅' : '❌'} ${(results.phase1c?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  1d (sumcheck 14-27):  ${results.phase1d?.success ? '✅' : '❌'} ${(results.phase1d?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  1e1 (delta part1):    ${results.phase1e1?.success ? '✅' : '❌'} ${(results.phase1e1?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  1e2 (delta part2):    ${results.phase1e2?.success ? '✅' : '❌'} ${(results.phase1e2?.cus || 0).toLocaleString()} CUs`);
+    
+    const phase2Rounds = results.phase2?.roundResults || [];
+    console.log(`Phase 2 - Sumcheck Verification (${phase2Rounds.length + 1} TXs):`);
+    for (const r of phase2Rounds) {
+        console.log(`  rounds ${r.start}-${r.end-1}:        ${r.success ? '✅' : '❌'} ${(r.cus || 0).toLocaleString()} CUs`);
+    }
+    console.log(`  relations:            ${results.phase2d?.success ? '✅' : '❌'} ${(results.phase2d?.cus || 0).toLocaleString()} CUs`);
+    
+    console.log('Phase 3-4 - Final Verification:');
     console.log(`  3 (MSM):              ${results.phase3.success ? '✅' : '❌'} ${results.phase3.cus?.toLocaleString()} CUs`);
     console.log(`  4 (Pairing):          ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
     
-    const challengeCUs = (results.phase1a.cus || 0) + (results.phase1b.cus || 0) + 
-                         (results.phase1c.cus || 0) + (results.phase1d.cus || 0) + 
-                         (results.phase1e1.cus || 0) + (results.phase1e2.cus || 0);
-    const verifyCUs = (results.phase2.cus || 0) + (results.phase3.cus || 0) + (results.phase4.cus || 0);
-    const total = challengeCUs + verifyCUs;
+    const challengeCUs = results.phase1.cus || 0;
+    const sumcheckCUs = results.phase2.cus || 0;
+    const finalCUs = (results.phase3.cus || 0) + (results.phase4.cus || 0);
+    const total = challengeCUs + sumcheckCUs + finalCUs;
     
-    console.log(`\nChallenge Generation: ${challengeCUs.toLocaleString()} CUs (6 TXs)`);
-    console.log(`Verification: ${verifyCUs.toLocaleString()} CUs (3 TXs)`);
-    console.log(`Total: ${total.toLocaleString()} CUs across 9 transactions`);
+    const numRoundTXs = phase2Rounds.length;
+    const totalTXs = 6 + numRoundTXs + 1 + 2; // Phase 1 + rounds + relations + Phase 3-4
     
-    const allSuccess = results.phase1a.success && results.phase1b.success && 
-                       results.phase1c.success && results.phase1d.success && 
-                       results.phase1e1.success && results.phase1e2.success &&
+    console.log(`\nPhase 1 (Challenges): ${challengeCUs.toLocaleString()} CUs (6 TXs)`);
+    console.log(`Phase 2 (Sumcheck):   ${sumcheckCUs.toLocaleString()} CUs (${numRoundTXs + 1} TXs)`);
+    console.log(`Phase 3-4 (Final):    ${finalCUs.toLocaleString()} CUs (2 TXs)`);
+    console.log(`Total: ${total.toLocaleString()} CUs across ${totalTXs} transactions`);
+    
+    const allSuccess = results.phase1.success && 
                        results.phase2.success && results.phase3.success && results.phase4.success;
     
     if (allSuccess) {

@@ -32,13 +32,18 @@ use plonk_solana_core::{
     generate_challenges_phase1b,
     generate_challenges_phase1c,
     generate_challenges_phase1d,
+    // Incremental sumcheck verification
+    sumcheck_rounds_init,
     verify_step1_challenges,
     verify_step2_sumcheck,
     verify_step3_pairing_points,
     verify_step4_pairing_check,
+    verify_sumcheck_relations,
+    verify_sumcheck_rounds_partial,
     Challenges,
     DeltaPartialResult,
     Fr,
+    SumcheckRoundsState,
 };
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
@@ -147,6 +152,21 @@ pub enum Instruction {
     /// Phase 1e2: public_input_delta part 2 (remaining 8 items + division)
     /// Accounts: [state (writable), proof_data (readonly)]
     Phase1e2DeltaPart2 = 25,
+
+    // === Unified Phase 1 (after Montgomery optimization) ===
+    /// Phase 1 Full: All challenge generation in one TX (~300K CUs)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1Full = 30,
+
+    // === Sub-phased sumcheck verification (splits Phase 2) ===
+    /// Phase 2 rounds: Verify a batch of sumcheck rounds
+    /// Accounts: [state (writable), proof_data (readonly)]
+    /// Data: [instruction(1), start_round(1), end_round(1)]
+    Phase2Rounds = 40,
+
+    /// Phase 2d: Relations + final check
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase2dRelations = 43,
 }
 
 // ============================================================================
@@ -201,6 +221,13 @@ pub fn process_instruction(
         23 => process_phase1d_sumcheck_rest(program_id, accounts),
         24 => process_phase1e1_delta_part1(program_id, accounts),
         25 => process_phase1e2_delta_part2(program_id, accounts),
+
+        // Unified Phase 1 (after Montgomery optimization - ~300K CUs)
+        30 => process_phase1_full(program_id, accounts),
+
+        // Sub-phased sumcheck verification
+        40 => process_phase2_rounds(program_id, accounts, instruction_data),
+        43 => process_phase2d_relations(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -577,7 +604,7 @@ fn process_phased_generate_challenges(
     // Save challenges to state account
     state.log_n = log_n as u8;
     state.is_zk = if is_zk { 1 } else { 0 };
-    state.num_public_inputs = num_pi as u16;
+    state.num_public_inputs = num_pi as u8;
 
     // RelationParameters
     state.eta = challenges.relation_params.eta;
@@ -804,6 +831,13 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
 // Sub-Phased Challenge Generation (splits Phase 1)
 // ============================================================================
 
+/// Phase 1 Full: Unified challenge generation (after Montgomery optimization)
+/// This does all of Phase 1 in one transaction (~300K CUs with Montgomery)
+fn process_phase1_full(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    // Reuse the existing challenge generation function
+    process_phased_generate_challenges(program_id, accounts)
+}
+
 /// Phase 1a: Generate eta, beta/gamma challenges
 fn process_phase1a_eta_beta_gamma(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 1a: eta/beta/gamma");
@@ -870,7 +904,7 @@ fn process_phase1a_eta_beta_gamma(_program_id: &Pubkey, accounts: &[AccountInfo]
     // Save to state
     state.log_n = log_n as u8;
     state.is_zk = 1;
-    state.num_public_inputs = num_pi as u16;
+    state.num_public_inputs = num_pi as u8;
     state.eta = result.eta;
     state.eta_two = result.eta_two;
     state.eta_three = result.eta_three;
@@ -1194,6 +1228,232 @@ fn process_phase1e2_delta_part2(_program_id: &Pubkey, accounts: &[AccountInfo]) 
     msg!("Phase 1e2 complete - all challenges generated!");
     sol_log_compute_units();
     Ok(())
+}
+
+// ============================================================================
+// Sumcheck Sub-Phase Handlers (Phase 2)
+// ============================================================================
+
+/// Phase 2 rounds: Verify a batch of sumcheck rounds
+/// Data format: [instruction(1), start_round(1), end_round(1)]
+fn process_phase2_rounds(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    // Parse round range from instruction data
+    if instruction_data.len() < 3 {
+        msg!("Missing round range in instruction data");
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let start_round = instruction_data[1] as usize;
+    let end_round = instruction_data[2] as usize;
+
+    msg!("Phase 2: rounds {}-{}", start_round, end_round);
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase - must be ChallengesGenerated or SumcheckInProgress
+    let phase = state.get_phase();
+    if phase != phased::Phase::ChallengesGenerated && phase != phased::Phase::SumcheckInProgress {
+        msg!("Invalid phase: expected ChallengesGenerated or SumcheckInProgress");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Check rounds continuity
+    let rounds_completed = state.sumcheck_rounds_completed as usize;
+    if start_round != rounds_completed {
+        msg!(
+            "Invalid round range: start {} but {} rounds completed",
+            start_round,
+            rounds_completed
+        );
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Get or initialize sumcheck state
+    let prev_state = if start_round == 0 {
+        // Initialize sumcheck state
+        let libra_challenge = if state.libra_challenge == [0u8; 32] {
+            None
+        } else {
+            Some(state.libra_challenge)
+        };
+        sumcheck_rounds_init(&proof, libra_challenge.as_ref())
+    } else {
+        // Reconstruct from saved state
+        SumcheckRoundsState {
+            target: state.sumcheck_target,
+            pow_partial: state.sumcheck_pow_partial,
+            rounds_completed,
+        }
+    };
+
+    let challenges = reconstruct_sumcheck_challenges(state);
+
+    msg!("Running rounds...");
+    sol_log_compute_units();
+
+    // Verify rounds
+    let new_state =
+        verify_sumcheck_rounds_partial(&proof, &challenges, &prev_state, start_round, end_round)
+            .map_err(|e| {
+                msg!("Rounds {}-{} failed: {}", start_round, end_round, e);
+                ProgramError::InvalidAccountData
+            })?;
+
+    // Save intermediate state
+    state.sumcheck_target = new_state.target;
+    state.sumcheck_pow_partial = new_state.pow_partial;
+    state.sumcheck_rounds_completed = new_state.rounds_completed as u8;
+    state.set_phase(phased::Phase::SumcheckInProgress);
+
+    // Mark all rounds done if we've completed all log_n rounds
+    if new_state.rounds_completed >= proof.log_n {
+        state.set_sumcheck_sub_phase(phased::SumcheckSubPhase::AllRoundsDone);
+    }
+
+    msg!(
+        "Rounds {}-{} complete ({} total)",
+        start_round,
+        end_round,
+        new_state.rounds_completed
+    );
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 2d: Verify relations and final check
+fn process_phase2d_relations(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 2d: relations");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in SumcheckInProgress with all rounds done
+    if state.get_phase() != phased::Phase::SumcheckInProgress {
+        msg!("Invalid phase: expected SumcheckInProgress");
+        return Err(ProgramError::InvalidAccountData);
+    }
+    // Verify all rounds are completed (rounds_completed >= log_n)
+    let log_n = state.log_n as usize;
+    if (state.sumcheck_rounds_completed as usize) < log_n {
+        msg!(
+            "Not all rounds completed: {} < {}",
+            state.sumcheck_rounds_completed,
+            log_n
+        );
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct sumcheck state
+    let sumcheck_state = SumcheckRoundsState {
+        target: state.sumcheck_target,
+        pow_partial: state.sumcheck_pow_partial,
+        rounds_completed: state.sumcheck_rounds_completed as usize,
+    };
+
+    // Reconstruct relation params
+    let relation_params = plonk_solana_core::RelationParameters {
+        eta: state.eta,
+        eta_two: state.eta_two,
+        eta_three: state.eta_three,
+        beta: state.beta,
+        gamma: state.gamma,
+        public_input_delta: state.public_input_delta,
+    };
+
+    let libra_challenge = if state.libra_challenge == [0u8; 32] {
+        None
+    } else {
+        Some(state.libra_challenge)
+    };
+
+    msg!("Running relations...");
+    sol_log_compute_units();
+
+    // Verify relations (need sumcheck_u_challenges for ZK adjustment)
+    let sumcheck_u_challenges: Vec<Fr> = state.sumcheck_challenges.to_vec();
+    verify_sumcheck_relations(
+        &proof,
+        &relation_params,
+        &state.alphas,
+        &sumcheck_u_challenges,
+        &sumcheck_state,
+        libra_challenge.as_ref(),
+    )
+    .map_err(|e| {
+        msg!("Relations failed: {}", e);
+        ProgramError::InvalidAccountData
+    })?;
+
+    state.sumcheck_passed = 1;
+    state.set_sumcheck_sub_phase(phased::SumcheckSubPhase::RelationsDone);
+    state.set_phase(phased::Phase::SumcheckVerified);
+
+    msg!("Phase 2d complete - sumcheck verified!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Reconstruct SumcheckChallenges from state account
+fn reconstruct_sumcheck_challenges(
+    state: &phased::VerificationState,
+) -> plonk_solana_core::sumcheck::SumcheckChallenges {
+    plonk_solana_core::sumcheck::SumcheckChallenges {
+        gate_challenges: state.gate_challenges.to_vec(),
+        sumcheck_u_challenges: state.sumcheck_challenges.to_vec(),
+        alphas: state.alphas.to_vec(),
+    }
 }
 
 /// Reconstruct Challenges struct from state account

@@ -12,23 +12,52 @@
 - ✅ **Keccak syscall**: Using `sol_keccak256` for Fiat-Shamir (~100 CUs each)
 - ✅ **Challenge generation**: Split into 6 sub-phases, all succeed!
 
-### Challenge Generation Results (WORKING!)
+### Challenge Generation Results (WORKING!) 🎉
 
-| Phase     | Description            | CUs         |
-| --------- | ---------------------- | ----------- |
-| 1a        | eta/beta/gamma         | 6,209       |
-| 1b        | alphas + gates         | 15,018      |
-| 1c        | sumcheck 0-13          | 12,935      |
-| 1d        | sumcheck 14-27 + final | 23,831      |
-| 1e1       | delta part 1           | 915,210     |
-| 1e2       | delta part 2           | 1,068,277   |
-| **Total** | **6 transactions**     | **~2M CUs** |
+After Montgomery multiplication optimization:
+
+| Phase     | Description            | CUs (Montgomery) |
+| --------- | ---------------------- | ---------------- |
+| 1a        | eta/beta/gamma         | 6,209            |
+| 1b        | alphas + gates         | 15,018           |
+| 1c        | sumcheck 0-13          | 12,935           |
+| 1d        | sumcheck 14-27 + final | 23,831           |
+| 1e1       | delta part 1           | **103,952**      |
+| 1e2       | delta part 2           | **133,937**      |
+| **Total** | **6 transactions**     | **~296K CUs**    |
+
+**7x improvement** from Montgomery multiplication!
 
 ### What Doesn't Work Yet
 
-- ❌ **Phase 2 (Sumcheck verification)**: Exceeds 1.4M CUs - needs splitting
+- ❌ **Phase 2 (Sumcheck verification)**: Exceeds 1.4M CUs - needs splitting into sub-phases
 - ❌ **Phase 3 (MSM)**: Not yet tested
 - ❌ **Phase 4 (Pairing)**: Not yet tested
+
+### Phase 2 Analysis (December 2024)
+
+CU logging revealed that **sumcheck rounds alone exceed 1.4M CUs**:
+
+```
+Program log: Sumcheck: before rounds
+Program consumption: 1,396,940 units remaining
+[exceeded during rounds - never reached relations]
+```
+
+With batch inversion optimization:
+
+- 28 rounds × ~50K CUs/round = **~1.4M CUs just for rounds**
+- Relations accumulation not even reached yet
+
+**Optimizations Applied:**
+
+- ✅ Batch inversion: Reduced 9 inversions → 1 per round (~3x savings)
+- ✅ Montgomery multiplication: ~7x improvement on field ops
+- ✅ Precomputed I_FR constants: Avoid fr_from_u64 calls
+
+**Still needed:**
+
+- Split sumcheck rounds into sub-phases (2a: rounds 0-9, 2b: rounds 10-19, etc.)
 
 ## Compute Unit Analysis
 
@@ -72,44 +101,47 @@ UltraHonk verification involves **thousands** of `fr_mul` calls across:
 
 ### `fr_mul` Optimizations
 
-| Optimization            | Status             | Improvement  |
-| ----------------------- | ------------------ | ------------ |
-| **Karatsuba algorithm** | ✅ Implemented     | **-12%** CUs |
-| **Montgomery form**     | 🔲 Pending         | Est. 2-3x    |
-| **BPF assembly**        | 🔲 Pending         | Est. 2x      |
-| **Solana syscall**      | 🔲 Proposal needed | Est. 100x    |
+| Optimization            | Status         | Improvement       |
+| ----------------------- | -------------- | ----------------- |
+| **Karatsuba algorithm** | ✅ Implemented | -12% CUs          |
+| **Montgomery form**     | ✅ Implemented | **-87% CUs (7x)** |
+| **BPF assembly**        | 🔲 Pending     | Est. 2x more      |
+| **Solana syscall**      | 🔲 Proposal    | Est. 10x more     |
 
-#### Karatsuba Results (December 2024)
+#### Montgomery Results (December 2024) 🎉
 
-Karatsuba multiplication reduces 16 64-bit muls to ~12 by splitting 256-bit numbers into 128-bit halves:
+Montgomery multiplication avoids expensive modular reduction by using shifts instead of division:
 
-- `z0 = a_lo * b_lo`
-- `z2 = a_hi * b_hi`
-- `z1 = (a_lo + a_hi)(b_lo + b_hi) - z0 - z2`
+| Phase       | Original | Karatsuba | Montgomery | Total Improvement |
+| ----------- | -------- | --------- | ---------- | ----------------- |
+| 1e1 (delta) | 915K     | 798K      | **104K**   | **-89%**          |
+| 1e2 (delta) | 1,068K   | 936K      | **134K**   | **-87%**          |
+| **Total**   | ~2M      | ~1.79M    | **~296K**  | **-85%**          |
 
-| Phase       | Before | After | Reduction |
-| ----------- | ------ | ----- | --------- |
-| 1e1 (delta) | 915K   | 798K  | -13%      |
-| 1e2 (delta) | 1,068K | 936K  | -12%      |
+Challenge generation now uses only **~296K CUs** across 6 transactions!
 
-### Current `fr_mul` Implementation
+### Current `fr_mul` Implementation (Montgomery)
 
 ```rust
+/// Montgomery multiplication: a * b mod r
+/// Formula: mont_mul(mont_mul(a, b), R2) = a * b mod r
 pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
-    let a_limbs = fr_to_limbs(a);  // Convert to [u64; 4]
+    let a_limbs = fr_to_limbs(a);
     let b_limbs = fr_to_limbs(b);
-    let result = mul_mod_wide(&a_limbs, &b_limbs);  // 512-bit result + Barrett reduction
-    limbs_to_fr(&result)  // Convert back to bytes
+
+    // mont_mul(a, b) = a * b * R^-1 mod r
+    // mont_mul(result, R2) = a * b mod r
+    let ab_div_r = mont_mul(&a_limbs, &b_limbs);
+    let result = mont_mul(&ab_div_r, &R2);
+
+    limbs_to_fr(&result)
 }
 ```
 
-The conversions alone add overhead. A Montgomery-based approach would:
+This uses CIOS (Coarsely Integrated Operand Scanning) Montgomery multiplication,
+which avoids expensive division by using only additions and shifts.
 
-- Store values in Montgomery form permanently
-- Avoid byte↔limb conversions on every operation
-- Reduce modular reductions to single multiplication
-
-While we optimized Keccak hashing with syscalls, the bottleneck is **pure Rust field operations**:
+### Remaining Field Operations
 
 ### Challenge Generation Operations
 
@@ -225,7 +257,10 @@ For Solana, consider:
 1. ✅ **Keccak syscalls**: `solana-keccak-hasher` (~100 CUs vs ~2000 for software)
 2. ✅ **Heap allocation**: `Box<[[u8; 64]; 27]>` for VK commitments
 3. ✅ **Stack frame breaking**: `#[inline(never)]` on all major functions
-4. ❌ **Field operation optimization**: Still software, still expensive
+4. ✅ **Karatsuba multiplication**: ~12% improvement in `fr_mul`
+5. ✅ **Montgomery multiplication**: **~87% improvement** in `fr_mul` (7x faster!)
+6. ✅ **Binary Extended GCD for `fr_inv`**: Much faster than Fermat's Little Theorem
+7. ⏳ **Sumcheck splitting**: Still needed, exceeds 1.4M CUs
 
 ## Integration Test vs Real BPF
 
