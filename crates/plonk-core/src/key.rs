@@ -18,6 +18,9 @@
 use crate::errors::KeyError;
 use crate::types::G1;
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 /// New VK size (bb v0.84.0+): 32-byte header + 27 G1 points
 pub const VK_SIZE_NEW: usize = 32 + 27 * 64; // 1760 bytes
 
@@ -31,6 +34,9 @@ pub const VK_NUM_COMMITMENTS_NEW: usize = 27;
 pub const VK_NUM_COMMITMENTS_OLD: usize = 28;
 
 /// Parsed verification key for UltraHonk
+///
+/// Note: commitments are stored on the heap (Vec) to avoid BPF stack overflow.
+/// The fixed-size array was 1,792 bytes which consumed almost half the 4KB frame limit.
 #[derive(Debug, Clone)]
 pub struct VerificationKey {
     /// Log2 of circuit size
@@ -41,9 +47,9 @@ pub struct VerificationKey {
     pub num_public_inputs: u32,
     /// Public inputs offset (new format only)
     pub pub_inputs_offset: u32,
-    /// G1 commitments to selector and permutation polynomials (up to 28)
+    /// G1 commitments to selector and permutation polynomials (heap-allocated)
     /// New format has 27, old format has 28
-    pub commitments: [[u8; 64]; VK_NUM_COMMITMENTS_OLD],
+    pub commitments: Vec<G1>,
     /// Number of actual commitments (27 or 28)
     pub num_commitments: usize,
 }
@@ -65,40 +71,38 @@ impl VerificationKey {
     fn from_bytes_new(bytes: &[u8]) -> Result<Self, KeyError> {
         // Header: 4 × 8-byte big-endian u64
         let circuit_size = u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]) as u32;
-        
+
         let log2_circuit_size = u64::from_be_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
         ]) as u32;
-        
+
         let num_public_inputs = u64::from_be_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19],
-            bytes[20], bytes[21], bytes[22], bytes[23],
+            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
         ]) as u32;
-        
+
         let pub_inputs_offset = u64::from_be_bytes([
-            bytes[24], bytes[25], bytes[26], bytes[27],
-            bytes[28], bytes[29], bytes[30], bytes[31],
+            bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
         ]) as u32;
 
         // Validate
         if log2_circuit_size > 30 {
             return Err(KeyError::InvalidCircuitSize);
         }
-        
+
         // Verify circuit_size matches log2
         if circuit_size != (1 << log2_circuit_size) {
             return Err(KeyError::InvalidCircuitSize);
         }
 
-        // Parse G1 commitments (27 in new format)
-        let mut commitments = [[0u8; 64]; VK_NUM_COMMITMENTS_OLD];
+        // Parse G1 commitments (27 in new format) - heap allocated
+        let mut commitments = Vec::with_capacity(VK_NUM_COMMITMENTS_NEW);
         let mut offset = 32;
-        for i in 0..VK_NUM_COMMITMENTS_NEW {
-            commitments[i].copy_from_slice(&bytes[offset..offset + 64]);
+        for _ in 0..VK_NUM_COMMITMENTS_NEW {
+            let mut commitment = [0u8; 64];
+            commitment.copy_from_slice(&bytes[offset..offset + 64]);
+            commitments.push(commitment);
             offset += 64;
         }
 
@@ -131,11 +135,13 @@ impl VerificationKey {
             return Err(KeyError::InvalidDomainSize);
         }
 
-        // Parse G1 commitments (28 in old format)
-        let mut commitments = [[0u8; 64]; VK_NUM_COMMITMENTS_OLD];
+        // Parse G1 commitments (28 in old format) - heap allocated
+        let mut commitments = Vec::with_capacity(VK_NUM_COMMITMENTS_OLD);
         let mut offset = 96;
-        for commitment in commitments.iter_mut() {
+        for _ in 0..VK_NUM_COMMITMENTS_OLD {
+            let mut commitment = [0u8; 64];
             commitment.copy_from_slice(&bytes[offset..offset + 64]);
+            commitments.push(commitment);
             offset += 64;
         }
 

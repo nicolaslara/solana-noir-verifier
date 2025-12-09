@@ -1,4 +1,4 @@
-# BPF Stack Limitations for UltraHonk Verification
+# BPF Limitations for UltraHonk Verification
 
 ## Current State (December 2024)
 
@@ -8,10 +8,21 @@
 - ✅ **Integration tests**: `solana-program-test` simulator passes
 - ✅ **Program deployment**: Deploys successfully to Surfpool/Solana
 - ✅ **Proof upload**: Account-based chunked upload works
+- ✅ **Stack overflow fixed**: Using `#[inline(never)]` and heap allocation
 
 ### What Doesn't Work
 
-- ❌ **On-chain verification**: Fails with "Access violation in stack frame"
+- ❌ **On-chain verification**: Exceeds 1.4M compute unit limit
+
+## Compute Unit Analysis
+
+| Metric        | Value              |
+| ------------- | ------------------ |
+| CUs requested | 1,400,000          |
+| CUs consumed  | 1,399,850+         |
+| Status        | **Exceeded limit** |
+
+UltraHonk verification needs **more than 1.4M CUs** (the maximum per transaction).
 
 ## The Problem
 

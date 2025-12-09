@@ -12,7 +12,7 @@ members = []
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-plonk-solana-core = { path = "../../crates/plonk-core" }
+plonk-solana-core = { path = "../../crates/plonk-core", features = ["solana"] }
 solana-program = "3.0"
 # Pin base64ct to avoid edition2024 requirement (1.8+ needs Rust 1.85)
 base64ct = "=1.6.0"

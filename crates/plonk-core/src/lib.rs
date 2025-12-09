@@ -43,7 +43,10 @@ pub mod verifier;
 // Re-export main types
 pub use errors::VerifyError;
 pub use types::{Fr, Scalar, G1, G2};
-pub use verifier::verify;
+pub use verifier::{
+    verify, verify_inner, verify_step1_challenges, verify_step2_sumcheck,
+    verify_step3_pairing_points, verify_step4_pairing_check, Challenges,
+};
 
 /// VK size for new format (bb v0.84.0+)
 /// = 32-byte header + 27 G1 commitments (64 bytes each)

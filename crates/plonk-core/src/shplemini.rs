@@ -41,6 +41,7 @@ pub const LIBRA_EVALUATIONS: usize = 4;
 /// Compute the pairing points for Shplemini verification
 ///
 /// Returns (P0, P1) where the pairing check is: e(P0, G2) == e(P1, x·G2)
+#[inline(never)]
 pub fn compute_shplemini_pairing_points(
     proof: &Proof,
     vk: &VerificationKey,
@@ -226,24 +227,24 @@ pub fn compute_shplemini_pairing_points(
         if !dummy_round {
             let j = i + 1; // Our index into r_pows, fold_pos, gemini_a_evals
 
-            let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
-            let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
+        let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
+        let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
 
-            let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
-            let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
+        let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
+        let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
 
-            let sp = fr_mul(&v_pow, &pos_inv);
-            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
+        let sp = fr_mul(&v_pow, &pos_inv);
+        let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
 
             // Compute gemini scalar for this fold commitment
             // scalars[boundary + i] = -scalingFactorNeg - scalingFactorPos
             gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
 
-            // Update const_acc
-            const_acc = fr_add(
-                &const_acc,
-                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
-            );
+        // Update const_acc
+        const_acc = fr_add(
+            &const_acc,
+            &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
+        );
         }
 
         // ALWAYS update v_pow, even in dummy rounds!

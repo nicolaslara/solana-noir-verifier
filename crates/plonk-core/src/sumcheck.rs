@@ -267,6 +267,7 @@ fn verify_sumcheck_rounds(
 /// 2. Final relation accumulation
 /// 3. ZK adjustment (for ZK proofs)
 /// 4. Check that accumulated value equals final target
+#[inline(never)]
 pub fn verify_sumcheck(
     proof: &Proof,
     challenges: &SumcheckChallenges,

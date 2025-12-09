@@ -6,15 +6,19 @@ license.workspace = true
 description = "UltraPlonk verifier for Noir proofs on Solana"
 
 [features]
-default = []
-debug = []   # Enable debug logging for challenge validation
+default = ["sha3"]
+debug = []                        # Enable debug logging for challenge validation
+solana = ["solana-keccak-hasher"] # Use syscall-based Keccak
 
 [dependencies]
 # Solana BN254 syscalls
 solana-bn254 = { workspace = true }
 
 # Hashing (Keccak256 for Fiat-Shamir transcript)
-sha3 = { workspace = true }
+# Use solana-keccak-hasher on Solana for syscall-based hashing
+solana-keccak-hasher = { version = "3.1", optional = true }
+# Use sha3 for off-chain testing
+sha3 = { workspace = true, optional = true }
 
 # Error handling
 thiserror = { workspace = true }

@@ -139,6 +139,7 @@ fn neg_half() -> Fr {
 }
 
 /// Accumulate arithmetic subrelations (indices 0-1)
+#[inline(never)]
 fn accumulate_arithmetic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     // Subrelation 0: quadratic gate
     let q_arith = wire(evals, Wire::QArith);
@@ -220,6 +221,7 @@ fn accumulate_arithmetic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
 }
 
 /// Accumulate permutation subrelations (indices 2-3)
+#[inline(never)]
 fn accumulate_permutation(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -301,6 +303,7 @@ fn accumulate_permutation(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr],
 }
 
 /// Accumulate lookup subrelations (indices 4-6)
+#[inline(never)]
 fn accumulate_lookup(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -386,6 +389,7 @@ fn accumulate_lookup(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
 }
 
 /// Accumulate range/delta-range subrelations (indices 6-9 in bb 0.87)
+#[inline(never)]
 fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -422,6 +426,7 @@ fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
 }
 
 /// Accumulate elliptic subrelations (indices 11-12)
+#[inline(never)]
 fn accumulate_elliptic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let x1 = wire(evals, Wire::Wr);
     let y1 = wire(evals, Wire::Wo);
@@ -498,6 +503,7 @@ fn accumulate_elliptic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
 
 /// Accumulate memory/auxiliary subrelations (indices 12-17 in bb 0.87)
 /// Full implementation from Solidity verifier including non-native field and limb accumulator
+#[inline(never)]
 fn accumulate_aux(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -693,6 +699,7 @@ fn accumulate_aux(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr)
 // NOTE: accumulate_nnf removed in bb 0.87 (Q_NNF no longer exists)
 
 /// Accumulate Poseidon External subrelations (indices 19-22 in bb 0.87)
+#[inline(never)]
 fn accumulate_poseidon_external(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -747,6 +754,7 @@ fn accumulate_poseidon_external(evals: &[Fr], out: &mut [Fr], d: &Fr) {
 }
 
 /// Accumulate Poseidon Internal subrelations (indices 22-25 in bb 0.87)
+#[inline(never)]
 fn accumulate_poseidon_internal(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -861,6 +869,7 @@ fn batch_subrelations(evals: &[Fr], alphas: &[Fr]) -> Fr {
 ///
 /// This is the main entry point for relation evaluation.
 /// It computes all 28 subrelations and batches them with alpha challenges.
+#[inline(never)]
 pub fn accumulate_relation_evaluations(
     evals: &[Fr],
     rp: &RelationParameters,

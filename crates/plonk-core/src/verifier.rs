@@ -91,7 +91,8 @@ pub fn verify(
 }
 
 /// Internal verification with parsed structures
-fn verify_inner(
+#[inline(never)]
+pub fn verify_inner(
     vk: &VerificationKey,
     proof: &Proof,
     public_inputs: &[Fr],
@@ -133,9 +134,49 @@ fn verify_inner(
     }
 }
 
+/// Step 1: Generate challenges (for phased verification)
+#[inline(never)]
+pub fn verify_step1_challenges(
+    vk: &VerificationKey,
+    proof: &Proof,
+    public_inputs: &[Fr],
+) -> Result<Challenges, VerifyError> {
+    generate_challenges(vk, proof, public_inputs)
+}
+
+/// Step 2: Verify sumcheck (for phased verification)
+#[inline(never)]
+pub fn verify_step2_sumcheck(
+    vk: &VerificationKey,
+    proof: &Proof,
+    challenges: &Challenges,
+) -> Result<bool, VerifyError> {
+    verify_sumcheck(vk, proof, challenges)
+}
+
+/// Step 3: Compute pairing points (for phased verification)
+#[inline(never)]
+pub fn verify_step3_pairing_points(
+    vk: &VerificationKey,
+    proof: &Proof,
+    challenges: &Challenges,
+) -> Result<(G1, G1), VerifyError> {
+    compute_pairing_points(vk, proof, challenges)
+}
+
+/// Step 4: Final pairing check (for phased verification)
+#[inline(never)]
+pub fn verify_step4_pairing_check(p0: &G1, p1: &G1) -> Result<bool, VerifyError> {
+    Ok(ops::pairing_check(&[
+        (*p0, g2_generator()),
+        (*p1, vk_g2()),
+    ])?)
+}
+
 /// Generate all challenges from the transcript
 ///
 /// Based on bb's UltraHonk transcript manifest (ultra_transcript.test.cpp)
+#[inline(never)]
 fn generate_challenges(
     vk: &VerificationKey,
     proof: &Proof,
@@ -225,12 +266,8 @@ fn generate_challenges(
     // NOTE: lookup_inverses and z_perm are NOT appended here!
     // They're appended in limbed format for alpha challenge generation (see below)
 
-    // Convert pairing point object slice to array for compute_public_input_delta_with_ppo
-    let ppo_slice = proof.pairing_point_object();
-    let mut ppo_array = [[0u8; 32]; 16];
-    for (i, fr) in ppo_slice.iter().enumerate() {
-        ppo_array[i] = *fr;
-    }
+    // Get pairing point object (already returns [Fr; 16])
+    let ppo_array = proof.pairing_point_object();
 
     // Compute public_input_delta (includes pairing point object)
     // Note: offset = 1, matching Solidity's pubInputsOffset = 1
@@ -612,6 +649,7 @@ fn compute_public_input_delta_with_ppo(
 }
 
 /// Verify the sumcheck protocol
+#[inline(never)]
 fn verify_sumcheck(
     _vk: &VerificationKey,
     proof: &Proof,
@@ -650,6 +688,7 @@ fn verify_sumcheck(
 }
 
 /// Compute the pairing points for the final verification
+#[inline(never)]
 fn compute_pairing_points(
     vk: &VerificationKey,
     proof: &Proof,

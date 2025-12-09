@@ -274,19 +274,90 @@ fn process_verify(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResu
     msg!("CU before verification:");
     sol_log_compute_units();
 
-    // Verify using embedded VK
-    let is_zk = true;
-    match verify(VK_BYTES, proof_bytes, &public_inputs, is_zk) {
-        Ok(()) => {
-            msg!("CU after verification:");
-            sol_log_compute_units();
-            msg!("✅ UltraHonk proof verified successfully!");
-            Ok(())
-        }
+    // Parse VK
+    msg!("Parsing VK...");
+    let vk = match plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES) {
+        Ok(v) => v,
         Err(e) => {
-            msg!("❌ Verification failed: {:?}", e);
-            Err(ProgramError::InvalidAccountData)
+            msg!("VK parse error: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
         }
+    };
+    msg!("CU after VK parse:");
+    sol_log_compute_units();
+
+    // Parse Proof
+    msg!("Parsing proof...");
+    let log_n = vk.log2_circuit_size as usize;
+    let is_zk = true;
+    let proof = match plonk_solana_core::proof::Proof::from_bytes(proof_bytes, log_n, is_zk) {
+        Ok(p) => p,
+        Err(e) => {
+            msg!("Proof parse error: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
+        }
+    };
+    msg!("CU after proof parse:");
+    sol_log_compute_units();
+
+    // Step 1: Generate challenges
+    msg!("Step 1: Generate challenges...");
+    let challenges = match plonk_solana_core::verify_step1_challenges(&vk, &proof, &public_inputs) {
+        Ok(c) => c,
+        Err(e) => {
+            msg!("Step 1 failed: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
+        }
+    };
+    msg!("CU after step 1:");
+    sol_log_compute_units();
+
+    // Step 2: Verify sumcheck
+    msg!("Step 2: Verify sumcheck...");
+    let sumcheck_ok = match plonk_solana_core::verify_step2_sumcheck(&vk, &proof, &challenges) {
+        Ok(ok) => ok,
+        Err(e) => {
+            msg!("Step 2 failed: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
+        }
+    };
+    if !sumcheck_ok {
+        msg!("Sumcheck verification failed");
+        return Err(ProgramError::InvalidAccountData);
+    }
+    msg!("CU after step 2:");
+    sol_log_compute_units();
+
+    // Step 3: Compute pairing points
+    msg!("Step 3: Compute pairing points...");
+    let (p0, p1) = match plonk_solana_core::verify_step3_pairing_points(&vk, &proof, &challenges) {
+        Ok(pts) => pts,
+        Err(e) => {
+            msg!("Step 3 failed: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
+        }
+    };
+    msg!("CU after step 3:");
+    sol_log_compute_units();
+
+    // Step 4: Final pairing check
+    msg!("Step 4: Final pairing check...");
+    let pairing_ok = match plonk_solana_core::verify_step4_pairing_check(&p0, &p1) {
+        Ok(ok) => ok,
+        Err(e) => {
+            msg!("Step 4 failed: {:?}", e);
+            return Err(ProgramError::InvalidAccountData);
+        }
+    };
+    msg!("CU after step 4:");
+    sol_log_compute_units();
+
+    if pairing_ok {
+        msg!("✅ UltraHonk proof verified successfully!");
+        Ok(())
+    } else {
+        msg!("❌ Verification failed: pairing check returned false");
+        Err(ProgramError::InvalidAccountData)
     }
 }
 

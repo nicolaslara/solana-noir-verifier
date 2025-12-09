@@ -16,6 +16,7 @@ import {
     Transaction,
     TransactionInstruction,
     SystemProgram,
+    ComputeBudgetProgram,
     sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import fs from 'fs';
@@ -27,7 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Configuration
 const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 // Program ID from deployment (check with: surfpool run deployment --env localnet --unsupervised)
-const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID || '7VR2Ws1LaVLNpbgUJ6PtMQSBEGgbGWwVDruk6EqRGbX9');
+const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID || '2qH79axdgTbfuutaXvDJQ1e19HqTGzZKDrG73jT4UewK');
 
 // Instruction codes (must match program)
 const IX_INIT_BUFFER = 0;
@@ -183,6 +184,11 @@ async function main() {
     // Step 5: Verify
     console.log('\nStep 5: Verify proof...');
     
+    // Request 1.4M compute units (max per transaction)
+    const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 1_400_000,
+    });
+    
     const verifyData = Buffer.from([IX_VERIFY]);
     
     const verifyIx = new TransactionInstruction({
@@ -191,7 +197,7 @@ async function main() {
         data: verifyData,
     });
     
-    const verifyTx = new Transaction().add(verifyIx);
+    const verifyTx = new Transaction().add(computeBudgetIx).add(verifyIx);
     
     try {
         const startVerify = Date.now();
