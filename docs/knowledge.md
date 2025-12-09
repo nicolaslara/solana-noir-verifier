@@ -727,14 +727,19 @@ For production, implement VK loading from a Solana account instead of compile-ti
 
 For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggested-optimizations.md)**:
 
-| Optimization                    | Status  | Impact                    |
-| ------------------------------- | ------- | ------------------------- |
-| Montgomery multiplication       | ✅ Done | **7x faster** field muls  |
-| Batch inversion (sumcheck)      | ✅ Done | **38% savings** per round |
-| Precompute I_FR constants       | ✅ Done | Avoids fr_from_u64        |
-| Binary Extended GCD             | ✅ Done | Faster inversions         |
-| **Batch inversion (Shplemini)** | ⏳ Next | Est. 60-130K CUs savings  |
-| **Precompute rho powers**       | ⏳ Next | Est. 150K CUs savings     |
+| Optimization                    | Status  | Impact                        |
+| ------------------------------- | ------- | ----------------------------- |
+| Montgomery multiplication       | ✅ Done | **7x faster** field muls      |
+| Batch inversion (sumcheck)      | ✅ Done | **38% savings** per round     |
+| Precompute I_FR constants       | ✅ Done | Avoids fr_from_u64            |
+| Binary Extended GCD             | ✅ Done | Faster inversions             |
+| Precompute rho powers           | ✅ Done | Avoids O(k) exponentiation    |
+| Batch inversion (Shplemini 3b2) | ✅ Done | Batched gemini+libra denoms   |
+| Batch inv fold denoms (3b1)     | ✅ Done | **60% savings** (1.3M → 534K) |
 
-**Current status:** Full verification working across 15 transactions.
-Further optimizations can reduce the number of transactions.
+**Current status (simple_square, log_n=12):**
+
+- Full verification: 8.35M CUs across 15 transactions
+- Phase 3b1 (folding) optimized from ~1.3M to ~534K CUs
+
+Further optimizations (relation batching) can provide additional savings.

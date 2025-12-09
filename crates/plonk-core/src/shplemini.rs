@@ -342,6 +342,7 @@ pub struct ShpleminiPhase3b1Result {
 }
 
 /// Phase 3b1: Folding rounds only (~870K CUs)
+/// Optimized with batch inversion for fold denominators
 #[inline(never)]
 pub fn shplemini_phase3b1(
     proof: &Proof,
@@ -358,25 +359,52 @@ pub fn shplemini_phase3b1(
     let r_pows = &phase3a.r_pows;
     let pos0 = &phase3a.pos0;
     let neg0 = &phase3a.neg0;
+    let gemini_a_evals = proof.gemini_a_evaluations();
 
-    // Folding rounds
+    // BATCH INVERSION OPTIMIZATION:
+    // Precompute all fold denominators and batch invert them.
+    // den[j] = r_pows[j-1] * (1 - u[j-1]) + u[j-1]
+    // This only depends on precomputed values, not on running state.
+    let mut fold_denoms: Vec<Fr> = Vec::with_capacity(log_n);
+    let mut r2_one_minus_u_vals: Vec<Fr> = Vec::with_capacity(log_n);
+
+    for j in 1..=log_n {
+        let r2 = r_pows[j - 1];
+        let u = challenges.sumcheck_challenges[j - 1];
+        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
+        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
+        let den = fr_add(&r2_one_minus_u, &u);
+        fold_denoms.push(den);
+        r2_one_minus_u_vals.push(r2_one_minus_u);
+    }
+
+    // Batch invert all fold denominators at once
+    let fold_den_invs =
+        batch_inv(&fold_denoms).ok_or("batch inversion of fold denominators failed")?;
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b1: after batch inv");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // Folding rounds using precomputed inverses
     let mut fold_pos = vec![SCALAR_ZERO; log_n];
     let mut cur = phase3a.eval_acc;
-    let gemini_a_evals = proof.gemini_a_evaluations();
 
     for j in (1..=log_n).rev() {
         let r2 = r_pows[j - 1];
         let u = challenges.sumcheck_challenges[j - 1];
+        let r2_one_minus_u = r2_one_minus_u_vals[j - 1];
 
         let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
         let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
-        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
-        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
         let bracket = fr_sub(&r2_one_minus_u, &u);
         let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
         let num = fr_sub(&term1, &term2);
-        let den = fr_add(&r2_one_minus_u, &u);
-        let den_inv = fr_inv(&den).ok_or("fold round denominator is zero")?;
+
+        // Use precomputed inverse
+        let den_inv = fold_den_invs[j - 1];
         cur = fr_mul(&num, &den_inv);
         fold_pos[j - 1] = cur;
     }
@@ -725,9 +753,6 @@ pub fn compute_shplemini_pairing_points(
     }
 
     // 4) Folding rounds
-    let mut fold_pos = vec![SCALAR_ZERO; log_n];
-    let mut cur = eval_acc;
-
     let gemini_a_evals = proof.gemini_a_evaluations();
 
     #[cfg(feature = "debug")]
@@ -739,25 +764,42 @@ pub fn compute_shplemini_pairing_points(
         crate::trace!("===== FOLD POS COMPUTATION =====");
     }
 
+    // BATCH INVERSION OPTIMIZATION:
+    // Precompute all fold denominators and batch invert them.
+    // den[j] = r_pows[j-1] * (1 - u[j-1]) + u[j-1]
+    let mut fold_denoms: Vec<Fr> = Vec::with_capacity(log_n);
+    let mut r2_one_minus_u_vals: Vec<Fr> = Vec::with_capacity(log_n);
+
+    for j in 1..=log_n {
+        let r2 = r_pows[j - 1];
+        let u = challenges.sumcheck_challenges[j - 1];
+        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
+        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
+        let den = fr_add(&r2_one_minus_u, &u);
+        fold_denoms.push(den);
+        r2_one_minus_u_vals.push(r2_one_minus_u);
+    }
+
+    let fold_den_invs =
+        batch_inv(&fold_denoms).ok_or("batch inversion of fold denominators failed")?;
+
+    let mut fold_pos = vec![SCALAR_ZERO; log_n];
+    let mut cur = eval_acc;
+
     for j in (1..=log_n).rev() {
         let r2 = r_pows[j - 1];
         let u = challenges.sumcheck_challenges[j - 1];
+        let r2_one_minus_u = r2_one_minus_u_vals[j - 1];
 
         // num = r2 * cur * 2 - A[j-1] * (r2 * (1 - u) - u)
         let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
         let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
-
-        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
-        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
         let bracket = fr_sub(&r2_one_minus_u, &u);
         let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
-
         let num = fr_sub(&term1, &term2);
 
-        // den = r2 * (1 - u) + u
-        let den = fr_add(&r2_one_minus_u, &u);
-        let den_inv = fr_inv(&den).ok_or("fold round denominator is zero")?;
-
+        // Use precomputed inverse
+        let den_inv = fold_den_invs[j - 1];
         cur = fr_mul(&num, &den_inv);
         fold_pos[j - 1] = cur;
 

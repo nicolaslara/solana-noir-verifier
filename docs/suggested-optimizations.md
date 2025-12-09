@@ -9,8 +9,10 @@ Here's what jumps out from the code + your BPF notes, focusing specifically on "
 | 3. Montgomery multiplication        | ✅ DONE | **7x faster** field muls                         |
 | 4. Binary Extended GCD              | ✅ DONE | Much faster than Fermat                          |
 | 5. Shplemini rho^k precompute       | ✅ DONE | Avoids O(k) exponentiation per shifted wire      |
-| 6. Shplemini batch inversion        | ⏳ TODO | ~100K CUs savings expected                       |
-| 7. Relation batching                | ⏳ TODO | Not yet implemented                              |
+| 6. Shplemini batch inversion (3b2)  | ✅ DONE | Batched gemini + libra denominators              |
+| 7. Batch inv fold denoms (3b1)      | ✅ DONE | **60% savings** (1,337K → 534K CUs)              |
+| 8. Relation batching                | ⏳ TODO | Not yet implemented                              |
+| 9. Batch inv in phase3a (pos0/neg0) | ⏳ TODO | Small: only 3 inversions                         |
 
 I'll give you:
 
