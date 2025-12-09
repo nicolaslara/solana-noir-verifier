@@ -130,13 +130,15 @@ async function main() {
     console.log(`Circuit: ${CIRCUIT_NAME}`);
     if (DEBUG) console.log('Debug logging: ENABLED');
     
-    // WARNING: The on-chain program has an embedded VK for simple_square.
-    // Using a different circuit will fail the pairing check because the VK doesn't match.
-    if (CIRCUIT_NAME !== 'simple_square') {
-        console.log('\n⚠️  WARNING: The on-chain verifier has an embedded VK for simple_square.');
-        console.log('   Different circuits will fail because the VK doesn\'t match.');
-        console.log('   To test other circuits, regenerate the program with a different VK.\n');
+    // Check if proof file exists
+    if (!fs.existsSync(proofPath)) {
+        console.error(`\n❌ Error: Proof file not found: ${proofPath}`);
+        console.error(`   Run: cd test-circuits/${CIRCUIT_NAME} && nargo compile && nargo execute && bb prove ...`);
+        process.exit(1);
     }
+    
+    // Note about VK matching - the program must be built with the same CIRCUIT
+    console.log(`\n📝 Build & deploy with matching VK: CIRCUIT=${CIRCUIT_NAME} cargo build-sbf && solana program deploy ...`);
     
     const proof = fs.readFileSync(proofPath);
     const publicInputs = fs.readFileSync(piPath);

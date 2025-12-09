@@ -89,9 +89,16 @@ pub const BUFFER_HEADER_SIZE: usize = 5;
 // Embedded VK - loaded from file at compile time
 // ============================================================================
 
-/// VK bytes from simple_square circuit
-/// Generated with: bb write_vk --scheme ultra_honk --oracle_hash keccak
-const VK_BYTES: &[u8] = include_bytes!("../../../test-circuits/simple_square/target/keccak/vk");
+// TODO: Support loading VK from an account for production use.
+// Currently the VK is embedded at compile time for simplicity.
+//
+// To use a different circuit, set CIRCUIT environment variable:
+//   CIRCUIT=simple_square cargo build-sbf          # default
+//   CIRCUIT=iterated_square_100 cargo build-sbf
+//   CIRCUIT=hash_batch cargo build-sbf
+//
+// See build.rs for the full list of available circuits.
+const VK_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vk.bin"));
 
 // ============================================================================
 // Instructions
@@ -1039,8 +1046,14 @@ fn process_phase1b_alphas_gates(_program_id: &Pubkey, accounts: &[AccountInfo]) 
     // Debug: print transcript state after phase 1b
     msg!(
         "1b transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        state.transcript_state[24], state.transcript_state[25], state.transcript_state[26], state.transcript_state[27],
-        state.transcript_state[28], state.transcript_state[29], state.transcript_state[30], state.transcript_state[31]
+        state.transcript_state[24],
+        state.transcript_state[25],
+        state.transcript_state[26],
+        state.transcript_state[27],
+        state.transcript_state[28],
+        state.transcript_state[29],
+        state.transcript_state[30],
+        state.transcript_state[31]
     );
 
     msg!("Phase 1b complete");
@@ -1103,8 +1116,14 @@ fn process_phase1c_sumcheck_half(_program_id: &Pubkey, accounts: &[AccountInfo])
     // Debug: print transcript state after phase 1c
     msg!(
         "1c transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        state.transcript_state[24], state.transcript_state[25], state.transcript_state[26], state.transcript_state[27],
-        state.transcript_state[28], state.transcript_state[29], state.transcript_state[30], state.transcript_state[31]
+        state.transcript_state[24],
+        state.transcript_state[25],
+        state.transcript_state[26],
+        state.transcript_state[27],
+        state.transcript_state[28],
+        state.transcript_state[29],
+        state.transcript_state[30],
+        state.transcript_state[31]
     );
 
     msg!("Phase 1c complete");

@@ -26,6 +26,9 @@ hex = "0.4"
 [features]
 no-entrypoint = []
 
+# Build script handles VK selection via CIRCUIT env var
+# See build.rs for details
+
 [profile.release]
 overflow-checks = true
 lto = "fat"

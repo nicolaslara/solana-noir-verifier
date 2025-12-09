@@ -67,18 +67,36 @@ pub fn shplemini_phase3a(
     {
         solana_program::msg!(
             "gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.gemini_r[24], challenges.gemini_r[25], challenges.gemini_r[26], challenges.gemini_r[27],
-            challenges.gemini_r[28], challenges.gemini_r[29], challenges.gemini_r[30], challenges.gemini_r[31]
+            challenges.gemini_r[24],
+            challenges.gemini_r[25],
+            challenges.gemini_r[26],
+            challenges.gemini_r[27],
+            challenges.gemini_r[28],
+            challenges.gemini_r[29],
+            challenges.gemini_r[30],
+            challenges.gemini_r[31]
         );
         solana_program::msg!(
             "shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_z[24], challenges.shplonk_z[25], challenges.shplonk_z[26], challenges.shplonk_z[27],
-            challenges.shplonk_z[28], challenges.shplonk_z[29], challenges.shplonk_z[30], challenges.shplonk_z[31]
+            challenges.shplonk_z[24],
+            challenges.shplonk_z[25],
+            challenges.shplonk_z[26],
+            challenges.shplonk_z[27],
+            challenges.shplonk_z[28],
+            challenges.shplonk_z[29],
+            challenges.shplonk_z[30],
+            challenges.shplonk_z[31]
         );
         solana_program::msg!(
             "shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_nu[24], challenges.shplonk_nu[25], challenges.shplonk_nu[26], challenges.shplonk_nu[27],
-            challenges.shplonk_nu[28], challenges.shplonk_nu[29], challenges.shplonk_nu[30], challenges.shplonk_nu[31]
+            challenges.shplonk_nu[24],
+            challenges.shplonk_nu[25],
+            challenges.shplonk_nu[26],
+            challenges.shplonk_nu[27],
+            challenges.shplonk_nu[28],
+            challenges.shplonk_nu[29],
+            challenges.shplonk_nu[30],
+            challenges.shplonk_nu[31]
         );
     }
 
@@ -107,16 +125,36 @@ pub fn shplemini_phase3a(
     {
         solana_program::msg!(
             "3a unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            unshifted[0], unshifted[1], unshifted[2], unshifted[3],
-            unshifted[4], unshifted[5], unshifted[6], unshifted[7]
+            unshifted[0],
+            unshifted[1],
+            unshifted[2],
+            unshifted[3],
+            unshifted[4],
+            unshifted[5],
+            unshifted[6],
+            unshifted[7]
         );
         solana_program::msg!(
             "3a pos0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            pos0[0], pos0[1], pos0[2], pos0[3], pos0[4], pos0[5], pos0[6], pos0[7]
+            pos0[0],
+            pos0[1],
+            pos0[2],
+            pos0[3],
+            pos0[4],
+            pos0[5],
+            pos0[6],
+            pos0[7]
         );
         solana_program::msg!(
             "3a neg0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            neg0[0], neg0[1], neg0[2], neg0[3], neg0[4], neg0[5], neg0[6], neg0[7]
+            neg0[0],
+            neg0[1],
+            neg0[2],
+            neg0[3],
+            neg0[4],
+            neg0[5],
+            neg0[6],
+            neg0[7]
         );
     }
 
