@@ -176,14 +176,17 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
 
 ### Optimization Progress
 
-| Optimization              | Status         | Improvement           |
-| ------------------------- | -------------- | --------------------- |
-| Karatsuba multiplication  | ✅ Implemented | -12% CUs              |
-| Montgomery multiplication | ✅ Implemented | **-87% CUs (7x)**     |
-| Binary Extended GCD       | ✅ Implemented | Much faster inv       |
-| **Batch inversion**       | ✅ Implemented | **-38% CUs sumcheck** |
-| BPF assembly              | ⏳ Pending     | Est. 2x more          |
-| Solana syscall            | ⏳ Proposal    | Est. 10x more         |
+| Optimization                  | Status         | Improvement                |
+| ----------------------------- | -------------- | -------------------------- |
+| Karatsuba multiplication      | ✅ Implemented | -12% CUs                   |
+| Montgomery multiplication     | ✅ Implemented | **-87% CUs (7x)**          |
+| Binary Extended GCD           | ✅ Implemented | Much faster inv            |
+| Batch inversion (sumcheck)    | ✅ Implemented | **-38% CUs sumcheck**      |
+| Batch inversion (fold denoms) | ✅ Implemented | **-60% CUs phase 3b1**     |
+| Shplemini rho^k precompute    | ✅ Implemented | Avoids O(k) exponentiation |
+| Shplemini batch inv (gemini)  | ✅ Implemented | Batched denominators       |
+| BPF assembly                  | ⏳ Pending     | Est. 2x more               |
+| Solana syscall                | ⏳ Proposal    | Est. 10x more              |
 
 See `docs/bpf-limitations.md` for detailed analysis.
 
