@@ -52,7 +52,45 @@ Challenge generation:    ~1,396,000+ CUs ← BOTTLENECK
 
 **UltraHonk verification needs >1.4M CUs (Solana's per-transaction maximum).**
 
-## The Real Problem: Field Arithmetic
+## The Real Problem: `fr_mul` is Too Expensive
+
+While we optimized Keccak hashing with syscalls, the bottleneck is **pure Rust field multiplication**:
+
+### The Core Issue
+
+Each `fr_mul` on BPF costs **~20,000-50,000 CUs** because it requires:
+1. 256×256 bit multiplication (schoolbook algorithm with 64-bit limbs = 16 multiplications + carries)
+2. 512-bit to 256-bit Barrett reduction (more multiplications + divisions)
+
+UltraHonk verification involves **thousands** of `fr_mul` calls across:
+- Challenge generation (~200 muls) - now split into 6 TXs ✅
+- Delta computation (~50 muls) - split into 2 TXs ✅
+- Sumcheck verification (~500+ muls) - exceeds 1.4M CUs ❌
+- MSM computation (~1000+ muls) - not yet tested
+
+### Potential `fr_mul` Optimizations
+
+1. **Montgomery multiplication** - Keep values in Montgomery form, avoid repeated reductions
+2. **Karatsuba algorithm** - Reduce 4 multiplications to 3 for each limb step
+3. **Assembly optimization** - Hand-tuned BPF assembly for critical paths
+4. **Solana syscall proposal** - Request Fr arithmetic syscalls (like BN254 curve ops)
+5. **Precomputation** - Move some multiplications off-chain, verify commitments on-chain
+
+### Current `fr_mul` Implementation
+
+```rust
+pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
+    let a_limbs = fr_to_limbs(a);  // Convert to [u64; 4]
+    let b_limbs = fr_to_limbs(b);
+    let result = mul_mod_wide(&a_limbs, &b_limbs);  // 512-bit result + Barrett reduction
+    limbs_to_fr(&result)  // Convert back to bytes
+}
+```
+
+The conversions alone add overhead. A Montgomery-based approach would:
+- Store values in Montgomery form permanently
+- Avoid byte↔limb conversions on every operation
+- Reduce modular reductions to single multiplication
 
 While we optimized Keccak hashing with syscalls, the bottleneck is **pure Rust field operations**:
 
