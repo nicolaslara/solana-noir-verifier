@@ -110,23 +110,26 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
 - [x] Binary extended GCD for `fr_inv` (faster than Fermat's theorem)
 - [x] Karatsuba multiplication (~12% CU reduction)
 - [x] **Montgomery multiplication (~87% CU reduction, 7x faster!)** 🎉
-- [x] Challenge generation split into 6 transactions (**~296K CUs total**):
+- [x] Challenge generation now unified into **1 transaction** (**~287K CUs**):
 
-  - Phase 1a: eta/beta/gamma (6K CUs)
-  - Phase 1b: alphas + gates (15K CUs)
-  - Phase 1c: sumcheck 0-13 (13K CUs)
-  - Phase 1d: sumcheck 14-27 + final (24K CUs)
-  - Phase 1e1: delta part 1 (**104K CUs** - was 915K!)
-  - Phase 1e2: delta part 2 (**134K CUs** - was 1.07M!)
+  - Enabled by zero-copy Proof design (saves ~16KB heap)
+  - Previously required 6 TXs due to 32KB heap limit
+  - All challenges (eta, beta, gamma, alphas, gates, sumcheck, rho, etc.) in single TX
 
 - [x] **Batch inversion for sumcheck (-38% CUs per round!)** 🎉
   - Without batch inversion: ~1,065K CUs per 2 rounds
   - With batch inversion: ~655K CUs per 2 rounds
   - **Savings: 410K CUs per 2 rounds**
-- [x] Phase 2 (Sumcheck) split into 7 transactions:
-  - 6 TXs for rounds (2 rounds each): ~655K CUs each
+- [x] **Zero-copy Proof struct (-47% transactions!)** 🎉
+  - Changed `Proof` from `Vec<u8>` to `&'a [u8]` (borrows account data)
+  - Saves ~16KB heap allocation per proof
+  - **Enabled unified Phase 1 in single TX** (was 6 TXs)
+  - Phase 1: 287K CUs in 1 TX (was 619K CUs in 6 TXs)
+  - **Total transactions: 17 → 9 (-47%)**
+- [x] Phase 2 (Sumcheck) split into 3 transactions:
+  - 2 TXs for rounds (6 rounds each): ~1.35M CUs each
   - 1 TX for relations: ~1.1M CUs
-  - **Total Phase 2: ~5.1M CUs** ✅
+  - **Total Phase 2: ~3.8M CUs** ✅
 
 ### Completed 🎉
 

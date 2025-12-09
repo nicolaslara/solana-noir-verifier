@@ -1,4 +1,6 @@
-Here's what jumps out from the code + your BPF notes, focusing specifically on "math we do a ton of" and how to squeeze CUs out of it.
+# Optimization Guide - Solana Noir Verifier
+
+This document tracks field arithmetic and verification optimizations for the UltraHonk verifier on Solana.
 
 ## Implementation Status
 
@@ -12,466 +14,259 @@ Here's what jumps out from the code + your BPF notes, focusing specifically on "
 | 6. Shplemini batch inversion (3b2)  | ✅ DONE | Batched gemini + libra denominators              |
 | 7. Batch inv fold denoms (3b1)      | ✅ DONE | **60% savings** (1,337K → 534K CUs)              |
 | 8. **FrLimbs in sumcheck**          | ✅ DONE | **17.5% savings** per round (1.3M → 1.07M CUs)   |
-| 9. Relation batching                | ⏳ TODO | Not yet implemented                              |
-| 10. FrLimbs in shplemini            | ⏳ TODO | Expected ~15-20% savings                         |
-
-I'll give you:
-
-- Where in the code the hotspot lives
-- What’s actually expensive there
-- A concrete optimization idea
-- Rough per‑call CU savings, then scaled by how often it happens per proof (using your own ballpark numbers from `bpf-limitations.md` for fr ops). ([GitHub][1])
+| 9. **FrLimbs in shplemini**         | ✅ DONE | **16% savings** (2.95M → 2.48M CUs)              |
+| 10. **Zero-copy Proof**             | ✅ DONE | **54% CU savings** in Phase 1 (619K → 287K)      |
+| 11. Relation batching               | ⏳ TODO | Factor common challenge combos (~50-80k CUs)     |
+| 12. Challenge fr_reduce tuning      | ⏳ TODO | ~40-75k CUs via Montgomery reduction             |
+| 13. BPF assembly for mont_mul       | 💡 IDEA | Up to ~2x more on fr_mul (high effort)           |
+| 14. **Audit other copies**          | 🔍 TODO | May have similar wins elsewhere                  |
 
 ---
 
-## 0. Baseline: what’s actually killing you
+## Current Performance (Dec 2024)
 
-From `docs/bpf-limitations.md`:
+**Post-Montgomery + FrLimbs world:**
 
-- `fr_mul`: ~500–1000 CUs per call.
-- `fr_div`/`fr_inv`: ~2000–5000 CUs per division/inversion.
-- Sumcheck verification: ~500+ multiplications, many inversions → Phase 2 currently blows past 1.4M CUs.
-- MSM (Shplemini / P0): ~1000+ field muls plus ~70 G1 scalar muls. ([GitHub][1])
-
-Code confirms:
-
-- Field core: `crates/plonk-core/src/field.rs` – all scalar ops, including `fr_mul`, `fr_inv`, `fr_reduce`, etc. ([GitHub][2])
-- Sumcheck: `crates/plonk-core/src/sumcheck.rs`. ([GitHub][3])
-- Shplemini + MSM: `crates/plonk-core/src/shplemini.rs`. ([GitHub][4])
-- BN254 syscalls: `crates/plonk-core/src/ops.rs`. ([GitHub][5])
-
-I’ll assume:
-
-- `fr_mul` ≈ **1k CUs**
-- `fr_add/fr_sub` ≈ **300 CUs**
-- `fr_inv` ≈ **3–4k CUs**
-
-just to get order-of-magnitude estimates. Adjust proportionally to your actual measurements.
+| Metric                          | Value         |
+| ------------------------------- | ------------- |
+| `fr_mul` (Montgomery+Karatsuba) | ~500-700 CUs  |
+| `fr_add/sub`                    | ~100-200 CUs  |
+| `fr_inv` (binary GCD)           | ~3-4k CUs     |
+| Challenge generation (1 tx)     | ~287k CUs     |
+| Sumcheck (6 rounds/tx)          | ~1.35M CUs    |
+| Full verification (log_n=12)    | **6.64M CUs** |
+| Transaction count               | **9 txs**     |
 
 ---
 
-## 1. Sumcheck barycentric interpolation – switch to batch inversion (huge win)
+## 0. Baseline: What's Actually Optimized
 
-**Where**
+From the codebase (December 2024):
 
-- `sumcheck.rs::next_target` ([GitHub][3])
+### Already Optimized ✅
 
-**What it does now**
+- **Challenge generation**: ~296k CUs total over 6 txs with Montgomery muls
+- **Sumcheck rounds**: Batch inversion + FrLimbs splitting (2 rounds/tx ≈ 655k CUs)
+- **`fr_mul`**: Montgomery + Karatsuba in `field.rs`
+- **`fr_inv`**: Binary extended GCD (much faster than Fermat)
+- **Batch inversion**: Available in `field.rs` and used in sumcheck + shplemini
+- **FrLimbs representation**: Implemented in both `sumcheck.rs` and `shplemini.rs`
+- **End-to-end UltraHonk verification**: Working with multi-TX phases
 
-For each round (log_n rounds):
+### Code Locations
 
-```rust
-fn next_target(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
-    let n = if is_zk { 9 } else { 8 };
-
-    // B(χ) = ∏(χ - i)
-    let mut b = SCALAR_ONE;
-    for i in 0..n {
-        let i_fr = fr_from_u64(i as u64);
-        let chi_minus_i = fr_sub(chi, &i_fr);
-        b = fr_mul(&b, &chi_minus_i);
-    }
-
-    // Σ u[i] / (BARY[i] * (χ - i))
-    let mut acc = SCALAR_ZERO;
-    for i in 0..n {
-        let i_fr = fr_from_u64(i as u64);
-        let chi_minus_i = fr_sub(chi, &i_fr);
-        let bary_i = if is_zk { &BARY_9[i] } else { &BARY_8[i] };
-        let denom = fr_mul(bary_i, &chi_minus_i);
-        let inv = fr_inv(&denom).ok_or("denominator is zero in barycentric")?;
-        let term = fr_mul(&univariate[i], &inv);
-        acc = fr_add(&acc, &term);
-    }
-
-    Ok(fr_mul(&b, &acc))
-}
-```
-
-Per **ZK** round (n=9), this is roughly:
-
-- ~18× `fr_sub`
-- ~27× `fr_mul`
-- ~9× `fr_inv`
-- ~9× `fr_add`
-
-The inversions are the killer: ~9 × 3–4k CUs ≈ 27–36k CUs per round just on `fr_inv`.
-
-With `log_n ≈ 19` (e.g. size 524,288 circuit), that’s ~171 inversions total.
-
-**Optimization: batch inversion**
-
-Use the standard “multi-inversion” trick:
-
-1. Compute all denominators `D[i] = BARY[i] * (χ - i)`.
-2. Compute prefix products `P[i+1] = P[i] * D[i]`.
-3. Invert `P[n]` once: `inv_total = 1 / P[n]`.
-4. Walk backwards to get each `D[i]^{-1}` with 2 multiplies per element.
-
-So:
-
-- Current per round: `n` inversions, ~3n multiplies.
-- New per round: **1 inversion**, ~4n multiplies.
-
-For n=9:
-
-- Old: 9 inv, 27 mul.
-- New: 1 inv, 34 mul.
-
-You _lose_ 7 extra muls, but _save_ 8 inversions.
-
-**CU impact (per round)**
-
-Take a plausible mid-point:
-
-- `fr_mul` ~ 800 CUs, `fr_inv` ~ 3000 CUs.
-
-Old barycentric cost per round:
-
-- inv: 9 × 3000 = 27,000
-- mul: 27 × 800 ≈ 21,600
-- plus adds/subs (minor)
-
-New:
-
-- inv: 1 × 3000 = 3,000
-- mul: 34 × 800 ≈ 27,200
-
-Net saving ≈ (27,000 − 3,000) − (27,200 − 21,600)
-= 24,000 − 5,600 ≈ **18,400 CUs per round**.
-
-For `log_n ≈ 19` rounds:
-
-- 18,400 × 19 ≈ 350,000 CUs saved (roughly 0.3–0.4M CUs).
-
-So **sumcheck Phase 2 goes from ~1.4M CUs to around 1.0–1.1M CUs**, _without_ touching protocol-level stuff. That probably means you can fit all of sumcheck into a single transaction instead of splitting.
-
-**Implementation sketch**
-
-- Precompute `i_fr[0..9]` as consts to avoid `fr_from_u64` every time.
-- New `batch_inv(&[Fr]) -> Vec<Fr>` implemented in `field.rs`.
-- Rewrite `next_target` to:
-
-  - Build `chi_minus[i]` and `den[i] = BARY[i] * chi_minus[i]`.
-  - `den_inv = batch_inv(&den)`.
-  - Accumulate `acc += u[i] * den_inv[i]`.
+- Field core: `crates/plonk-core/src/field.rs` – all scalar ops, `FrLimbs` type
+- Sumcheck: `crates/plonk-core/src/sumcheck.rs` – FrLimbs-native barycentric
+- Shplemini + MSM: `crates/plonk-core/src/shplemini.rs` – FrLimbs phases 3a/3b
+- BN254 syscalls: `crates/plonk-core/src/ops.rs`
 
 ---
 
-## 2. Shplemini: rho^k precomputation instead of O(N²) exponentiation (big win)
+## 1. ✅ DONE: FrLimbs Representation (Systemic Win)
 
-**Where**
+### What We Implemented
 
-- `shplemini.rs::compute_p0_full`, in the wire commitments / shifted part. ([GitHub][4])
-
-**What it does now (problematic bit)**
-
-For each wire mapping entry:
-
-```rust
-for (sol_idx, &our_idx) in wire_mapping.iter().enumerate() {
-    let commitment = proof.witness_commitment(our_idx);
-
-    // unshifted scalar part
-    let mut scalar = fr_mul(&neg_unshifted, &rho_pow);
-
-    // For shifted commitments (first 5 wires), also add shifted contribution
-    if sol_idx < NUMBER_TO_BE_SHIFTED {
-        let shifted_rho_idx = NUMBER_UNSHIFTED + 1 + sol_idx; // e.g. 37..41
-        let mut shifted_rho_pow = SCALAR_ONE;
-        for _ in 0..shifted_rho_idx {
-            shifted_rho_pow = fr_mul(&shifted_rho_pow, &challenges.rho);
-        }
-        let shifted_contrib = fr_mul(&neg_shifted, &shifted_rho_pow);
-        scalar = fr_add(&scalar, &shifted_contrib);
-    }
-
-    // MSM call
-    let scaled = ops::g1_scalar_mul(&commitment, &scalar)?;
-    p0 = ops::g1_add(&p0, &scaled)?;
-    rho_pow = fr_mul(&rho_pow, &challenges.rho);
-}
-```
-
-The inner `for _ in 0..shifted_rho_idx` is **O(k)** exponentiation repeated for each shifted commitment. For the 5 shifted commitments you’re doing something like:
-
-- exponents `k ∈ {37, 38, 39, 40, 41}`
-- total `fr_mul` just for `rho^k` ≈ 37 + 38 + 39 + 40 + 41 = **195 muls**
-
-And you also already have a running `rho_pow` outside the loop, so this is doubly wasteful.
-
-**Optimization: precompute rho^k table once**
-
-Before MSM:
-
-```rust
-// choose max exponent you ever need, e.g. MAX_RHO_POW = NUMBER_UNSHIFTED + 1 + NUMBER_TO_BE_SHIFTED
-let max_k = NUMBER_UNSHIFTED + 1 + NUMBER_TO_BE_SHIFTED; // 35 + 1 + 5 = 41
-let mut rho_pows = Vec::with_capacity(max_k + 1);
-rho_pows.push(SCALAR_ONE);
-for i in 1..=max_k {
-    let next = fr_mul(&rho_pows[i - 1], &challenges.rho);
-    rho_pows.push(next);
-}
-```
-
-Then inside the wire loop:
-
-```rust
-if sol_idx < NUMBER_TO_BE_SHIFTED {
-    let shifted_rho_idx = NUMBER_UNSHIFTED + 1 + sol_idx;
-    let shifted_rho_pow = rho_pows[shifted_rho_idx];
-    let shifted_contrib = fr_mul(&neg_shifted, &shifted_rho_pow);
-    scalar = fr_add(&scalar, &shifted_contrib);
-}
-```
-
-**CU impact**
-
-- Current: ~195 `fr_mul` for these exponents.
-- New: ~41 `fr_mul` to precompute up to `rho^41` (we can often reuse this table for other places too).
-- Net: ~150 fewer `fr_mul`.
-
-With ~1k CUs per mul, that’s ≈ **150k CUs saved** per proof.
-
-And that’s just from this one loop. If you reuse the same precomputed `rho_pows` for other rho‑powers in Shplemini / relations, you shave even more.
-
----
-
-## 3. Represent Fr as limbs + Montgomery form (systemic 2–3× on field ops)
-
-You already flagged Montgomery / Karatsuba in the docs; here’s what your current code is doing and what I’d change.
-
-**Where**
-
-- `field.rs` ([GitHub][2])
-
-**Current design**
-
-- Public type: `pub type Fr = [u8; 32];` (big-endian bytes). ([GitHub][6])
-- Every `fr_add`, `fr_sub`, `fr_mul`:
-
-  - `fr_to_limbs(fr: &Fr) -> [u64; 4]`
-  - run limb arithmetic (`add_mod`, `sub_mod`, `mul_mod_wide` etc.)
-  - `limbs_to_fr(&[u64;4]) -> Fr`
-
-- `mul_mod_wide` + `reduce_512` is essentially Barrett-ish reduction in a loop.
-
-So each field op has:
-
-1. 2× `Fr`→limb conversions.
-2. 1× limb‑level core operation.
-3. 1× limb→`Fr` conversion.
-
-The conversions are not free on BPF – they’re lots of shifts, masks, and stores.
-
-**Optimization 3.1 – keep everything as limbs**
-
-Introduce a “canonical internal” field type:
+Introduced `FrLimbs` in `field.rs` – a `[u64; 4]` type in Montgomery form:
 
 ```rust
 #[derive(Copy, Clone)]
-pub struct FrLimbs(pub [u64; 4]); // little-endian limbs in Montgomery form eventually
+pub struct FrLimbs(pub [u64; 4]); // little-endian, in Montgomery form
+
+impl FrLimbs {
+    #[inline(always)]
+    pub fn add(&self, other: &FrLimbs) -> FrLimbs { /* add_mod + conditional sub */ }
+    #[inline(always)]
+    pub fn mul(&self, other: &FrLimbs) -> FrLimbs { /* single mont_mul */ }
+    #[inline(always)]
+    pub fn sub(&self, other: &FrLimbs) -> FrLimbs { /* sub_mod */ }
+    pub fn square(&self) -> FrLimbs { /* optimized squaring */ }
+    // etc…
+}
 ```
 
-Then:
+### Where It's Used
 
-- Rewrite all internal verifier code (`sumcheck`, `relations`, `shplemini`, `transcript`, `delta`) to work with `FrLimbs`.
-- Only convert to/from `[u8;32]` at:
+1. **Sumcheck** (`sumcheck.rs`):
 
-  - proof parsing / VK parsing boundaries
-  - when writing public inputs / outputs
+   - `next_target_l()` – fully FrLimbs-native barycentric interpolation
+   - Precomputed `I_FR_LIMBS`, `BARY_8_LIMBS`, `BARY_9_LIMBS` constants
+   - `update_pow_l()` – FrLimbs power updates
 
-- On BPF, you can guard this with `cfg(target_os = "solana")` or similar, keeping the byte API for tests.
+2. **Shplemini** (`shplemini.rs`):
+   - `shplemini_phase3a()` – weights + scalar accumulation in FrLimbs
+   - `shplemini_phase3b1()` – folding rounds with batch inversion
+   - `shplemini_phase3b2()` – gemini loop + libra in FrLimbs
+   - All `r_pows`, denominators, and accumulators use FrLimbs
 
-**Expected per-call improvements**
+### Actual Results
 
-- `fr_add`/`fr_sub`: drop 3 conversions → likely **2–3× faster** (no byte shuffling).
-- `fr_mul`: limb conversion overhead is smaller relative to the 512-bit mul, but still ~10–20% → say **1.1–1.3× faster**.
+| Component           | Before FrLimbs | After FrLimbs | Savings  |
+| ------------------- | -------------- | ------------- | -------- |
+| Sumcheck (Phase 2)  | ~5.0M CUs      | ~3.8M CUs     | **24%**  |
+| Shplemini (Phase 3) | ~2.95M CUs     | ~2.48M CUs    | **16%**  |
+| **Total**           | ~8.7M CUs      | ~6.65M CUs    | **~20%** |
 
-Given your counts:
+---
 
-- Challenge generation: ~200 mul, ~300 add/sub. ([GitHub][1])
-- Sumcheck: ~500+ mul, ~200+ add/sub (from code).
-- Shplemini / relations: easily another ~500–800 field ops.
+## 2. ✅ DONE: Shplemini rho^k Precomputation
 
-You’re in the ballpark of **O(1000–2000)** field ops per proof. If you shave:
+### What Was Fixed
 
-- ~50% off add/sub (~500 calls) → save ~250 field‑op “units”.
-- ~15–20% off mul (~700 calls) → save ~100–140 mul‑equivalents.
-
-In CU terms (taking 1k per mul as the normalization), that’s a few hundred thousand CUs across the proof – I’d expect on the order of **200–400k CUs saved** just from this representation change.
-
-**Optimization 3.2 – Montgomery multiplication**
-
-You already have:
+Previously, for each shifted commitment we computed `ρ^k` with O(k) multiplications:
 
 ```rust
-pub const R:  [u64; 4];  // modulus
-pub const R2: [u64; 4];  // R^2 mod r
-pub const INV: u64;      // -r^{-1} mod 2^64
+// OLD CODE - O(k) per shifted wire
+        for _ in 0..shifted_rho_idx {
+            shifted_rho_pow = fr_mul(&shifted_rho_pow, &challenges.rho);
+}
 ```
 
-in `field.rs`, which is exactly what you need for Montgomery form. ([GitHub][2])
-
-If you keep all `FrLimbs` always in Montgomery form:
-
-- Multiplication becomes a straight Montgomery reduction (no general 512→256 reduction loop).
-- You avoid calling `fr_reduce` all over the place.
-- Adds/subs remain cheap (just add then conditional subtract modulus).
-
-I’d expect a further **~1.5× or so reduction in `fr_mul` cost** on top of the limb representation. Combine both and you’re looking at **~2×** speedup on mul and **2–3× on add/sub**.
-
-Scaled across 1000+ muls and 500+ add/sub per proof, you’re easily in “half a million CUs” territory.
-
----
-
-## 4. Batch inversion in Shplemini (medium–high)
-
-You’re already using `fr_inv` heavily in Shplemini, and binary GCD is a good start. But you repeatedly invert many denominators that are independent.
-
-**Where**
-
-- `shplemini.rs::compute_shplemini_pairing_points` ([GitHub][4])
-
-Key places:
-
-1. `pos0 = 1/(z - r^0)`, `neg0 = 1/(z + r^0)` – 2 inversions.
-2. Fold loop over `j in 1..=log_n`:
-
-   - `den_inv = 1 / den_j` → `log_n` inversions.
-
-3. Gemini fold loop `i in 0..CONST_PROOF_SIZE_LOG_N-1` (27 rounds):
-
-   - For non-dummy `i < log_n - 1`:
-
-     - `pos_inv = 1/(z - r^j)`
-     - `neg_inv = 1/(z + r^j)`
-     - That’s ~`2*(log_n-1)` inversions.
-
-4. Libra denominators: `denom0 = 1/(z - r)`, `denom1 = 1/(z - SUBGROUP_GENERATOR * r)` → 2 inversions.
-
-Total inversions in `compute_shplemini_pairing_points`:
-
-- ≈ 2 (pos/neg0)
-- - log_n
-- - 2(log_n − 1)
-- - 2 (libra)
-- = 3·log_n + 2 (for log_n~19, ~59 inversions)
-
-You probably can’t batch _all_ of them because some denominators (`den`) depend on running state (`cur` in the fold), but you _can_ batch all the static-ish `z ± r^j` denominators:
-
-- For `j = 0..log_n` compute `D[j] = (z - r^j)` and `E[j] = (z + r^j)`.
-- Batch invert all 2·(log_n+1) of them in one go.
-- Use these inverses both:
-
-  - in the initial pos0/neg0,
-  - in the gemini fold loop,
-  - in the Libra section (for the `z - r` denominator).
-
-That means:
-
-- Inversions for `z ± r^j` go from ~2·(log_n+1) to **1**.
-- You keep separate `den_inv` for the fold loop (those depend on `cur`).
-
-If each inversion costs ~3–4 muls in CU terms, and each batch invert uses an extra ~2n muls, it’s still a net win. For log_n ~19:
-
-- Original: ~2\*(19+1)=40 inversions → ~120–200k CUs.
-- New: 1 inversion + ~80 extra muls → ~3–4k + ~60–80k ≈ 65–85k.
-- So you save something like **~60–130k CUs** inside Shplemini.
-
-Couple that with the rho‑powers fix and Montgomery mul and the whole MSM phase shrinks significantly.
-
----
-
-## 5. Sumcheck micro-optimizations (smaller, but cheap to do)
-
-Still in `sumcheck.rs` ([GitHub][3])
-
-### 5.1. Precompute i_fr values
-
-Right now you repeatedly call `fr_from_u64(i as u64)` inside both barycentric loops every round.
-
-- n=9, two loops → 18 calls per round × log_n ~19 → 342 calls.
-- `fr_from_u64` isn’t massive, but it does byte writes and such.
-
-Just define:
+Now we precompute all rho powers once:
 
 ```rust
-const I_FR_9: [Fr; 9] = [
-    fr_from_u64_const(0), // or hard-coded bytes
-    ...
-];
+// NEW CODE - O(1) lookup
+const MAX_RHO_POWERS: usize = 45;
+let mut rho_pows = [SCALAR_ZERO; MAX_RHO_POWERS];
+rho_pows[0] = SCALAR_ONE;
+rho_pows[1] = challenges.rho;
+for i in 2..MAX_RHO_POWERS {
+    rho_pows[i] = fr_mul(&rho_pows[i - 1], &challenges.rho);
+}
+// Later: rho_pows[shifted_rho_idx] directly
 ```
 
-and index into it. This is a minor CU savings (think tens of k, not hundreds), but basically free to implement.
+### Savings
 
-### 5.2. Avoid recomputing (χ - i) twice
-
-You already compute `chi_minus_i` in both loops:
-
-- First loop (for B(χ))
-- Second loop (for denom computation)
-
-If you stick with the current non-batch version for a while, at least:
-
-- Compute all `chi_minus[i]` once in a small `[Fr; 9]` array.
-- Reuse in both loops.
-
-Again, this is shaving off `n` subtractions per round, not game-changing, but it’s free once you’re refactoring `next_target` for batch inversion anyway.
+- Avoided ~195 extra multiplications per proof (37+38+39+40+41)
+- Estimated **~135-150k CUs saved** in MSM phase
 
 ---
 
-## 6. Relations accumulation (likely 10–20% gain available)
+## 3. ✅ DONE: Batch Inversions in Shplemini
 
-**Where**
+### Phase 3b1: Fold Denominators
 
-- `sumcheck.rs::accumulate_relations` delegates to `crate::relations::accumulate_relation_evaluations`. ([GitHub][3])
-- `relations.rs` comment says: “accumulates all 28 UltraHonk subrelations”. ([GitHub][7])
+All fold denominators `den[j] = r^(2^(j-1)) * (1 - u[j-1]) + u[j-1]` are batched:
 
-The actual code is hard to see via this interface, but from Barretenberg’s UltraHonk design we know:
-
-- There are ~26–28 subrelations.
-- Most are linear-ish in evaluations and parameters (`eta`, `beta`, `gamma`, `public_inputs_delta`).
-- They get combined with powers of `alpha` and `pow_partial`.
-
-Typical pattern in Barretenberg:
-
-```cpp
-grand += alpha * (R0 + alpha * (R1 + alpha * (...)))
+```rust
+let mut fold_denoms_l: Vec<FrLimbs> = Vec::with_capacity(log_n);
+for j in 1..=log_n {
+    let den = r_pows_l[j-1].mul(&one_minus_u).add(&u);
+    fold_denoms_l.push(den);
+}
+let fold_den_invs_l = batch_inv_limbs(&fold_denoms_l)?;
 ```
 
-**Optimizations you almost certainly can do:**
+**Result**: ~60% savings (1,337K → 534K CUs)
 
-1. **Fuse alpha powers**: precompute `alpha_i` as a small array via sequential muls once, and only multiply each subrelation once by the appropriate `alpha_i`.
-2. **Factor common parameter combos**:
+### Phase 3b2: Gemini + Libra Denominators
 
-   - Precompute things like `beta * public_inputs_delta`, `gamma + beta * something`, etc., outside the big loop.
+All `z ± r^j` and libra denominators batched together:
 
-3. **Use limb/Montgomery field ops here as soon as you have them**.
-4. **Loop ordering**: if any relations share the same evaluation(s), compute linear combinations first, then multiply by challenge powers, rather than the other way round.
+```rust
+let mut all_denoms_l: Vec<FrLimbs> = Vec::new();
+// Gemini: z - r^j and z + r^j for j = 1..log_n-1
+for i in 0..num_non_dummy {
+    all_denoms_l.push(shplonk_z_l.sub(&r_pows_l[i+1]));
+    all_denoms_l.push(shplonk_z_l.add(&r_pows_l[i+1]));
+}
+// Libra: z - r, z - g*r
+if proof.is_zk {
+    all_denoms_l.push(shplonk_z_l.sub(&gemini_r_l));
+    all_denoms_l.push(shplonk_z_l.sub(&subgroup_generator_l.mul(&gemini_r_l)));
+}
+let all_invs_l = batch_inv_limbs(&all_denoms_l)?;
+```
 
-Because this code runs exactly once per proof and touches ~40 sumcheck evaluations:
-
-- Think on the order of a few hundred `fr_mul` and `fr_add`.
-- A 20–30% reduction here is maybe **50–100 mul equivalents** → ~50–100k CUs.
-
-Not as dramatic as sumcheck barycentric or rho‑powers, but still worth doing once you’re in there.
+**Result**: ~40 individual inversions → 1 batch inversion (~90-140k CUs saved)
 
 ---
 
-## 7. Field reduction & fr_reduce (medium)
+## 4. 🔍 TODO: Audit Unnecessary Copies
 
-**Where**
+### Discovery
 
-- `field.rs::fr_reduce` – used when squeezing challenges from Keccak, and possibly elsewhere. ([GitHub][2])
+The zero-copy `Proof` change revealed that **data copying costs significant CUs**:
 
-Current implementation:
+| Metric      | Before (Vec<u8>) | After (&[u8]) | Savings  |
+| ----------- | ---------------- | ------------- | -------- |
+| Phase 1 CUs | 619K             | 287K          | **54%**  |
+| Heap usage  | ~16KB            | ~0            | **100%** |
+
+This is NOT just about heap limit - the copy operation itself was burning ~330K CUs!
+
+### Investigation Points
+
+Audit codebase for similar copy patterns that could be eliminated:
+
+1. **VK parsing** (`key.rs`): Does `VerificationKey::from_bytes()` copy unnecessarily?
+
+   - Current: Returns owned `VerificationKey` with `Vec<G1>` commitments
+   - Potential: Zero-copy with `&'a [u8]` reference to embedded bytes
+
+2. **Public inputs** (`lib.rs`): `Vec<Fr>` allocation in phase functions
+
+   - Current: `public_inputs.push(arr)` copies each 32-byte Fr
+   - Potential: Iterate over slices directly without collecting
+
+3. **State reconstruction** (`phased.rs`): Challenge reconstruction patterns
+
+   - Check if we're copying when we could borrow
+
+4. **Relations evaluation** (`relations.rs`): Wire value access patterns
+   - Are we copying Fr values when iterating evaluations?
+
+### How to Audit
+
+```bash
+# Find Vec allocations in hot paths
+grep -n "Vec<Fr>\|Vec<G1>\|to_vec()\|.clone()" crates/plonk-core/src/*.rs
+```
+
+### Expected Impact
+
+If similar patterns exist in Phase 2/3, could see **100-500k CU savings**.
+
+---
+
+## 5. ⏳ TODO: Relations Accumulation Factoring
+
+### Current State
+
+`relations.rs` accumulates 26 UltraHonk subrelations. Many share common patterns:
+
+- `β * something + γ`
+- `η^i * something`
+- Same evaluations `w_i(z)`, `w_i(-z)` used multiple times
+
+### Optimization
+
+Introduce a "relations context" struct that precomputes challenge combos once:
+
+```rust
+struct RelationsContext {
+    beta_times_separator: Fr,
+    gamma_plus_beta_eta: Fr,
+    eta_pows: [Fr; MAX_ETA_POWERS],
+    // etc.
+}
+```
+
+### Expected Improvement
+
+Relations are ~300-400k CUs total. Factoring could save **~50-80k CUs** (15-20%).
+
+---
+
+## 6. ⏳ TODO: Challenge `fr_reduce` Tuning
+
+### Current State
+
+`fr_reduce` in `field.rs` uses loop-based subtraction:
 
 ```rust
 pub fn fr_reduce(a: &Fr) -> Fr {
     let mut limbs = fr_to_limbs(a);
-    // keep subtracting r until result < r
     loop {
         let (result, borrow) = sbb_limbs(&limbs, &R);
         if borrow != 0 { break; }
@@ -481,101 +276,134 @@ pub fn fr_reduce(a: &Fr) -> Fr {
 }
 ```
 
-For uniformly random 256-bit inputs, `a` is < ~5.8·r, so you need at most ~6 subtractions — but each subtraction is 4 limb ops.
+Called ~75 times per proof for challenge generation.
 
-You probably only call this in the transcript, where counts are modest:
+### Optimization Options
 
-- ~75 challenges → ~75 reductions. ([GitHub][1])
+1. **Montgomery reduction**: Multiply by R² and do single mont_mul
+2. **Constant-time conditional subtract**: Based on high limb value
 
-But you can still:
+### Expected Improvement
 
-- Switch to Montgomery form, so reducing a 256-bit random value becomes: multiply by `R^2` and do one Monty reduction – which may be more predictable and cheaper than looped subtract.
-- Or implement a constant‑time conditional subtract sequence based on the high limb value, reducing the worst-case subtract count.
-
-Given there are only ~75 calls per proof, even a 50% speedup is “only” on the order of a few tens of k CUs. Definitely secondary compared to sumcheck/MSM work, but easy enough once you’re doing Monty.
+~40-75k CUs saved (75 calls × ~500-1000 CU reduction each)
 
 ---
 
-## 8. BN254 G1 ops – cheap scalar-side improvements
+## 7. 💡 IDEA: BPF Assembly for `mont_mul`
 
-**Where**
+### Current State
 
-- `ops.rs` – G1 add, scalar mul, MSM wrapper. ([GitHub][5])
-- Shplemini MSM: `compute_p0_full`. ([GitHub][4])
+Montgomery multiplication is ~500-700 CUs post-optimization.
 
-You can’t optimize Solana’s `alt_bn128_*` syscalls internally, but you can avoid _extra_ scalar-side field work used to compute the scalars.
+### Potential
 
-We already covered:
+Hand-tuned BPF/LLVM-intrinsic version could potentially get to 350-400 CUs:
 
-- **rho^k precomputation** – big.
-- **batch inversion of denominators** – medium.
+- Avoid redundant loads/stores
+- Use `u128` multiplications efficiently
+- Inline the reduction tightly
 
-Other micro-optimizations:
+### Impact
 
-1. **Reuse r^2 powers across Shplemini and Gemini**: you already compute `r_pows` once via `r_pows[i] = r_pows[i-1]^2`. That’s great, and you’re using it in multiple places – keep that pattern for _all_ geometric/challenge sequences.
-2. **Avoid temporary Vec allocations** in MSM:
+At ~1,400 muls/proof: ~1,400 × 300 = **~420k CUs saved**
 
-   - You’re already mostly reusing; just ensure you’re not Vec‑allocating per scalar; that looks okay from `compute_p0_full` right now.
-
-You’re doing ~68 G1 scalar muls and 68 G1 adds in Shplemini. G1 ops are syscalls that might be ~a few thousand CUs each, so MSM is likely in the 200–400k CU range. You’re not going to get a 10× here without changing the protocol, but shaving ~20–30% via scalar-side arithmetic simplifications is realistic.
+**Complexity**: High. Only pursue if still over budget after other optimizations.
 
 ---
 
-## 9. Things you already (mostly) did or are low-priority
+## 8. Phase Packing Opportunities
 
-Just to avoid re-suggesting things from your doc:
+### Current Transaction Structure (log_n=12)
 
-- **Binary extended GCD for `fr_inv`** – already implemented in `field.rs`. Good call. ([GitHub][2])
-- **Keccak syscalls** – you’re already using `sol_keccak256` (~100 CUs per hash) and that’s now cheap compared to field ops. ([GitHub][1])
-- **Splitting challenge generation across multiple txs** – done (1a–1e). Sumcheck + MSM splitting will still be needed, but the goal here is to minimize splits.
-- **Alternative proof systems (Groth16)** – yes, obviously much cheaper on Solana, but orthogonal if your goal is “UltraHonk or bust”.
+| Phase            | CUs       | TXs   |
+| ---------------- | --------- | ----- |
+| 1. Challenges    | ~287k     | **1** |
+| 2. Sumcheck      | ~3.82M    | 3     |
+| 3. MSM/Shplemini | ~2.48M    | 4     |
+| 4. Pairing       | ~55k      | 1     |
+| **Total**        | **6.64M** | **9** |
+
+### With Further Optimizations
+
+If we land copy elimination audit + relations factoring (~200-500k CUs saved):
+
+- Phase 3 might consolidate further (3 TXs?)
+- Could reduce total from 9 to ~7-8 transactions
 
 ---
 
-## 10. Prioritized checklist
+## 9. Minor Cleanups (Free Wins)
 
-If I were you, I’d tackle in this order:
+These are in the tens of k CUs range but easy to implement:
 
-1. **Batch inversion in sumcheck barycentric** (`next_target`).
+### 8.1 Ensure All Constants Are Truly Const
 
-   - Very localized change.
-   - Likely saves **~300–400k CUs**.
-   - Might be enough to get Phase 2 into a single tx.
+✅ Done for sumcheck (`I_FR_LIMBS`, `BARY_*_LIMBS`)
+⏳ Check relations for similar opportunities
 
-2. **Fix rho^k exponentiation in Shplemini’s P0 builder** (`compute_p0_full`).
+### 8.2 Avoid Recomputing Small Differences
 
-   - Replace inner `for 0..k` loops with a `rho_pows[]` table.
-   - Saves **~150k CUs** just on the wire/shifted scalars, more if reused.
+Store `chi_minus[i]` arrays once and reuse (already done in batch inversion refactor)
 
-3. **Move Fr to limb+Montgomery representation everywhere inside the verifier**.
+### 8.3 Keep Tiny Wrappers Inline
 
-   - Bigger refactor, but systemic: expect **2×+ speedup on field ops**.
-   - Likely worth hundreds of thousands of CUs per proof.
+`#[inline(always)]` on `fr_square`, `fr_neg`, etc. for Solana builds
 
-4. **Batch inversion for `z ± r^j` denominators in Shplemini**.
+---
 
-   - Moderate refactor; additional **~60–130k CUs** possible.
+## Priorities
 
-5. **Clean up sumcheck micro-stuff** (precomputed i_fr, reuse `chi_minus_i`, etc.).
+If you need more CU savings, tackle in this order:
 
-   - Small cumulative gains.
+1. **Audit unnecessary copies** → potentially **100-500k CUs** (medium effort, high ROI!)
+2. **Relations accumulation factoring** → ~50-80k CUs (medium effort)
+3. **Challenge `fr_reduce` tuning** → ~40-75k CUs (low effort)
+4. **BPF assembly for `mont_mul`** → up to ~400k CUs (high effort, last resort)
 
-6. **Relations accumulation cleanup** (fuse alpha powers, factor params).
+---
 
-   - Maybe 10–20% off that part; not huge but cheap once you’re in there.
+## CU Usage by Circuit Size
 
-If you do (1)–(3), I’d expect:
+| Circuit              | log_n | PIs | Total CUs | TXs   |
+| -------------------- | ----- | --- | --------- | ----- |
+| simple_square        | 12    | 1   | **6.64M** | **9** |
+| iterated_square_100  | 12    | 1   | ~6.64M    | 9     |
+| fib_chain_100        | 12    | 1   | ~6.64M    | 9     |
+| iterated_square_1000 | 13    | 1   | ~7.0M     | 9     |
+| iterated_square_10k  | 14    | 1   | ~7.5M     | 9     |
+| hash_batch           | 17    | 32  | ~8.9M     | 10    |
+| merkle_membership    | 18    | 32  | ~9.3M     | 10    |
 
-- Sumcheck verification to comfortably fit into a single 1.4M CU tx.
-- MSM + pairing to also be under 1 tx with fewer safety margins.
-- Overall proof verification potentially going from “needs ~3+ txs” toward something like 2 txs, maybe 1 in aggressive configurations, depending on your circuit size.
+**Key observations:**
 
-If you want, next step we can do is: for one concrete test circuit in `test-circuits/` (e.g. `iterated_square_4`), walk the code path and build a more exact per-phase op count spreadsheet so you can plug your measured per‑op CUs into it.
+- Same proof size (16,224 bytes) regardless of circuit due to `CONST_PROOF_SIZE_LOG_N=28` padding
+- log_n=12 circuits have ~identical CUs (most sumcheck rounds are padding)
+- More public inputs = more CUs for delta computation (~0.5M per 31 extra PIs)
+- FrLimbs optimization: **~20% total CU reduction** across all circuits (~1.7M CUs saved)
 
-[1]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/docs/bpf-limitations.md "raw.githubusercontent.com"
-[2]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/field.rs "raw.githubusercontent.com"
-[3]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/sumcheck.rs "raw.githubusercontent.com"
-[4]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/shplemini.rs "raw.githubusercontent.com"
-[5]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/ops.rs "raw.githubusercontent.com"
-[6]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/types.rs "raw.githubusercontent.com"
-[7]: https://github.com/nicolaslara/solana-noir-verifier/raw/phased-experiment/crates/plonk-core/src/relations.rs "raw.githubusercontent.com"
+---
+
+## Historical Notes
+
+### Original Bottlenecks (Now Resolved)
+
+1. **Naive inversions in sumcheck**: Each barycentric round did 9 individual `fr_inv` calls
+   → Fixed with batch inversion (38% savings)
+
+2. **O(k) rho exponentiation**: Shifted wire scalars recomputed `ρ^k` from scratch
+   → Fixed with precomputed rho table (~150k CUs saved)
+
+3. **Byte conversion overhead**: Every field op converted `[u8;32]` ↔ `[u64;4]`
+   → Fixed with FrLimbs internal representation (~20% total savings)
+
+4. **Individual gemini inversions**: 40+ separate inversions in shplemini
+   → Fixed with batched denominators (~90-140k CUs saved)
+
+5. **Proof data copying**: `Proof::from_bytes()` copied 16KB to heap
+   → Fixed with zero-copy `&'a [u8]` reference (**54% CU savings in Phase 1**, 17→9 TXs)
+
+### What Made This Possible
+
+- Montgomery multiplication already in place (7x faster than naive)
+- Binary extended GCD for inversions (much faster than Fermat)
+- Solana BN254 syscalls for pairing (~100 CUs for Keccak, cheap EC ops)

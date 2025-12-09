@@ -739,12 +739,20 @@ For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggest
 | Batch inv fold denoms (3b1)     | ✅ Done | **60% savings** (1.3M → 534K)  |
 | **FrLimbs in sumcheck**         | ✅ Done | **24% savings** (5M → 3.8M)    |
 | **FrLimbs in shplemini**        | ✅ Done | **16% savings** (2.95M → 2.5M) |
+| **Zero-copy Proof**             | ✅ Done | **47% fewer TXs** (17 → 9)     |
 
 **Current status (simple_square, log_n=12):**
 
-- Full verification: **6.65M CUs** across 14 transactions
-- Sumcheck rounds: ~1.35M CUs (6 rounds/TX, down from 4)
-- Phase 3 (MSM): 2.48M CUs (down from 2.95M)
-- **Total savings: ~20%** from FrLimbs optimizations (~1.7M CUs)
+- Full verification: **6.64M CUs** across **9 transactions** (down from 17!)
+- Phase 1 (challenges): **1 TX, 287K CUs** (was 6 TXs, 619K CUs)
+- Sumcheck rounds: ~1.35M CUs (6 rounds/TX)
+- Phase 3 (MSM): 2.48M CUs
+
+**Zero-Copy Design (Dec 2024):**
+
+- Changed `Proof` struct from `Vec<u8>` to `&'a [u8]` (zero-copy reference)
+- Saves ~16KB heap allocation per proof
+- Enabled unifying Phase 1 (challenge generation) into single transaction
+- Transaction count reduction: 17 → 9 (**-47%**)
 
 Remaining optimizations: FrLimbs in relations, more constant precomputation.

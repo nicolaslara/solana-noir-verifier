@@ -28,13 +28,15 @@ const IX_PHASED_GENERATE_CHALLENGES = 10;
 const IX_PHASED_VERIFY_SUMCHECK = 11;
 const IX_PHASED_COMPUTE_MSM = 12;
 const IX_PHASED_FINAL_CHECK = 13;
-// Sub-phased challenge generation
+// Sub-phased challenge generation (legacy, for debugging)
 const IX_PHASE1A = 20;
 const IX_PHASE1B = 21;
 const IX_PHASE1C = 22;
 const IX_PHASE1D = 23;
 const IX_PHASE1E1 = 24;
 const IX_PHASE1E2 = 25;
+// Unified Phase 1 (after FrLimbs optimization, ~300K CUs)
+const IX_PHASE1_FULL = 30;
 // Sub-phased sumcheck verification
 const IX_PHASE2_ROUNDS = 40;  // Takes start_round, end_round in instruction data
 const IX_PHASE2D_RELATIONS = 43;
@@ -248,31 +250,11 @@ async function main() {
         return executeWithCU(connection, tx, [payer], description);
     }
     
-    // ===== PHASE 1: Challenge Generation (6 sub-phases, ~296K CUs total) =====
-    // Note: Unified Phase 1 hits BPF heap limit (32KB), so we use sub-phases
+    // ===== PHASE 1: Challenge Generation (unified with zero-copy) =====
+    // Zero-copy Proof struct saves ~16KB heap, enabling unified Phase 1
     console.log('=== PHASE 1: CHALLENGE GENERATION ===');
     
-    results.phase1a = await createPhaseTx(IX_PHASE1A, 'Phase 1a: eta/beta/gamma');
-    if (results.phase1a.success) {
-        results.phase1b = await createPhaseTx(IX_PHASE1B, 'Phase 1b: alphas/gates');
-    }
-    if (results.phase1b?.success) {
-        results.phase1c = await createPhaseTx(IX_PHASE1C, 'Phase 1c: sumcheck 0-13');
-    }
-    if (results.phase1c?.success) {
-        results.phase1d = await createPhaseTx(IX_PHASE1D, 'Phase 1d: sumcheck 14-27 + final');
-    }
-    if (results.phase1d?.success) {
-        results.phase1e1 = await createPhaseTx(IX_PHASE1E1, 'Phase 1e1: delta part1');
-    }
-    if (results.phase1e1?.success) {
-        results.phase1e2 = await createPhaseTx(IX_PHASE1E2, 'Phase 1e2: delta part2');
-    }
-    
-    const phase1Total = (results.phase1a?.cus || 0) + (results.phase1b?.cus || 0) + 
-                       (results.phase1c?.cus || 0) + (results.phase1d?.cus || 0) + 
-                       (results.phase1e1?.cus || 0) + (results.phase1e2?.cus || 0);
-    results.phase1 = { success: results.phase1e2?.success || false, cus: phase1Total };
+    results.phase1 = await createPhaseTx(IX_PHASE1_FULL, 'Phase 1: All challenges (zero-copy)');
     
     // Phase 2: Verify Sumcheck (split into many sub-phases: 2 rounds per TX)
     console.log('\n=== PHASE 2: SUMCHECK VERIFICATION ===');
@@ -402,13 +384,8 @@ async function main() {
     // Summary
     console.log('\n=== SUMMARY ===');
     
-    console.log('Phase 1 - Challenge Generation (6 TXs):');
-    console.log(`  1a (eta/beta/gamma):  ${results.phase1a?.success ? '✅' : '❌'} ${(results.phase1a?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  1b (alphas/gates):    ${results.phase1b?.success ? '✅' : '❌'} ${(results.phase1b?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  1c (sumcheck 0-13):   ${results.phase1c?.success ? '✅' : '❌'} ${(results.phase1c?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  1d (sumcheck 14-27):  ${results.phase1d?.success ? '✅' : '❌'} ${(results.phase1d?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  1e1 (delta part1):    ${results.phase1e1?.success ? '✅' : '❌'} ${(results.phase1e1?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  1e2 (delta part2):    ${results.phase1e2?.success ? '✅' : '❌'} ${(results.phase1e2?.cus || 0).toLocaleString()} CUs`);
+    console.log('Phase 1 - Challenge Generation (1 TX, zero-copy):');
+    console.log(`  All challenges:       ${results.phase1?.success ? '✅' : '❌'} ${(results.phase1?.cus || 0).toLocaleString()} CUs`);
     
     const phase2Rounds = results.phase2?.roundResults || [];
     console.log(`Phase 2 - Sumcheck Verification (${phase2Rounds.length + 1} TXs):`);
@@ -433,9 +410,9 @@ async function main() {
     const total = challengeCUs + sumcheckCUs + msmCUs + pairingCUs;
     
     const numRoundTXs = phase2Rounds.length;
-    const totalTXs = 6 + numRoundTXs + 1 + 4 + 1; // Phase 1(6) + rounds + relations + Phase 3(4) + Phase 4(1)
+    const totalTXs = 1 + numRoundTXs + 1 + 4 + 1; // Phase 1(1) + rounds + relations + Phase 3(4) + Phase 4(1)
     
-    console.log(`\nPhase 1 (Challenges): ${challengeCUs.toLocaleString()} CUs (6 TXs)`);
+    console.log(`\nPhase 1 (Challenges): ${challengeCUs.toLocaleString()} CUs (1 TX)`);
     console.log(`Phase 2 (Sumcheck):   ${sumcheckCUs.toLocaleString()} CUs (${numRoundTXs + 1} TXs)`);
     console.log(`Phase 3 (MSM):        ${msmCUs.toLocaleString()} CUs (4 TXs)`);
     console.log(`Phase 4 (Pairing):    ${pairingCUs.toLocaleString()} CUs (1 TX)`);

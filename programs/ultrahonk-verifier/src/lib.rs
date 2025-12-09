@@ -893,11 +893,190 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
 // Sub-Phased Challenge Generation (splits Phase 1)
 // ============================================================================
 
-/// Phase 1 Full: Unified challenge generation (after Montgomery optimization)
-/// This does all of Phase 1 in one transaction (~300K CUs with Montgomery)
-fn process_phase1_full(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    // Reuse the existing challenge generation function
-    process_phased_generate_challenges(program_id, accounts)
+/// Phase 1 Full: Unified challenge generation with incremental state storage
+/// Uses account as "external memory" - writes results immediately, drops heap data
+/// This avoids the 32KB heap limit by not keeping everything in memory at once
+fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1 Full: All challenges (incremental)");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof buffer header
+    let proof_data = proof_account.try_borrow_data()?;
+    if proof_data[0] != BufferStatus::Ready as u8 {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse public inputs
+    let mut public_inputs: Vec<Fr> = Vec::with_capacity(num_pi);
+    for i in 0..num_pi {
+        let start = BUFFER_HEADER_SIZE + (i * 32);
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&proof_data[start..start + 32]);
+        public_inputs.push(arr);
+    }
+
+    // Parse VK (we need it for multiple phases)
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let log_n = vk.log2_circuit_size as usize;
+    let is_zk = true;
+
+    // Parse proof
+    let proof = plonk_solana_core::proof::Proof::from_bytes(proof_bytes, log_n, is_zk)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Phase 1a: eta/beta/gamma");
+    sol_log_compute_units();
+
+    // === PHASE 1A: eta, beta, gamma ===
+    let result_1a = generate_challenges_phase1a(&vk, &proof, &public_inputs)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Write 1a results to state IMMEDIATELY
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        state.log_n = log_n as u8;
+        state.is_zk = 1;
+        state.num_public_inputs = num_pi as u8;
+        state.eta = result_1a.eta;
+        state.eta_two = result_1a.eta_two;
+        state.eta_three = result_1a.eta_three;
+        state.beta = result_1a.beta;
+        state.gamma = result_1a.gamma;
+        state.transcript_state = result_1a.transcript_state;
+    }
+
+    msg!("Phase 1b: alphas/gates");
+    sol_log_compute_units();
+
+    // === PHASE 1B: alphas, gate challenges ===
+    let transcript_1a = result_1a.transcript_state;
+    drop(result_1a); // Free heap
+
+    let result_1b = generate_challenges_phase1b(&proof, &transcript_1a)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Write 1b results
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        for (i, alpha) in result_1b.alphas.iter().enumerate() {
+            state.alphas[i] = *alpha;
+        }
+        for (i, gc) in result_1b.gate_challenges.iter().enumerate() {
+            state.gate_challenges[i] = *gc;
+        }
+        state.libra_challenge = result_1b.libra_challenge.unwrap_or([0u8; 32]);
+        state.transcript_state = result_1b.transcript_state;
+    }
+
+    msg!("Phase 1c: sumcheck 0-13");
+    sol_log_compute_units();
+
+    // === PHASE 1C: sumcheck challenges 0-13 ===
+    let transcript_1b = result_1b.transcript_state;
+    drop(result_1b);
+
+    let result_1c = generate_challenges_phase1c(&proof, &transcript_1b)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Write 1c results
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        for (i, sc) in result_1c.sumcheck_challenges.iter().enumerate() {
+            if i < 14 {
+                state.sumcheck_challenges[i] = *sc;
+            }
+        }
+        state.transcript_state = result_1c.transcript_state;
+    }
+
+    msg!("Phase 1d: sumcheck 14-27 + final");
+    sol_log_compute_units();
+
+    // === PHASE 1D: remaining sumcheck + final challenges ===
+    let transcript_1c = result_1c.transcript_state;
+    drop(result_1c);
+
+    let result_1d = generate_challenges_phase1d(&proof, &transcript_1c, is_zk)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Write 1d results
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        for (i, sc) in result_1d.sumcheck_challenges.iter().enumerate() {
+            if i >= 14 && i < 28 {
+                state.sumcheck_challenges[i] = *sc;
+            }
+        }
+        state.rho = result_1d.rho;
+        state.gemini_r = result_1d.gemini_r;
+        state.shplonk_nu = result_1d.shplonk_nu;
+        state.shplonk_z = result_1d.shplonk_z;
+    }
+    drop(result_1d);
+
+    msg!("Phase 1e: delta");
+    sol_log_compute_units();
+
+    // === PHASE 1E: public_input_delta ===
+    // Read beta/gamma from state for delta computation
+    let (beta, gamma) = {
+        let state_data = state_account.try_borrow_data()?;
+        let state = phased::VerificationState::from_bytes(&state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        (state.beta, state.gamma)
+    };
+
+    // Compute delta part 1
+    let partial = compute_delta_part1(&public_inputs, &proof, &beta, &gamma, vk.circuit_size());
+
+    // Write partial results
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        state.delta_numerator = partial.numerator;
+        state.delta_denominator = partial.denominator;
+        state.delta_numerator_acc = partial.numerator_acc;
+        state.delta_denominator_acc = partial.denominator_acc;
+    }
+
+    // Compute delta part 2
+    let delta = compute_delta_part2(&proof, &beta, &partial);
+
+    // Write final delta
+    {
+        let mut state_data = state_account.try_borrow_mut_data()?;
+        let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+            .ok_or(ProgramError::InvalidAccountData)?;
+        state.public_input_delta = delta;
+        state.set_phase(phased::Phase::ChallengesGenerated);
+        state.set_challenge_sub_phase(phased::ChallengeSubPhase::DeltaComputed);
+    }
+
+    msg!("Phase 1 Full complete");
+    sol_log_compute_units();
+    Ok(())
 }
 
 /// Phase 1a: Generate eta, beta/gamma challenges

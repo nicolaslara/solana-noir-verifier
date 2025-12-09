@@ -133,10 +133,13 @@ fn reconstruct_coordinate(limbs: &[u8]) -> [u8; 32] {
 }
 
 /// Parsed UltraHonk proof with semantic structure (bb 0.87 format)
-#[derive(Debug, Clone)]
-pub struct Proof {
-    /// Raw proof data as bytes
-    pub raw_data: Vec<u8>,
+///
+/// Uses zero-copy design: references account data directly instead of copying
+/// to heap. This saves ~16KB of heap allocation per proof.
+#[derive(Debug, Clone, Copy)]
+pub struct Proof<'a> {
+    /// Raw proof data as bytes (zero-copy reference to account data)
+    pub raw_data: &'a [u8],
 
     /// log2 of circuit size (from VK, actual circuit size)
     pub log_n: usize,
@@ -145,7 +148,7 @@ pub struct Proof {
     pub is_zk: bool,
 }
 
-impl Proof {
+impl<'a> Proof<'a> {
     /// Calculate expected proof size in bytes for bb 0.87
     ///
     /// bb 0.87 produces fixed-size proofs padded to CONST_PROOF_SIZE_LOG_N = 28
@@ -164,13 +167,18 @@ impl Proof {
         Self::expected_size_bytes(is_zk) / FR_SIZE
     }
 
-    /// Parse proof from bb 0.87 binary format
+    /// Parse proof from bb 0.87 binary format (zero-copy)
     ///
     /// # Arguments
-    /// * `bytes` - Raw proof bytes
+    /// * `bytes` - Raw proof bytes (borrowed, not copied!)
     /// * `log_n` - Circuit's log2 size (from VK)
     /// * `is_zk` - Whether this is a ZK proof
-    pub fn from_bytes(bytes: &[u8], log_n: usize, is_zk: bool) -> Result<Self, ProofError> {
+    ///
+    /// # Zero-Copy Design
+    /// This method borrows the input bytes instead of copying them to heap.
+    /// The returned Proof has a lifetime tied to the input slice.
+    /// This saves ~16KB of heap allocation per proof.
+    pub fn from_bytes(bytes: &'a [u8], log_n: usize, is_zk: bool) -> Result<Self, ProofError> {
         let expected = Self::expected_size_bytes(is_zk);
 
         if bytes.len() != expected {
@@ -181,7 +189,7 @@ impl Proof {
         }
 
         Ok(Proof {
-            raw_data: bytes.to_vec(),
+            raw_data: bytes, // Zero-copy: just store the reference
             log_n,
             is_zk,
         })

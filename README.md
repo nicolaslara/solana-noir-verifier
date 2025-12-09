@@ -99,6 +99,25 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 | Rust              | 1.75+        |                          |
 | Solana SDK        | 3.0+         | BN254 syscalls           |
 
+### First-Time Setup
+
+After cloning the repo, rebuild all test circuits and run tests:
+
+```bash
+# 1. Build all test circuit proofs and VKs
+cd test-circuits && ./build_all.sh && cd ..
+
+# 2. Run tests (should see 58 passing)
+cargo test
+
+# 3. (Optional) Test on Surfpool local validator
+cd programs/ultrahonk-verifier
+CIRCUIT=simple_square cargo build-sbf
+solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
+cd ../..
+CIRCUIT=simple_square node scripts/solana/test_phased.mjs
+```
+
 ## 📋 E2E Workflow
 
 ### Phase 1: Circuit Development & Proof Generation
@@ -287,34 +306,60 @@ cargo build --workspace
 ### Test
 
 ```bash
-# Core library tests (56 tests)
+# Run all tests (58 tests across workspace)
+cargo test
+
+# Core library tests only
 cargo test -p plonk-solana-core
 
-# Test all 7 circuits
+# Test all 7 circuits with output
 cargo test -p plonk-solana-core test_all_available_circuits -- --nocapture
-
-# Solana program tests
-cd programs/ultrahonk-verifier
-cargo test -- --nocapture
 ```
+
+### Rebuild Test Circuits
+
+If you delete `target/` directories or want fresh proofs:
+
+```bash
+cd test-circuits
+
+# Build all circuits
+./build_all.sh
+
+# Or build a specific circuit
+./build_all.sh simple_square
+./build_all.sh merkle_membership
+```
+
+This runs: `nargo compile` → `nargo execute` → `bb prove` → `bb write_vk`
 
 ### Test on Surfpool (Local Solana)
 
+[Surfpool](https://github.com/txtx/surfpool) provides a local Solana validator for testing.
+
 ```bash
-# Start Surfpool
+# 1. Start Surfpool (in separate terminal)
 surfpool start
 
-# Build for Solana BPF with specific circuit VK
+# 2. Build & deploy (circuit VK is embedded at compile time)
 cd programs/ultrahonk-verifier
-CIRCUIT=simple_square cargo build-sbf    # Default circuit
-# or: CIRCUIT=hash_batch cargo build-sbf # Different circuit
-
-# Deploy
+CIRCUIT=simple_square cargo build-sbf
 solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
 
-# Run phased verification test (matches CIRCUIT used in build)
+# 3. Run verification test
 cd ../..
 CIRCUIT=simple_square node scripts/solana/test_phased.mjs
+```
+
+**Expected output:**
+
+```
+Phase 1 (Challenges): 287K CUs (1 TX)
+Phase 2 (Sumcheck):   3.82M CUs (3 TXs)
+Phase 3 (MSM):        2.48M CUs (4 TXs)
+Phase 4 (Pairing):    55K CUs (1 TX)
+Total: 6.64M CUs across 9 transactions
+🎉 All phases passed! Verification complete.
 ```
 
 ### Multi-Circuit Support
@@ -359,6 +404,17 @@ cargo run -p plonk-solana-vk-codegen -- \
 
 **Complete!** End-to-end UltraHonk verification working with bb 0.87 / nargo 1.0.0-beta.8.
 
+### Performance (simple_square, log_n=12)
+
+| Metric               | Value            |
+| -------------------- | ---------------- |
+| Total CUs            | **6.64M**        |
+| Transactions         | **9**            |
+| Phase 1 (Challenges) | 287K CUs, 1 TX   |
+| Phase 2 (Sumcheck)   | 3.82M CUs, 3 TXs |
+| Phase 3 (MSM)        | 2.48M CUs, 4 TXs |
+| Phase 4 (Pairing)    | 55K CUs, 1 TX    |
+
 ### Completed ✅
 
 - [x] Project structure and dependencies
@@ -371,8 +427,10 @@ cargo run -p plonk-solana-vk-codegen -- \
 - [x] All 26 subrelations (arithmetic, permutation, lookup, range, elliptic, aux, poseidon)
 - [x] Shplemini batch opening verification
 - [x] KZG pairing check
-- [x] **56 unit tests passing**
+- [x] **58 unit tests passing**
 - [x] **7 test circuits verified** (log_n from 12 to 18)
+- [x] **Multi-transaction phased verification** (9 TXs total)
+- [x] **Zero-copy proof parsing** (saves 16KB heap)
 
 ### Test Circuits Verified ✅
 
