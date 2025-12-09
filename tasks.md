@@ -163,6 +163,17 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
   - Single program deployment for multiple circuits
   - Add `UploadVK` instruction and VK account parameter to all phases
 
+### Low Priority / Maintenance
+
+- [ ] **Fix workspace build inconsistency**
+  - Building from root (`cargo build-sbf`) fails due to `is_terminal_polyfill` dependency
+  - Building from `programs/ultrahonk-verifier/` works fine
+  - Issue: `vk-codegen` uses `clap` → `anstream` → `is_terminal_polyfill` which is incompatible with BPF toolchain
+  - Fix options:
+    - Exclude `vk-codegen` from workspace default members
+    - Pin `is_terminal_polyfill` to compatible version
+    - Move `vk-codegen` to separate workspace
+
 ### Optimization Progress
 
 | Optimization              | Status         | Improvement           |
