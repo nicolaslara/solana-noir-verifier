@@ -431,17 +431,6 @@ pub fn generate_challenges_phase1c(
         }
     }
 
-    // Debug: print transcript state after phase1c
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "DEBUG phase1c transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            new_state[24], new_state[25], new_state[26], new_state[27],
-            new_state[28], new_state[29], new_state[30], new_state[31]
-        );
-    }
-
     Ok(Phase1cResult {
         sumcheck_challenges,
         transcript_state: new_state,
@@ -763,23 +752,6 @@ fn generate_challenges(
     crate::dbg_fr!("eta", &eta);
     crate::dbg_fr!("eta_two", &eta_two);
     crate::dbg_fr!("eta_three", &eta_three);
-
-    // Debug: print eta challenges
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "SINGLE_PASS eta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            eta[24],
-            eta[25],
-            eta[26],
-            eta[27],
-            eta[28],
-            eta[29],
-            eta[30],
-            eta[31]
-        );
-    }
 
     // Add lookup commitments and w4 in LIMBED format
     // bb 0.87: [previousChallenge, lookupReadCounts(4), lookupReadTags(4), w4(4)]
