@@ -138,7 +138,9 @@ async function main() {
     }
     
     // Note about VK matching - the program must be built with the same CIRCUIT
-    console.log(`\n📝 Build & deploy with matching VK: CIRCUIT=${CIRCUIT_NAME} cargo build-sbf && solana program deploy ...`);
+    console.log(`\n⚠️  IMPORTANT: Program must be deployed with matching VK!`);
+    console.log(`   Run: cd programs/ultrahonk-verifier && CIRCUIT=${CIRCUIT_NAME} cargo build-sbf`);
+    console.log(`   Then: solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc\n`);
     
     const proof = fs.readFileSync(proofPath);
     const publicInputs = fs.readFileSync(piPath);

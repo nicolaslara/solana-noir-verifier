@@ -682,6 +682,25 @@ For production, implement VK loading from a Solana account instead of compile-ti
 - Multiple circuits with a single program deployment
 - Dynamic circuit registration
 
+### CU Usage by Circuit Size (Dec 2024)
+
+| Circuit              | log_n | PIs | Total CUs | TXs |
+| -------------------- | ----- | --- | --------- | --- |
+| simple_square        | 12    | 1   | 8.7M      | 15  |
+| iterated_square_100  | 12    | 1   | 8.7M      | 15  |
+| fib_chain_100        | 12    | 1   | 8.7M      | 15  |
+| iterated_square_1000 | 13    | 1   | 9.2M      | 16  |
+| iterated_square_10k  | 14    | 1   | 9.6M      | 16  |
+| hash_batch           | 17    | 32  | 11.3M     | 17  |
+| merkle_membership    | 18    | 32  | 11.8M     | 17  |
+
+**Key observations:**
+
+- Same proof size (16,224 bytes) regardless of circuit due to `CONST_PROOF_SIZE_LOG_N=28` padding
+- log_n=12 circuits have ~identical CUs (most sumcheck rounds are padding)
+- More public inputs = more CUs for delta computation (~0.5M per 31 extra PIs)
+- Larger log_n = more active sumcheck rounds contribute
+
 ---
 
 ## Bug Fix: Phase 1d Transcript Divergence (Dec 2024)
