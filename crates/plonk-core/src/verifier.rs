@@ -773,34 +773,6 @@ fn generate_challenges(
     crate::dbg_fr!("beta", &beta);
     crate::dbg_fr!("gamma", &gamma);
 
-    // Debug: print beta/gamma challenges
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "SINGLE_PASS beta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            beta[24],
-            beta[25],
-            beta[26],
-            beta[27],
-            beta[28],
-            beta[29],
-            beta[30],
-            beta[31]
-        );
-        std::println!(
-            "SINGLE_PASS gamma[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            gamma[24],
-            gamma[25],
-            gamma[26],
-            gamma[27],
-            gamma[28],
-            gamma[29],
-            gamma[30],
-            gamma[31]
-        );
-    }
-
     // NOTE: lookup_inverses and z_perm are NOT appended here!
     // They're appended in limbed format for alpha challenge generation (see below)
 
@@ -913,20 +885,6 @@ fn generate_challenges(
         None
     };
 
-    // Debug: print transcript state after libra_challenge (end of phase 1b equivalent)
-    #[cfg(test)]
-    {
-        extern crate std;
-        let state_1b = transcript.get_state();
-        if state_1b.len() == 32 {
-            std::println!(
-                "SINGLE_PASS 1b_end transcript[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                state_1b[24], state_1b[25], state_1b[26], state_1b[27],
-                state_1b[28], state_1b[29], state_1b[30], state_1b[31]
-            );
-        }
-    }
-
     // Get sumcheck u challenges
     // Per Solidity verifier: ONE hash per round, take ONLY lower 128 bits, discard upper!
     // See generateSumcheckChallenges in the generated HonkVerifier.sol
@@ -962,20 +920,6 @@ fn generate_challenges(
             crate::dbg_fr!(&alloc::format!("sumcheck_u[{}]", r), &lo);
         }
         sumcheck_challenges.push(lo);
-
-        // Debug: print transcript state after round 13 (end of phase1c equivalent)
-        #[cfg(test)]
-        if r == 13 {
-            extern crate std;
-            let state_1c = transcript.get_state();
-            if state_1c.len() == 32 {
-                std::println!(
-                    "SINGLE_PASS 1c_end (round 13) transcript[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    state_1c[24], state_1c[25], state_1c[26], state_1c[27],
-                    state_1c[28], state_1c[29], state_1c[30], state_1c[31]
-                );
-            }
-        }
     }
 
     // Add sumcheck evaluations to transcript
@@ -1034,23 +978,6 @@ fn generate_challenges(
     // Get rho challenge
     let (rho, _) = transcript.challenge_split();
     crate::dbg_fr!("rho", &rho);
-
-    // Debug: print rho challenge
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "SINGLE_PASS rho[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            rho[24],
-            rho[25],
-            rho[26],
-            rho[27],
-            rho[28],
-            rho[29],
-            rho[30],
-            rho[31]
-        );
-    }
 
     // Add Gemini fold commitments to transcript
     // Solidity uses CONST_PROOF_SIZE_LOG_N - 1 = 27 fold comms in LIMBED format
