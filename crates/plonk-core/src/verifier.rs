@@ -101,15 +101,60 @@ fn verify_inner(
         return Err(VerifyError::VerificationFailed);
     }
 
-    // Step 3: Compute the batched opening claim
-    let (p1, p2) = compute_pairing_points(vk, proof, &challenges)?;
+    // Step 3: Compute the batched opening claim (P0, P1 before aggregation)
+    let (p0, p1) = compute_pairing_points(vk, proof, &challenges)?;
 
-    // Step 4: Final pairing check: e(P1, G2) == e(P2, G2_gen)
-    let pairing_result = ops::pairing_check(&[(p1, vk_g2()), (ops::g1_neg(&p2)?, g2_generator())])?;
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== PAIRING AGGREGATION =====");
+        crate::dbg_g1!("P0 (before aggregation)", &p0);
+        crate::dbg_g1!("P1 (before aggregation)", &p1);
+    }
+
+    // Step 4: Convert pairing point object to G1 points
+    let ppo = proof.pairing_point_object();
+    let (p0_other, p1_other) = convert_pairing_points_to_g1(ppo)?;
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("P0_other (from proof)", &p0_other);
+        crate::dbg_g1!("P1_other (from proof)", &p1_other);
+    }
+
+    // Step 5: Generate recursion separator
+    let recursion_separator = generate_recursion_separator(&p0_other, &p1_other, &p0, &p1)?;
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("recursion_separator", &recursion_separator);
+    }
+
+    // Step 6: Aggregate pairing points
+    // Final P0 = P0 * recursion_separator + P0_other
+    // Final P1 = P1 * recursion_separator + P1_other
+    let p0_scaled = ops::g1_scalar_mul(&p0, &recursion_separator)?;
+    let final_p0 = ops::g1_add(&p0_scaled, &p0_other)?;
+
+    let p1_scaled = ops::g1_scalar_mul(&p1, &recursion_separator)?;
+    let final_p1 = ops::g1_add(&p1_scaled, &p1_other)?;
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("Final P0", &final_p0);
+        crate::dbg_g1!("Final P1", &final_p1);
+    }
+
+    // Step 7: Final pairing check: e(P0, G2) * e(P1, x·G2) == 1
+    // Equivalently: e(P0, G2) * e(-P1, x·G2) == 1 where P1 is already negated from Shplemini
+    // Actually, Solidity does: pairing(pair.P_0, pair.P_1) which checks e(P0, G2_gen) * e(P1, G2_x) == 1
+    // The G2 points are: G2_generator and x·G2 (from trusted setup)
+    let pairing_result = ops::pairing_check(&[(final_p0, g2_generator()), (final_p1, vk_g2())])?;
 
     if pairing_result {
+        crate::trace!("VERIFICATION PASSED!");
         Ok(())
     } else {
+        crate::trace!("VERIFICATION FAILED: pairing check failed");
         Err(VerifyError::VerificationFailed)
     }
 }
@@ -392,6 +437,16 @@ fn generate_challenges(
         transcript.append_scalar(eval);
     }
 
+    // Add libra poly evals to transcript (ZK only) - required for shplonk_nu challenge
+    // Solidity: shplonkNuChallengeElements = [prevChallenge, geminiAEvals[0..logN], libraPolyEvals[0..4]]
+    if proof.is_zk {
+        if let Some(libra_evals) = proof.libra_poly_evals() {
+            for eval in libra_evals {
+                transcript.append_scalar(eval);
+            }
+        }
+    }
+
     // Get shplonk_nu challenge
     let (shplonk_nu, _) = transcript.challenge_split();
     crate::dbg_fr!("shplonk_nu", &shplonk_nu);
@@ -594,12 +649,25 @@ fn compute_pairing_points(
         .map_err(|_| VerifyError::VerificationFailed)
 }
 
-/// Get the G2 point from VK (placeholder - VK doesn't contain G2 in bb format)
+/// Get the x·G2 point from the trusted setup
+/// This is hardcoded because bb 3.0 VK format doesn't contain G2 points
 fn vk_g2() -> crate::types::G2 {
-    // The VK in bb 3.0 format doesn't contain G2 points
-    // They use a fixed SRS G2 element
-    // This is the BN254 G2 generator
-    g2_generator()
+    // This is the x·G2 point from the trusted setup (SRS)
+    // Used for the second pairing: e(P1, x·G2)
+    let mut g2 = [0u8; 128];
+
+    // x1, x0, y1, y0 (big-endian)
+    let x1 = hex_literal::hex!("260e01b251f6f1c7e7ff4e580791dee8ea51d87a358e038b4efe30fac09383c1");
+    let x0 = hex_literal::hex!("0118c4d5b837bcc2bc89b5b398b5974e9f5944073b32078b7e231fec938883b0");
+    let y1 = hex_literal::hex!("04fc6369f7110fe3d25156c1bb9a72859cf2a04641f99ba4ee413c80da6a5fe4");
+    let y0 = hex_literal::hex!("22febda3c0c0632a56475b4214e5615e11e6dd3f96e6cea2854a87d4dacc5e55");
+
+    g2[0..32].copy_from_slice(&x1);
+    g2[32..64].copy_from_slice(&x0);
+    g2[64..96].copy_from_slice(&y1);
+    g2[96..128].copy_from_slice(&y0);
+
+    g2
 }
 
 /// BN254 G2 generator point
@@ -625,6 +693,163 @@ fn g2_generator() -> crate::types::G2 {
     g2[96..128].copy_from_slice(&y0);
 
     g2
+}
+
+/// Convert pairing point object (16 Fr limbs) to two G1 points
+///
+/// The pairing points are serialized as 68-bit limbs (4 limbs per 256-bit coordinate)
+/// - lhs.x = limbs[0] | limbs[1] << 68 | limbs[2] << 136 | limbs[3] << 204
+/// - lhs.y = limbs[4..7]
+/// - rhs.x = limbs[8..11]
+/// - rhs.y = limbs[12..15]
+fn convert_pairing_points_to_g1(ppo: &[Fr]) -> Result<(G1, G1), VerifyError> {
+    if ppo.len() != 16 {
+        return Err(VerifyError::PublicInput(alloc::format!(
+            "Expected 16 pairing point limbs, got {}",
+            ppo.len()
+        )));
+    }
+
+    // Helper to combine 4 68-bit limbs into a 256-bit value
+    // Fr values are big-endian 32-byte arrays, but limbs are small values (fit in ~68 bits)
+    fn combine_limbs(limbs: &[Fr]) -> [u8; 32] {
+        // Each limb is 68 bits. We combine them:
+        // val = limbs[0] | (limbs[1] << 68) | (limbs[2] << 136) | (limbs[3] << 204)
+
+        // Since Fr is big-endian, convert to little-endian for easier bit manipulation
+        let limb0 = fr_to_le(&limbs[0]);
+        let limb1 = fr_to_le(&limbs[1]);
+        let limb2 = fr_to_le(&limbs[2]);
+        let limb3 = fr_to_le(&limbs[3]);
+
+        // Combine using bit shifts (working in little-endian)
+        let mut combined = limb0;
+        combined = add_256_le(&combined, &shift_left_256_le(&limb1, 68));
+        combined = add_256_le(&combined, &shift_left_256_le(&limb2, 136));
+        combined = add_256_le(&combined, &shift_left_256_le(&limb3, 204));
+
+        // Convert back to big-endian for the result
+        le_to_be(&combined)
+    }
+
+    // Convert Fr (big-endian) to little-endian
+    fn fr_to_le(fr: &Fr) -> [u8; 32] {
+        let mut le = [0u8; 32];
+        for i in 0..32 {
+            le[i] = fr[31 - i];
+        }
+        le
+    }
+
+    // Convert little-endian to big-endian
+    fn le_to_be(le: &[u8; 32]) -> [u8; 32] {
+        let mut be = [0u8; 32];
+        for i in 0..32 {
+            be[i] = le[31 - i];
+        }
+        be
+    }
+
+    // Shift left in little-endian representation
+    fn shift_left_256_le(val: &[u8; 32], bits: usize) -> [u8; 32] {
+        let mut result = [0u8; 32];
+        let byte_shift = bits / 8;
+        let bit_shift = bits % 8;
+
+        if byte_shift >= 32 {
+            return result;
+        }
+
+        for i in byte_shift..32 {
+            let src_idx = i - byte_shift;
+            result[i] = val[src_idx] << bit_shift;
+            if bit_shift > 0 && src_idx > 0 {
+                result[i] |= val[src_idx - 1] >> (8 - bit_shift);
+            }
+        }
+
+        result
+    }
+
+    // Add two 256-bit values in little-endian
+    fn add_256_le(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+        let mut result = [0u8; 32];
+        let mut carry: u16 = 0;
+
+        for i in 0..32 {
+            let sum = a[i] as u16 + b[i] as u16 + carry;
+            result[i] = sum as u8;
+            carry = sum >> 8;
+        }
+
+        result
+    }
+
+    // Extract coordinates
+    let lhs_x = combine_limbs(&ppo[0..4]);
+    let lhs_y = combine_limbs(&ppo[4..8]);
+    let rhs_x = combine_limbs(&ppo[8..12]);
+    let rhs_y = combine_limbs(&ppo[12..16]);
+
+    // Create G1 points (64 bytes each: x || y)
+    let mut lhs = [0u8; 64];
+    lhs[0..32].copy_from_slice(&lhs_x);
+    lhs[32..64].copy_from_slice(&lhs_y);
+
+    let mut rhs = [0u8; 64];
+    rhs[0..32].copy_from_slice(&rhs_x);
+    rhs[32..64].copy_from_slice(&rhs_y);
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("lhs from pairingPointObject", &lhs);
+        crate::dbg_g1!("rhs from pairingPointObject", &rhs);
+    }
+
+    Ok((lhs, rhs))
+}
+
+/// Generate recursion separator by hashing pairing points
+///
+/// Hashes: proofLhs, proofRhs, accLhs, accRhs -> keccak256 -> Fr (mod r)
+fn generate_recursion_separator(
+    proof_lhs: &G1,
+    proof_rhs: &G1,
+    acc_lhs: &G1,
+    acc_rhs: &G1,
+) -> Result<Fr, VerifyError> {
+    use sha3::{Digest, Keccak256};
+
+    // Hash: proofLhs.x, proofLhs.y, proofRhs.x, proofRhs.y, accLhs.x, accLhs.y, accRhs.x, accRhs.y
+    let mut hasher = Keccak256::new();
+
+    hasher.update(&proof_lhs[0..32]); // proofLhs.x
+    hasher.update(&proof_lhs[32..64]); // proofLhs.y
+    hasher.update(&proof_rhs[0..32]); // proofRhs.x
+    hasher.update(&proof_rhs[32..64]); // proofRhs.y
+    hasher.update(&acc_lhs[0..32]); // accLhs.x
+    hasher.update(&acc_lhs[32..64]); // accLhs.y
+    hasher.update(&acc_rhs[0..32]); // accRhs.x
+    hasher.update(&acc_rhs[32..64]); // accRhs.y
+
+    let hash = hasher.finalize();
+
+    #[cfg(feature = "debug")]
+    {
+        let mut raw_hash = [0u8; 32];
+        raw_hash.copy_from_slice(&hash);
+        crate::dbg_fr!("  raw hash", &raw_hash);
+    }
+
+    // Convert to Fr with modular reduction (like Solidity's FrLib.fromBytes32)
+    // FrLib.fromBytes32: return Fr.wrap(uint256(value) % MODULUS)
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+
+    // Apply modular reduction
+    result = crate::field::fr_reduce(&result);
+
+    Ok(result)
 }
 
 #[cfg(test)]

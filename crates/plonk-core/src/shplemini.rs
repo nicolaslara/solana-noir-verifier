@@ -68,11 +68,28 @@ pub fn compute_shplemini_pairing_points(
     // 2) Compute shplonk weights
     // pos0 = 1 / (z - r^0)
     // neg0 = 1 / (z + r^0)
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("shplonk_z for pos0/neg0", &challenges.shplonk_z);
+        crate::dbg_fr!("r_pows[0] (gemini_r) for pos0/neg0", &r_pows[0]);
+    }
     let z_minus_r0 = fr_sub(&challenges.shplonk_z, &r_pows[0]);
     let z_plus_r0 = fr_add(&challenges.shplonk_z, &r_pows[0]);
 
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("z - r (before invert)", &z_minus_r0);
+        crate::dbg_fr!("z + r (before invert)", &z_plus_r0);
+    }
+
     let pos0 = fr_inv(&z_minus_r0).ok_or("shplonk denominator z - r^0 is zero")?;
     let neg0 = fr_inv(&z_plus_r0).ok_or("shplonk denominator z + r^0 is zero")?;
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("pos0 = 1/(z-r)", &pos0);
+        crate::dbg_fr!("neg0 = 1/(z+r)", &neg0);
+    }
 
     // unshifted = pos0 + nu * neg0
     let unshifted = fr_add(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0));
@@ -133,6 +150,15 @@ pub fn compute_shplemini_pairing_points(
 
     let gemini_a_evals = proof.gemini_a_evaluations();
 
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== GEMINI A EVALUATIONS =====");
+        for (idx, eval) in gemini_a_evals.iter().enumerate() {
+            crate::dbg_fr!(&format!("geminiAEvaluations[{}]", idx), eval);
+        }
+        crate::trace!("===== FOLD POS COMPUTATION =====");
+    }
+
     for j in (1..=log_n).rev() {
         let r2 = r_pows[j - 1];
         let u = challenges.sumcheck_challenges[j - 1];
@@ -154,6 +180,19 @@ pub fn compute_shplemini_pairing_points(
 
         cur = fr_mul(&num, &den_inv);
         fold_pos[j - 1] = cur;
+
+        #[cfg(feature = "debug")]
+        {
+            crate::dbg_fr!(&format!("foldPos[{}] (j={})", j - 1, j), &cur);
+        }
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("fold_pos[0]", &fold_pos[0]);
+        crate::dbg_fr!("pos0", &pos0);
+        crate::dbg_fr!("neg0", &neg0);
+        crate::dbg_fr!("gemini_a_evals[0]", &gemini_a_evals[0]);
     }
 
     // 5) Accumulate constant term
@@ -163,8 +202,15 @@ pub fn compute_shplemini_pairing_points(
         &fr_mul(&fr_mul(&gemini_a_evals[0], &challenges.shplonk_nu), &neg0),
     );
 
-    // 6) Further folding
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("const_acc after initial term", &const_acc);
+    }
+
+    // 6) Further folding (gemini fold loop: i = 1 to log_n - 1)
+    // Also compute gemini_scalars for the MSM
     let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
+    let mut gemini_scalars = vec![SCALAR_ZERO; log_n - 1];
 
     for j in 1..log_n {
         let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
@@ -175,6 +221,10 @@ pub fn compute_shplemini_pairing_points(
 
         let sp = fr_mul(&v_pow, &pos_inv);
         let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
+
+        // Compute gemini scalar for this fold commitment
+        // scalars[boundary + i] = -scalingFactorNeg - scalingFactorPos
+        gemini_scalars[j - 1] = fr_neg(&fr_add(&sn, &sp));
 
         // Update const_acc
         const_acc = fr_add(
@@ -188,6 +238,80 @@ pub fn compute_shplemini_pairing_points(
         );
     }
 
+    // 7) Add libra polynomial evaluation contributions (ZK only)
+    // Also compute libra_scalars for the MSM
+    // Solidity:
+    //   denominators[0] = 1/(z - r)
+    //   denominators[1] = 1/(z - SUBGROUP_GENERATOR * r)
+    //   denominators[2] = denominators[0]
+    //   denominators[3] = denominators[0]
+    // Then: v_pow *= nu^2, and for each libraPolyEval:
+    //   scalingFactor = denominators[i] * v_pow
+    //   batchingScalars[i] = -scalingFactor
+    //   const_acc += scalingFactor * libraPolyEvals[i]
+    //   v_pow *= nu
+    // Final libra scalars:
+    //   scalars[boundary] = batchingScalars[0]
+    //   scalars[boundary+1] = batchingScalars[1] + batchingScalars[2]
+    //   scalars[boundary+2] = batchingScalars[3]
+    let mut libra_scalars = vec![SCALAR_ZERO; 3];
+
+    if proof.is_zk {
+        // SUBGROUP_GENERATOR (from Solidity)
+        // Fr.wrap(0x07b0c561a6148404f086204a9f36ffb0617942546750f230c893619174a57a76)
+        let subgroup_generator: crate::types::Fr = [
+            0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36,
+            0xff, 0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91,
+            0x74, 0xa5, 0x7a, 0x76,
+        ];
+
+        // denominators[0] = 1/(z - r)
+        let denom0 = fr_inv(&fr_sub(&challenges.shplonk_z, &challenges.gemini_r))
+            .ok_or("libra denominator 0 is zero")?;
+        // denominators[1] = 1/(z - SUBGROUP_GENERATOR * r)
+        let denom1 = fr_inv(&fr_sub(
+            &challenges.shplonk_z,
+            &fr_mul(&subgroup_generator, &challenges.gemini_r),
+        ))
+        .ok_or("libra denominator 1 is zero")?;
+
+        // Update v_pow: v_pow *= nu^2
+        v_pow = fr_mul(
+            &v_pow,
+            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
+        );
+
+        // Get libra poly evals
+        if let Some(libra_evals) = proof.libra_poly_evals() {
+            #[cfg(feature = "debug")]
+            {
+                crate::trace!("===== LIBRA POLY EVALS =====");
+                for (idx, eval) in libra_evals.iter().enumerate() {
+                    crate::dbg_fr!(&format!("libraPolyEvals[{}]", idx), eval);
+                }
+            }
+
+            // For each libraPolyEval, compute batchingScalars and update const_acc
+            // denominators = [denom0, denom1, denom0, denom0]
+            let denominators = [denom0, denom1, denom0, denom0];
+            let mut batching_scalars = [SCALAR_ZERO; 4];
+            for (i, eval) in libra_evals.iter().enumerate() {
+                let scaling_factor = fr_mul(&denominators[i], &v_pow);
+                batching_scalars[i] = fr_neg(&scaling_factor);
+                const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
+                v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
+            }
+
+            // Final libra scalars for commitments:
+            // scalars[boundary] = batchingScalars[0]
+            // scalars[boundary+1] = batchingScalars[1] + batchingScalars[2]
+            // scalars[boundary+2] = batchingScalars[3]
+            libra_scalars[0] = batching_scalars[0];
+            libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
+            libra_scalars[2] = batching_scalars[3];
+        }
+    }
+
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== SHPLEMINI INTERMEDIATE VALUES =====");
@@ -197,16 +321,22 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("shifted scalar", &shifted);
     }
 
-    // 7) Build the final pairing points
-    // P0 = MSM(commitments, scalars) + const_acc * G1_generator
+    // 8) Build the final pairing points
+    // P0 = MSM(commitments, scalars)
     // P1 = -kzg_quotient (NEGATED!)
 
-    // For Solana, we need to build this incrementally using scalar muls and additions
-    // For now, return the shplonk_q as a placeholder
-
-    // The actual P0 would be computed via MSM, but for now we use a simplified version:
-    // P0 = shplonk_q + const_acc * G + z * kzg_quotient
-    let p0 = compute_p0_simplified(proof, vk, challenges, &const_acc)?;
+    // Compute P0 using the full MSM
+    let p0 = compute_p0_full(
+        proof,
+        vk,
+        challenges,
+        &const_acc,
+        &unshifted,
+        &shifted,
+        &r_pows,
+        &gemini_scalars,
+        &libra_scalars,
+    )?;
 
     // P1 = -kzg_quotient (negate the y-coordinate)
     let kzg_quotient = proof.kzg_quotient();
@@ -225,18 +355,227 @@ pub fn compute_shplemini_pairing_points(
 /// Compute P0 for Shplemini verification
 ///
 /// This builds the complete P0 point using all commitments from VK and proof
-fn compute_p0_simplified(
+/// implementing the full MSM as in Solidity's batchMul
+fn compute_p0_full(
     proof: &Proof,
     vk: &VerificationKey,
     challenges: &Challenges,
     const_acc: &Fr,
+    unshifted_scalar: &Fr,
+    shifted_scalar: &Fr,
+    r_pows: &[Fr],
+    gemini_scalars: &[Fr],
+    libra_scalars: &[Fr],
 ) -> Result<G1, &'static str> {
+    let log_n = vk.log2_circuit_size as usize;
+
+    // We compute P0 as the MSM of all commitments with their scalars
+    // Solidity order:
+    // [0] shplonk_q (scalar=1)
+    // [1] geminiMaskingPoly (scalar=-unshifted)
+    // [2..38] VK commitments (28) + proof wire commitments (8) with scalars -unshifted*rho^i / -shifted*rho^i
+    // [38..38+log_n-1] gemini fold comms
+    // [...+3] libra commitments
+    // [...] G1_generator (scalar=const_acc)
+    // [...] kzg_quotient (scalar=z)
+
     // Start with shplonk_q (scalar = 1)
     let mut p0 = proof.shplonk_q();
 
     #[cfg(feature = "debug")]
     {
-        crate::dbg_g1!("shplonk_q", &p0);
+        crate::trace!("===== MSM COMMITMENTS =====");
+        crate::dbg_g1!("shplonk_q (commitment[0])", &p0);
+
+        // Print first VK commitment
+        crate::dbg_g1!("vk.commitments[0] (qm)", &vk.commitments[0]);
+        crate::dbg_g1!("vk.commitments[1] (qc)", &vk.commitments[1]);
+        crate::dbg_g1!("vk.commitments[27] (lagrangeLast)", &vk.commitments[27]);
+
+        // Print first wire commitment
+        crate::dbg_g1!("wire_commitment(0) (w1)", &proof.wire_commitment(0));
+    }
+
+    // Add geminiMaskingPoly * (-unshifted)
+    if proof.is_zk {
+        let neg_unshifted = fr_neg(unshifted_scalar);
+        if let Some(masking_comm) = proof.gemini_masking_commitment() {
+            let scaled =
+                ops::g1_scalar_mul(&masking_comm, &neg_unshifted).map_err(|_| "G1 mul failed")?;
+            p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
+        }
+    }
+
+    // Build scalars for VK and proof commitments
+    // We need to accumulate: -unshifted*rho^i for unshifted, -shifted*rho^i for shifted
+    // Solidity populates scalars[2..38] with these values
+    let neg_unshifted = fr_neg(unshifted_scalar);
+    let neg_shifted = fr_neg(shifted_scalar);
+
+    // VK commitments (28 entries, indices 2-29 in Solidity)
+    // scalars[i+2] = -unshifted * rho^(i+1) for i = 0..28
+    // Note: batchingChallenge starts at rho, so first scalar is -unshifted * rho
+    let mut rho_pow = challenges.rho;
+    for i in 0..28 {
+        let scalar = fr_mul(&neg_unshifted, &rho_pow);
+        let commitment = vk.commitments[i];
+        let scaled = ops::g1_scalar_mul(&commitment, &scalar).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
+
+        #[cfg(feature = "debug")]
+        if i < 3 || i == 27 {
+            crate::dbg_fr!(&format!("VK[{}] scalar (rho^{})", i, i + 1), &scalar);
+        }
+
+        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("P0 after VK commitments", &p0);
+        crate::dbg_fr!("rho_pow after VK (should be rho^29)", &rho_pow);
+    }
+
+    // Proof wire commitments (8 entries, indices 30-37 in Solidity)
+    // But we need to be careful about the order and shifted vs unshifted
+    // Solidity order: w1(30), w2(31), w3(32), w4(33), zPerm(34), lookupInverses(35), lookupReadCounts(36), lookupReadTags(37)
+    // Our proof order: w1(0), w2(1), w3(2), lookupReadCounts(3), lookupReadTags(4), w4(5), lookupInverses(6), zPerm(7)
+
+    // Map our proof indices to Solidity order
+    // Solidity idx 30-37: [w1, w2, w3, w4, zPerm, lookupInverses, lookupReadCounts, lookupReadTags]
+    // Our idx 0-7: [w1, w2, w3, lookupReadCounts, lookupReadTags, w4, lookupInverses, zPerm]
+    // Mapping: [0, 1, 2, 5, 7, 6, 3, 4]
+    let wire_mapping = [0usize, 1, 2, 5, 7, 6, 3, 4];
+
+    // Indices 30-34 (w1, w2, w3, w4, zPerm) are shifted commitments
+    // They get both unshifted and shifted scalar contributions
+    // SHIFTED_COMMITMENTS_START = 30
+    for (sol_idx, &our_idx) in wire_mapping.iter().enumerate() {
+        let commitment = proof.wire_commitment(our_idx);
+
+        // Solidity scalars[30..38] start with unshifted scalar contribution
+        // After VK loop (28 iterations), rho_pow = rho^29
+        // Wire scalars use rho^29, rho^30, ..., rho^36
+        let mut scalar = fr_mul(&neg_unshifted, &rho_pow);
+
+        #[cfg(feature = "debug")]
+        {
+            crate::dbg_fr!(
+                &format!("Wire[{}] (sol_idx={}) unshifted_scalar", our_idx, sol_idx),
+                &scalar
+            );
+        }
+
+        // For shifted commitments (indices 30-34 in Solidity, 0-4 in wire_mapping)
+        // we also add the shifted contribution
+        if sol_idx < NUMBER_TO_BE_SHIFTED {
+            // Compute the shifted rho power
+            // In Solidity, after unshifted loop (36 iterations starting with rho),
+            // batchingChallenge = rho^37
+            // So shifted contribution uses rho^(37 + sol_idx)
+            // NUMBER_UNSHIFTED = 36, so we need rho^(37 + sol_idx) = rho^(NUMBER_UNSHIFTED + 1 + sol_idx)
+            let shifted_rho_idx = NUMBER_UNSHIFTED + 1 + sol_idx; // 37, 38, 39, 40, 41
+            let mut shifted_rho_pow = SCALAR_ONE;
+            for _ in 0..shifted_rho_idx {
+                shifted_rho_pow = fr_mul(&shifted_rho_pow, &challenges.rho);
+            }
+            let shifted_contrib = fr_mul(&neg_shifted, &shifted_rho_pow);
+
+            #[cfg(feature = "debug")]
+            {
+                crate::dbg_fr!(
+                    &format!(
+                        "Wire[{}] shifted_contrib (rho^{})",
+                        our_idx, shifted_rho_idx
+                    ),
+                    &shifted_contrib
+                );
+            }
+
+            scalar = fr_add(&scalar, &shifted_contrib);
+
+            #[cfg(feature = "debug")]
+            {
+                crate::dbg_fr!(
+                    &format!("Wire[{}] FINAL scalar (sol_idx={})", our_idx, sol_idx),
+                    &scalar
+                );
+            }
+        }
+
+        #[cfg(feature = "debug")]
+        if sol_idx >= NUMBER_TO_BE_SHIFTED {
+            crate::dbg_fr!(
+                &format!(
+                    "Wire[{}] FINAL scalar (sol_idx={}, no shift)",
+                    our_idx, sol_idx
+                ),
+                &scalar
+            );
+        }
+
+        let scaled = ops::g1_scalar_mul(&commitment, &scalar).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
+        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("P0 after wire commitments", &p0);
+    }
+
+    // Add gemini fold commitments with their scalars
+    // scalars[38..38+log_n-1] = gemini_scalars
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== GEMINI FOLD SCALARS =====");
+    }
+    for i in 0..(log_n - 1) {
+        #[cfg(feature = "debug")]
+        {
+            crate::dbg_fr!(&format!("gemini_scalars[{}]", i), &gemini_scalars[i]);
+        }
+        let commitment = proof.gemini_fold_comm(i);
+        let scaled =
+            ops::g1_scalar_mul(&commitment, &gemini_scalars[i]).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
+    }
+
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_g1!("P0 after gemini fold", &p0);
+    }
+
+    // Add libra commitments with their scalars (ZK only)
+    if proof.is_zk {
+        #[cfg(feature = "debug")]
+        {
+            crate::trace!("===== LIBRA SCALARS =====");
+            crate::dbg_fr!("libra_scalars[0]", &libra_scalars[0]);
+            crate::dbg_fr!("libra_scalars[1]", &libra_scalars[1]);
+            crate::dbg_fr!("libra_scalars[2]", &libra_scalars[2]);
+        }
+
+        // libraCommitments[0], [1], [2]
+        if let Some(libra_comms) = proof.libra_commitments() {
+            let scaled0 = ops::g1_scalar_mul(&libra_comms[0], &libra_scalars[0])
+                .map_err(|_| "G1 mul failed")?;
+            p0 = ops::g1_add(&p0, &scaled0).map_err(|_| "G1 add failed")?;
+
+            // libra_scalars[1] = batchingScalars[1] + batchingScalars[2] (combined)
+            let scaled1 = ops::g1_scalar_mul(&libra_comms[1], &libra_scalars[1])
+                .map_err(|_| "G1 mul failed")?;
+            p0 = ops::g1_add(&p0, &scaled1).map_err(|_| "G1 add failed")?;
+
+            let scaled2 = ops::g1_scalar_mul(&libra_comms[2], &libra_scalars[2])
+                .map_err(|_| "G1 mul failed")?;
+            p0 = ops::g1_add(&p0, &scaled2).map_err(|_| "G1 add failed")?;
+        }
+
+        #[cfg(feature = "debug")]
+        {
+            crate::dbg_g1!("P0 after libra comms", &p0);
+        }
     }
 
     // Add const_acc * G1_generator
@@ -252,24 +591,8 @@ fn compute_p0_simplified(
 
     #[cfg(feature = "debug")]
     {
-        crate::dbg_g1!("P0 after shplonk_q + const*G + z*kzg", &p0);
+        crate::dbg_g1!("P0 after full MSM", &p0);
     }
-
-    // For now, we're using a simplified approach that doesn't include all VK commitments
-    // This is a placeholder - full implementation requires the complete MSM
-    //
-    // The full computation would be:
-    // P0 = batchMul(commitments, scalars) where:
-    //   commitments = [shplonk_q, geminiMaskingPoly, VK_comms..., proof_wire_comms...,
-    //                  gemini_fold_comms..., libra_comms..., G1_generator, kzg_quotient]
-    //   scalars = [1, -unshifted, -unshifted*rho^i..., -shifted*rho^i...,
-    //              gemini_scalars..., libra_scalars..., const_acc, z]
-
-    // For UltraHonk with the pairing point object (recursive aggregation),
-    // we also need to aggregate with proof.pairingPointObject
-
-    // TODO: Implement the full MSM computation
-    // For now, this simplified version may not produce correct results
 
     Ok(p0)
 }

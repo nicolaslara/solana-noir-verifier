@@ -55,6 +55,45 @@ pub fn limbs_to_fr(limbs: &[u64; 4]) -> Fr {
     fr
 }
 
+/// Reduce a 256-bit value mod r
+/// This is equivalent to Solidity's FrLib.fromBytes32
+/// Note: The input can be any 256-bit value, which may be up to ~5x larger than r
+#[inline]
+pub fn fr_reduce(a: &Fr) -> Fr {
+    let mut limbs = fr_to_limbs(a);
+
+    // Keep subtracting r until result < r
+    // In worst case, hash output is ~2^256 which is ~5.8 * r
+    // So we need at most 6 iterations
+    loop {
+        let (result, borrow) = sbb_limbs(&limbs, &R);
+        if borrow != 0 {
+            // limbs < r, we're done
+            break;
+        }
+        // limbs >= r, continue with result
+        limbs = result;
+    }
+
+    limbs_to_fr(&limbs)
+}
+
+/// Subtract with borrow, returning (result, borrow)
+#[inline]
+fn sbb_limbs(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], u64) {
+    let mut result = [0u64; 4];
+    let mut borrow = 0u64;
+
+    for i in 0..4 {
+        let (diff1, borrow1) = a[i].overflowing_sub(b[i]);
+        let (diff2, borrow2) = diff1.overflowing_sub(borrow);
+        result[i] = diff2;
+        borrow = (borrow1 as u64) | (borrow2 as u64);
+    }
+
+    (result, borrow)
+}
+
 /// Add two field elements: a + b mod r
 pub fn fr_add(a: &Fr, b: &Fr) -> Fr {
     let a_limbs = fr_to_limbs(a);

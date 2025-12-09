@@ -21,7 +21,7 @@
 //! 11. Gemini masking evaluation: 1 Fr (ZK only)
 //! 12. Gemini fold commitments: (log_n - 1) G1 = (log_n - 1) × 2 Fr
 //! 13. Gemini A evaluations: log_n Fr
-//! 14. Small IPA evaluations: 2 Fr (ZK only)
+//! 14. Libra polynomial evaluations: 4 Fr (ZK only) - libraPolyEvals in Solidity
 //! 15. Shplonk Q commitment: 1 G1 = 2 Fr
 //! 16. KZG W commitment: 1 G1 = 2 Fr
 
@@ -55,10 +55,10 @@ pub const ZK_EXTRA_FRS: usize = 13;
 pub const BATCHED_RELATION_PARTIAL_LENGTH_ZK: usize = 9;
 
 /// Additional Fr elements observed in actual proofs (likely protocol-specific metadata)
-/// Non-ZK proofs have 1 extra Fr, ZK proofs have 2 extra Fr
+/// Non-ZK proofs have 1 extra Fr, ZK proofs have 0 extra Fr (libraPolyEvals accounts for it)
 /// TODO: Investigate exact source of these in bb proof serialization
 pub const PROOF_EXTRA_FR_NON_ZK: usize = 1;
-pub const PROOF_EXTRA_FR_ZK: usize = 2;
+pub const PROOF_EXTRA_FR_ZK: usize = 0;
 
 /// Parsed UltraHonk proof with semantic structure
 #[derive(Debug, Clone)]
@@ -123,8 +123,8 @@ impl Proof {
         size += log_n;
 
         if is_zk {
-            // Small IPA evaluations (2 Fr)
-            size += 2;
+            // Libra polynomial evaluations (4 Fr for ZK) - libraPolyEvals in Solidity
+            size += 4;
         }
 
         // Shplonk Q commitment (1 G1 = 2 Fr)
@@ -470,6 +470,34 @@ impl Proof {
             + gemini_fold_size;
 
         &self.data[offset..offset + self.log_n]
+    }
+
+    /// Get libra polynomial evaluations (4 Fr values for ZK proofs)
+    /// These are: libraPolyEvals[0..4] in Solidity
+    /// Used in Shplemini constant term accumulator calculation
+    pub fn libra_poly_evals(&self) -> Option<&[Fr]> {
+        if !self.is_zk {
+            return None;
+        }
+        // After gemini A evaluations
+        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
+        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
+        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
+        let evals_size = NUM_ALL_ENTITIES;
+        // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
+        let zk_post_evals = 8;
+        let gemini_fold_size = (self.log_n - 1) * 2;
+        let gemini_a_size = self.log_n;
+
+        let offset = base_offset
+            + zk_libra_start
+            + univariates_size
+            + evals_size
+            + zk_post_evals
+            + gemini_fold_size
+            + gemini_a_size;
+
+        Some(&self.data[offset..offset + 4])
     }
 
     /// Get shplonk Q commitment
