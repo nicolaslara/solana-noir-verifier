@@ -7,13 +7,26 @@
 //! Since UltraHonk proofs are ~16KB (too large for instruction data),
 //! we store the proof in an account and verify from there.
 //!
-//! ## Instructions
+//! ## Single-TX Instructions (exceeds CU limit)
 //!
 //! 0. InitProofBuffer - Create account to store proof
 //! 1. UploadChunk - Upload proof data in chunks
-//! 2. Verify - Verify the proof from the buffer
+//! 2. Verify - Verify the proof from the buffer (FAILS: >1.4M CUs)
+//!
+//! ## Multi-TX Phased Verification
+//!
+//! 10. InitPhasedVerification - Create state account
+//! 11. GenerateChallenges - Phase 1: Fiat-Shamir transcript
+//! 12. VerifySumcheck - Phase 2: Sumcheck protocol
+//! 13. ComputeMSM - Phase 3: Shplemini P0/P1 computation
+//! 14. FinalPairingCheck - Phase 4: Final pairing verification
 
-use plonk_solana_core::{verify, Fr};
+pub mod phased;
+
+use plonk_solana_core::{
+    verify, verify_step1_challenges, verify_step2_sumcheck, verify_step3_pairing_points,
+    verify_step4_pairing_check, Challenges, Fr,
+};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
@@ -60,6 +73,7 @@ const VK_BYTES: &[u8] = include_bytes!("../../../test-circuits/simple_square/tar
 
 #[repr(u8)]
 pub enum Instruction {
+    // === Single-TX verification (exceeds CU limit) ===
     /// Initialize proof buffer account
     /// Accounts: [proof_buffer (writable), payer (signer)]
     InitBuffer = 0,
@@ -69,7 +83,7 @@ pub enum Instruction {
     /// Data: [instruction(1), offset(2), chunk_data(...)]
     UploadChunk = 1,
 
-    /// Verify the proof from buffer
+    /// Verify the proof from buffer (FAILS: >1.4M CUs)
     /// Accounts: [proof_buffer (readonly)]
     /// Data: [instruction(1)]
     Verify = 2,
@@ -78,6 +92,27 @@ pub enum Instruction {
     /// Accounts: [proof_buffer (writable)]
     /// Data: [instruction(1), public_inputs...]
     SetPublicInputs = 3,
+
+    // === Multi-TX phased verification ===
+    /// Phase 1: Initialize state + generate challenges
+    /// Accounts: [state (writable), proof_data (readonly)]
+    /// Data: [instruction(1)]
+    PhasedGenerateChallenges = 10,
+
+    /// Phase 2: Verify sumcheck
+    /// Accounts: [state (writable), proof_data (readonly)]
+    /// Data: [instruction(1)]
+    PhasedVerifySumcheck = 11,
+
+    /// Phase 3: Compute P0/P1 (Shplemini MSM)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    /// Data: [instruction(1)]
+    PhasedComputeMSM = 12,
+
+    /// Phase 4: Final pairing check
+    /// Accounts: [state (writable)]
+    /// Data: [instruction(1)]
+    PhasedFinalCheck = 13,
 }
 
 // ============================================================================
@@ -113,10 +148,18 @@ pub fn process_instruction(
     }
 
     match instruction_data[0] {
+        // Single-TX verification
         0 => process_init_buffer(program_id, accounts, &instruction_data[1..]),
         1 => process_upload_chunk(program_id, accounts, &instruction_data[1..]),
         2 => process_verify(program_id, accounts),
         3 => process_set_public_inputs(program_id, accounts, &instruction_data[1..]),
+
+        // Multi-TX phased verification
+        10 => process_phased_generate_challenges(program_id, accounts),
+        11 => process_phased_verify_sumcheck(program_id, accounts),
+        12 => process_phased_compute_msm(program_id, accounts),
+        13 => process_phased_final_check(program_id, accounts),
+
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -398,6 +441,350 @@ fn process_set_public_inputs(
 
     msg!("Set {} public inputs ({} bytes)", num_pi, expected_size);
     Ok(())
+}
+
+// ============================================================================
+// Phased Verification Instructions
+// ============================================================================
+
+/// Phase 1: Generate challenges from transcript
+/// This is the most expensive step (~1.4M CUs)
+fn process_phased_generate_challenges(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    msg!("Phased: Generate Challenges");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    // Verify state account is writable
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in the right phase (Uninitialized or can restart)
+    let current_phase = state.get_phase();
+    if current_phase != phased::Phase::Uninitialized && current_phase != phased::Phase::Failed {
+        msg!("Invalid phase: {:?}", current_phase);
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data from proof account
+    let proof_data = proof_account.try_borrow_data()?;
+
+    // Parse proof buffer header
+    let status = proof_data[0];
+    if status != BufferStatus::Ready as u8 {
+        msg!("Proof buffer not ready");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
+
+    // Extract public inputs and proof
+    let pi_start = BUFFER_HEADER_SIZE;
+    let pi_end = pi_start + (num_pi * 32);
+    let proof_start = pi_end;
+    let proof_end = proof_start + proof_len;
+
+    let pi_bytes = &proof_data[pi_start..pi_end];
+    let proof_bytes = &proof_data[proof_start..proof_end];
+
+    // Parse public inputs
+    let mut public_inputs: Vec<Fr> = Vec::with_capacity(num_pi);
+    for i in 0..num_pi {
+        let start = i * 32;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&pi_bytes[start..start + 32]);
+        public_inputs.push(arr);
+    }
+
+    msg!("Parsing VK and Proof...");
+    sol_log_compute_units();
+
+    // Parse VK
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Parse proof
+    let log_n = vk.log2_circuit_size as usize;
+    let is_zk = true;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(proof_bytes, log_n, is_zk)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Generating challenges...");
+    sol_log_compute_units();
+
+    // Generate challenges - THIS IS THE EXPENSIVE PART
+    let challenges = verify_step1_challenges(&vk, &proof, &public_inputs).map_err(|e| {
+        msg!("Challenge generation failed: {:?}", e);
+        ProgramError::InvalidAccountData
+    })?;
+
+    msg!("Saving challenges to state...");
+    sol_log_compute_units();
+
+    // Save challenges to state account
+    state.log_n = log_n as u8;
+    state.is_zk = if is_zk { 1 } else { 0 };
+    state.num_public_inputs = num_pi as u16;
+
+    // RelationParameters
+    state.eta = challenges.relation_params.eta;
+    state.eta_two = challenges.relation_params.eta_two;
+    state.eta_three = challenges.relation_params.eta_three;
+    state.beta = challenges.relation_params.beta;
+    state.gamma = challenges.relation_params.gamma;
+    state.public_input_delta = challenges.relation_params.public_input_delta;
+
+    // Alphas (25)
+    for (i, alpha) in challenges.alphas.iter().enumerate() {
+        if i < 25 {
+            state.alphas[i] = *alpha;
+        }
+    }
+
+    // Gate challenges (28)
+    for (i, gc) in challenges.gate_challenges.iter().enumerate() {
+        if i < 28 {
+            state.gate_challenges[i] = *gc;
+        }
+    }
+
+    // Sumcheck challenges (28)
+    for (i, sc) in challenges.sumcheck_challenges.iter().enumerate() {
+        if i < 28 {
+            state.sumcheck_challenges[i] = *sc;
+        }
+    }
+
+    // Other challenges
+    state.libra_challenge = challenges.libra_challenge.unwrap_or([0u8; 32]);
+    state.rho = challenges.rho;
+    state.gemini_r = challenges.gemini_r;
+    state.shplonk_nu = challenges.shplonk_nu;
+    state.shplonk_z = challenges.shplonk_z;
+
+    // Update phase
+    state.set_phase(phased::Phase::ChallengesGenerated);
+
+    msg!("Phase 1 complete: Challenges generated");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 2: Verify sumcheck protocol
+fn process_phased_verify_sumcheck(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phased: Verify Sumcheck");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in the right phase
+    if state.get_phase() != phased::Phase::ChallengesGenerated {
+        msg!("Invalid phase: expected ChallengesGenerated");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse VK and proof
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges from state
+    let challenges = reconstruct_challenges(state);
+
+    msg!("Running sumcheck verification...");
+    sol_log_compute_units();
+
+    // Verify sumcheck
+    let sumcheck_ok = verify_step2_sumcheck(&vk, &proof, &challenges).map_err(|e| {
+        msg!("Sumcheck failed: {:?}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    if !sumcheck_ok {
+        msg!("Sumcheck verification returned false");
+        state.set_phase(phased::Phase::Failed);
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    state.sumcheck_passed = 1;
+    state.set_phase(phased::Phase::SumcheckVerified);
+
+    msg!("Phase 2 complete: Sumcheck verified");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 3: Compute P0/P1 (Shplemini MSM)
+fn process_phased_compute_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phased: Compute MSM");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in the right phase
+    if state.get_phase() != phased::Phase::SumcheckVerified {
+        msg!("Invalid phase: expected SumcheckVerified");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse VK and proof
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges from state
+    let challenges = reconstruct_challenges(state);
+
+    msg!("Computing pairing points (MSM)...");
+    sol_log_compute_units();
+
+    // Compute P0/P1
+    let (p0, p1) = verify_step3_pairing_points(&vk, &proof, &challenges).map_err(|e| {
+        msg!("MSM failed: {:?}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save P0/P1 to state
+    state.p0 = p0;
+    state.p1 = p1;
+    state.set_phase(phased::Phase::MsmComputed);
+
+    msg!("Phase 3 complete: P0/P1 computed");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 4: Final pairing check
+fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phased: Final Pairing Check");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in the right phase
+    if state.get_phase() != phased::Phase::MsmComputed {
+        msg!("Invalid phase: expected MsmComputed");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    msg!("Running pairing check...");
+    sol_log_compute_units();
+
+    // Final pairing check
+    let pairing_ok = verify_step4_pairing_check(&state.p0, &state.p1).map_err(|e| {
+        msg!("Pairing check failed: {:?}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    if pairing_ok {
+        state.verified = 1;
+        state.set_phase(phased::Phase::Complete);
+        msg!("✅ UltraHonk proof verified successfully!");
+    } else {
+        state.verified = 0;
+        state.set_phase(phased::Phase::Failed);
+        msg!("❌ Pairing check failed");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Reconstruct Challenges struct from state account
+fn reconstruct_challenges(state: &phased::VerificationState) -> Challenges {
+    use plonk_solana_core::RelationParameters;
+
+    Challenges {
+        relation_params: RelationParameters {
+            eta: state.eta,
+            eta_two: state.eta_two,
+            eta_three: state.eta_three,
+            beta: state.beta,
+            gamma: state.gamma,
+            public_input_delta: state.public_input_delta,
+        },
+        alpha: state.alphas[0],
+        alphas: state.alphas.to_vec(),
+        libra_challenge: if state.libra_challenge == [0u8; 32] {
+            None
+        } else {
+            Some(state.libra_challenge)
+        },
+        gate_challenges: state.gate_challenges.to_vec(),
+        sumcheck_challenges: state.sumcheck_challenges.to_vec(),
+        rho: state.rho,
+        gemini_r: state.gemini_r,
+        shplonk_nu: state.shplonk_nu,
+        shplonk_z: state.shplonk_z,
+    }
 }
 
 // ============================================================================

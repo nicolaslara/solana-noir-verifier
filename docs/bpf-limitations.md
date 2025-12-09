@@ -88,14 +88,30 @@ Groth16 verification is dominated by pairing checks (syscalls), while UltraHonk 
 
 ### 1. Split Verification Across Multiple Transactions (Recommended)
 
-Store intermediate state in accounts and verify in phases:
+Store intermediate state in accounts and verify in phases.
+
+**Problem**: Even Phase 1 (challenge generation) exceeds 1.4M CUs!
+
+The challenge generation itself must be split:
 
 ```
-Transaction 1: Generate challenges → save to account
-Transaction 2: Verify sumcheck → save result to account
-Transaction 3: Compute pairing points → save to account
-Transaction 4: Final pairing check → return result
+Transaction 1a: eta, beta/gamma challenges       (~200K CUs)
+Transaction 1b: alpha + gate challenges          (~200K CUs)
+Transaction 1c: sumcheck rounds 0-13             (~400K CUs)
+Transaction 1d: sumcheck rounds 14-27 + rest     (~400K CUs)
+Transaction 1e: public_input_delta computation   (~300K CUs)
+Transaction 2:  verify sumcheck                  (~???K CUs)
+Transaction 3:  compute pairing points (MSM)     (~500K CUs)
+Transaction 4:  final pairing check              (~100K CUs)
 ```
+
+**Implementation challenge**: The transcript is stateful. After each challenge:
+
+- The buffer is hashed
+- The hash becomes the next "previousChallenge"
+- This chains all challenges together for Fiat-Shamir security
+
+We must serialize/deserialize transcript state between transactions.
 
 This is how Light Protocol handles complex ZK verification on Solana.
 

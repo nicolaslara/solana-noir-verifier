@@ -45,7 +45,7 @@ pub use errors::VerifyError;
 pub use types::{Fr, Scalar, G1, G2};
 pub use verifier::{
     verify, verify_inner, verify_step1_challenges, verify_step2_sumcheck,
-    verify_step3_pairing_points, verify_step4_pairing_check, Challenges,
+    verify_step3_pairing_points, verify_step4_pairing_check, Challenges, RelationParameters,
 };
 
 /// VK size for new format (bb v0.84.0+)

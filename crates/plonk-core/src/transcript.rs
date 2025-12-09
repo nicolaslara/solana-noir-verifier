@@ -26,6 +26,25 @@ impl Transcript {
         }
     }
 
+    /// Create a transcript initialized with a previous challenge (for resuming)
+    /// This matches the state after a challenge_split() call
+    pub fn from_previous_challenge(prev_challenge: &Fr) -> Self {
+        let mut buffer = Vec::with_capacity(4096);
+        buffer.extend_from_slice(prev_challenge);
+        Self { buffer }
+    }
+
+    /// Get the current transcript state (the buffer contents)
+    /// After a challenge_split(), this is the 32-byte challenge used for chaining
+    pub fn get_state(&self) -> Vec<u8> {
+        self.buffer.clone()
+    }
+
+    /// Check if transcript is in "fresh challenge" state (32-byte buffer)
+    pub fn is_at_challenge_boundary(&self) -> bool {
+        self.buffer.len() == 32
+    }
+
     /// Append a u64 value (as 32-byte big-endian)
     pub fn append_u64(&mut self, val: u64) {
         let mut bytes = [0u8; 32];
@@ -245,9 +264,9 @@ mod tests {
         let result = reduce_hash_to_fr(&large);
         // Should not be all 0xff after reduction
         assert_ne!(result, large);
-    }
+}
 
-    #[test]
+#[test]
     fn test_split_challenge() {
         // Create a challenge with known pattern
         let mut challenge = [0u8; 32];
@@ -265,9 +284,9 @@ mod tests {
         // hi should have the upper 128 bits shifted down
         assert_eq!(hi[31], 0x01);
         assert_eq!(hi[15], 0x00);
-    }
+}
 
-    #[test]
+#[test]
     fn test_transcript_basic() {
         let mut t = Transcript::new();
 
@@ -280,9 +299,9 @@ mod tests {
 
         // Challenge should be non-zero
         assert_ne!(c, SCALAR_ZERO);
-    }
+}
 
-    #[test]
+#[test]
     fn test_actual_eta_computation() {
         // Build the same buffer as the Solidity verifier
         let mut t = Transcript::new();
