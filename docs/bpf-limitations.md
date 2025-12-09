@@ -260,7 +260,8 @@ For Solana, consider:
 4. ✅ **Karatsuba multiplication**: ~12% improvement in `fr_mul`
 5. ✅ **Montgomery multiplication**: **~87% improvement** in `fr_mul` (7x faster!)
 6. ✅ **Binary Extended GCD for `fr_inv`**: Much faster than Fermat's Little Theorem
-7. ⏳ **Sumcheck splitting**: Still needed, exceeds 1.4M CUs
+7. ✅ **Sumcheck splitting**: 2 rounds per TX, ~650K CUs each, works!
+8. ⏳ **MSM splitting**: Phase 3 exceeds 1.4M CUs, needs splitting
 
 ## Integration Test vs Real BPF
 
