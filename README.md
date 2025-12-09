@@ -304,17 +304,42 @@ cargo test -- --nocapture
 # Start Surfpool
 surfpool start
 
-# Build for Solana BPF
+# Build for Solana BPF with specific circuit VK
 cd programs/ultrahonk-verifier
-cargo build-sbf
+CIRCUIT=simple_square cargo build-sbf    # Default circuit
+# or: CIRCUIT=hash_batch cargo build-sbf # Different circuit
 
 # Deploy
-solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:18899
+solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
 
-# Run verification script
-cd ../../scripts/solana
-npm install && node verify.mjs
+# Run phased verification test (matches CIRCUIT used in build)
+cd ../..
+CIRCUIT=simple_square node scripts/solana/test_phased.mjs
 ```
+
+### Multi-Circuit Support
+
+The verifier embeds a circuit-specific VK at compile time. To verify different circuits:
+
+```bash
+# Build with specific circuit VK
+cd programs/ultrahonk-verifier
+CIRCUIT=hash_batch cargo build-sbf
+solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
+
+# Test with matching circuit
+CIRCUIT=hash_batch node scripts/solana/test_phased.mjs
+```
+
+**Available circuits:** `simple_square`, `iterated_square_100`, `iterated_square_1000`, `iterated_square_10k`, `fib_chain_100`, `hash_batch`, `merkle_membership`
+
+**How it works:**
+
+1. `build.rs` reads `CIRCUIT` env var (defaults to `simple_square`)
+2. Copies VK from `test-circuits/$CIRCUIT/target/keccak/vk`
+3. Embeds it in the program at `$OUT_DIR/vk.bin`
+
+> **Production TODO:** Load VK from a Solana account instead of compile-time embedding to support any circuit without redeploying.
 
 ### Generate VK Constants
 

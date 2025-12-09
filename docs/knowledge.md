@@ -579,64 +579,108 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 
 ## Changelog
 
-| Date     | Discovery                                                           |
-| -------- | ------------------------------------------------------------------- |
-| Dec 2024 | Found ultraplonk_verifier - but it's for OLD system                 |
-| Dec 2024 | **Noir 1.0 uses UltraHonk, not UltraPlonk**                         |
-| Dec 2024 | Keccak oracle produces ~5KB proofs (vs 16KB Poseidon2)              |
-| Dec 2024 | E2E workflow verified: nargo → bb → solana-program-test             |
-| Dec 2024 | Solana SDK v3.x has stable BN254 syscalls                           |
-| Dec 2024 | Documented tx size limits, rent costs, chunked upload pattern       |
-| Dec 2024 | VK format: 3 headers + 28 G1 points (1888 bytes)                    |
-| Dec 2024 | Implemented field arithmetic with all tests passing                 |
-| Dec 2024 | E2E test running: program invoked, BN254 syscalls working           |
-| Dec 2024 | yugocabrio verifier: no_std OK but uses arkworks (use as reference) |
-| Dec 2024 | **Proof format: variable size based on log_n, sumcheck included!**  |
-| Dec 2024 | Implemented dynamic proof parser with size calculation              |
-| Dec 2024 | **G1 uses 136-bit split in transcript (128 bytes, not 64!)**        |
-| Dec 2024 | **ZK initial target = libra_sum × libra_challenge**                 |
-| Dec 2024 | **VK hash must be added to transcript first**                       |
-| Dec 2024 | 📚 Created docs/theory.md - complete UltraHonk theory walkthrough   |
-| Dec 2024 | 🧪 Created scripts/validate_theory.py - proof data validation       |
-| Dec 2024 | **🔧 SUMCHECK CHALLENGE GENERATION FIXED!**                         |
-|          | Bug 1: split_challenge used 127 bits, Solidity uses 128 bits        |
-|          | Bug 2: We cached hi for odd rounds, Solidity discards hi every time |
-|          | All 6 sumcheck rounds now pass!                                     |
-| Dec 2024 | **✅ FULL SUMCHECK VERIFICATION PASSES!**                           |
-|          | Fixed: public_inputs_delta offset (1 not 0)                         |
-|          | Fixed: Poseidon internal diagonal matrix constants                  |
-|          | Fixed: Memory relation (subrel 13-18) - full implementation         |
-|          | Fixed: NNF relation (subrel 19) - full implementation               |
-|          | All 28 subrelations now match Solidity!                             |
-| Dec 2024 | **🔧 Rho challenge generation fixed for ZK proofs**                 |
-|          | Must append: libra_eval, libra_comms[1,2], geminiMaskingPoly/Eval   |
-|          | Rho now matches Solidity exactly!                                   |
-| Dec 2024 | **✅ Shplemini/KZG verification complete!**                         |
-|          | batchedEvaluation matches Solidity                                  |
-|          | P1 negation fixed (negate KZG quotient)                             |
-|          | constantTermAccumulator matches Solidity (with libraPolyEvals)      |
-|          | Full P0 MSM with all commitments implemented                        |
-|          | Pairing point aggregation with recursionSeparator                   |
-|          | VK G2 point (x·G2 from trusted setup, not G2 generator)             |
-| Dec 2024 | **🎉 END-TO-END VERIFICATION PASSES!**                              |
-|          | 52 unit tests passing                                               |
-|          | Test vectors: valid proof, tampered proof, wrong public input       |
-|          | All verification steps match Solidity verifier exactly              |
-| Dec 2024 | **🔄 Upgraded to bb 0.87 / nargo 1.0.0-beta.8**                     |
-|          | VK format changed: 1,760 bytes (27 G1, no Q_NNF)                    |
-|          | Proof format: Fixed 16,224 bytes with limbed G1 encoding            |
-|          | Constants changed: 26 subrels, 25 alphas, 40 entities               |
-|          | Gate challenges: Fixed 28 iterations (CONST_PROOF_SIZE_LOG_N)       |
-| Dec 2024 | **✅ ALL 7 TEST CIRCUITS VERIFIED!**                                |
-|          | simple_square, iterated_square_100/1000/10k, fib_chain_100          |
-|          | hash_batch (log_n=17), merkle_membership (log_n=18)                 |
-|          | 56 unit tests passing                                               |
-| Dec 2024 | **🚀 ON-CHAIN VERIFICATION COMPLETE (Surfpool)**                    |
-|          | Phase 1 (Challenges): 315K CUs in 6 TXs ✅                          |
-|          | Phase 2 (Sumcheck): 5.0M CUs in 4 TXs ✅                            |
-|          | Phase 3 (MSM): 3.3M CUs in 4 TXs ✅                                 |
-|          | Phase 4 (Pairing): 55K CUs in 1 TX ✅                               |
-|          | **Total: 8.7M CUs across 15 transactions** 🎉                       |
+| Date     | Discovery                                                            |
+| -------- | -------------------------------------------------------------------- |
+| Dec 2024 | Found ultraplonk_verifier - but it's for OLD system                  |
+| Dec 2024 | **Noir 1.0 uses UltraHonk, not UltraPlonk**                          |
+| Dec 2024 | Keccak oracle produces ~5KB proofs (vs 16KB Poseidon2)               |
+| Dec 2024 | E2E workflow verified: nargo → bb → solana-program-test              |
+| Dec 2024 | Solana SDK v3.x has stable BN254 syscalls                            |
+| Dec 2024 | Documented tx size limits, rent costs, chunked upload pattern        |
+| Dec 2024 | VK format: 3 headers + 28 G1 points (1888 bytes)                     |
+| Dec 2024 | Implemented field arithmetic with all tests passing                  |
+| Dec 2024 | E2E test running: program invoked, BN254 syscalls working            |
+| Dec 2024 | yugocabrio verifier: no_std OK but uses arkworks (use as reference)  |
+| Dec 2024 | **Proof format: variable size based on log_n, sumcheck included!**   |
+| Dec 2024 | Implemented dynamic proof parser with size calculation               |
+| Dec 2024 | **G1 uses 136-bit split in transcript (128 bytes, not 64!)**         |
+| Dec 2024 | **ZK initial target = libra_sum × libra_challenge**                  |
+| Dec 2024 | **VK hash must be added to transcript first**                        |
+| Dec 2024 | 📚 Created docs/theory.md - complete UltraHonk theory walkthrough    |
+| Dec 2024 | 🧪 Created scripts/validate_theory.py - proof data validation        |
+| Dec 2024 | **🔧 SUMCHECK CHALLENGE GENERATION FIXED!**                          |
+|          | Bug 1: split_challenge used 127 bits, Solidity uses 128 bits         |
+|          | Bug 2: We cached hi for odd rounds, Solidity discards hi every time  |
+|          | All 6 sumcheck rounds now pass!                                      |
+| Dec 2024 | **✅ FULL SUMCHECK VERIFICATION PASSES!**                            |
+|          | Fixed: public_inputs_delta offset (1 not 0)                          |
+|          | Fixed: Poseidon internal diagonal matrix constants                   |
+|          | Fixed: Memory relation (subrel 13-18) - full implementation          |
+|          | Fixed: NNF relation (subrel 19) - full implementation                |
+|          | All 28 subrelations now match Solidity!                              |
+| Dec 2024 | **🔧 Rho challenge generation fixed for ZK proofs**                  |
+|          | Must append: libra_eval, libra_comms[1,2], geminiMaskingPoly/Eval    |
+|          | Rho now matches Solidity exactly!                                    |
+| Dec 2024 | **✅ Shplemini/KZG verification complete!**                          |
+|          | batchedEvaluation matches Solidity                                   |
+|          | P1 negation fixed (negate KZG quotient)                              |
+|          | constantTermAccumulator matches Solidity (with libraPolyEvals)       |
+|          | Full P0 MSM with all commitments implemented                         |
+|          | Pairing point aggregation with recursionSeparator                    |
+|          | VK G2 point (x·G2 from trusted setup, not G2 generator)              |
+| Dec 2024 | **🎉 END-TO-END VERIFICATION PASSES!**                               |
+|          | 52 unit tests passing                                                |
+|          | Test vectors: valid proof, tampered proof, wrong public input        |
+|          | All verification steps match Solidity verifier exactly               |
+| Dec 2024 | **🔄 Upgraded to bb 0.87 / nargo 1.0.0-beta.8**                      |
+|          | VK format changed: 1,760 bytes (27 G1, no Q_NNF)                     |
+|          | Proof format: Fixed 16,224 bytes with limbed G1 encoding             |
+|          | Constants changed: 26 subrels, 25 alphas, 40 entities                |
+|          | Gate challenges: Fixed 28 iterations (CONST_PROOF_SIZE_LOG_N)        |
+| Dec 2024 | **✅ ALL 7 TEST CIRCUITS VERIFIED!**                                 |
+|          | simple_square, iterated_square_100/1000/10k, fib_chain_100           |
+|          | hash_batch (log_n=17), merkle_membership (log_n=18)                  |
+|          | 56 unit tests passing                                                |
+| Dec 2024 | **🚀 ON-CHAIN VERIFICATION COMPLETE (Surfpool)**                     |
+|          | Phase 1 (Challenges): 315K CUs in 6 TXs ✅                           |
+|          | Phase 2 (Sumcheck): 5.0M CUs in 4 TXs ✅                             |
+|          | Phase 3 (MSM): 3.3M CUs in 4 TXs ✅                                  |
+|          | Phase 4 (Pairing): 55K CUs in 1 TX ✅                                |
+|          | **Total: 8.7M CUs across 15 transactions** 🎉                        |
+| Dec 2024 | **Multi-circuit support via CIRCUIT env var**                        |
+|          | Build with: `CIRCUIT=hash_batch cargo build-sbf`                     |
+|          | Tested: simple*square, iterated_square*\*, fib_chain_100, hash_batch |
+
+---
+
+## Multi-Circuit Verification (Dec 2024)
+
+The Solana verifier supports multiple circuits via compile-time VK embedding.
+
+### Building for a Specific Circuit
+
+```bash
+cd programs/ultrahonk-verifier
+CIRCUIT=hash_batch cargo build-sbf
+solana program deploy target/deploy/ultrahonk_verifier.so
+```
+
+### Available Circuits
+
+| Circuit                | log_n | Public Inputs | Notes             |
+| ---------------------- | ----- | ------------- | ----------------- |
+| `simple_square`        | 12    | 1             | Default, smallest |
+| `iterated_square_100`  | 12    | 1             |                   |
+| `iterated_square_1000` | 13    | 1             |                   |
+| `iterated_square_10k`  | 14    | 1             |                   |
+| `fib_chain_100`        | 12    | 1             |                   |
+| `hash_batch`           | 17    | 32            | Larger circuit    |
+| `merkle_membership`    | 18    | 32            | Largest tested    |
+
+### How It Works
+
+1. `build.rs` reads `CIRCUIT` env var (defaults to `simple_square`)
+2. Copies the VK file from `test-circuits/$CIRCUIT/target/keccak/vk`
+3. Places it at `$OUT_DIR/vk.bin`
+4. `lib.rs` embeds it with `include_bytes!(concat!(env!("OUT_DIR"), "/vk.bin"))`
+
+### Production TODO
+
+For production, implement VK loading from a Solana account instead of compile-time embedding. This allows:
+
+- Verifying proofs for any circuit without redeploying
+- Multiple circuits with a single program deployment
+- Dynamic circuit registration
 
 ---
 

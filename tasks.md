@@ -149,6 +149,20 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
   2. Missing `libra_poly_evals` before shplonk_nu challenge
   3. Using G1 format instead of LIMBED format for shplonk_q commitment
 
+### Multi-Circuit Support
+
+- [x] **Compile-time VK selection via CIRCUIT env var**
+  - Build with: `CIRCUIT=hash_batch cargo build-sbf`
+  - `build.rs` copies VK to `$OUT_DIR/vk.bin`
+  - Tested: simple*square, iterated_square*\*, fib_chain_100, hash_batch
+
+### Future Improvements (Production)
+
+- [ ] **Load VK from Solana account** instead of compile-time embedding
+  - Allows verifying any circuit without redeploying
+  - Single program deployment for multiple circuits
+  - Add `UploadVK` instruction and VK account parameter to all phases
+
 ### Optimization Progress
 
 | Optimization              | Status         | Improvement           |
