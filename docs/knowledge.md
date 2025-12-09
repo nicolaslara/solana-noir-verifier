@@ -736,10 +736,12 @@ For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggest
 | Precompute rho powers           | ✅ Done | Avoids O(k) exponentiation    |
 | Batch inversion (Shplemini 3b2) | ✅ Done | Batched gemini+libra denoms   |
 | Batch inv fold denoms (3b1)     | ✅ Done | **60% savings** (1.3M → 534K) |
+| **FrLimbs in sumcheck**         | ✅ Done | **17.5% savings** per round   |
 
 **Current status (simple_square, log_n=12):**
 
-- Full verification: 8.35M CUs across 15 transactions
-- Phase 3b1 (folding) optimized from ~1.3M to ~534K CUs
+- Full verification: **7.66M CUs** across 15 transactions
+- Sumcheck rounds: ~1.07M CUs each (down from 1.3M)
+- Total savings from FrLimbs: ~690K CUs
 
-Further optimizations (relation batching) can provide additional savings.
+Remaining optimizations: FrLimbs in shplemini, relation batching.

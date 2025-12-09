@@ -15,7 +15,9 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::field::{batch_inv, fr_add, fr_from_u64, fr_inv, fr_mul, fr_sub};
+use crate::field::{
+    batch_inv, batch_inv_limbs, fr_add, fr_from_u64, fr_inv, fr_mul, fr_sub, FrLimbs,
+};
 use crate::proof::Proof;
 use crate::types::{Fr, SCALAR_ONE, SCALAR_ZERO};
 
@@ -102,6 +104,9 @@ const I_FR: [[u8; 32]; 9] = [
     hex_to_bytes32("0000000000000000000000000000000000000000000000000000000000000008"), // 8
 ];
 
+/// Toggle for using FrLimbs-native implementation (for A/B testing)
+const USE_FR_LIMBS: bool = true;
+
 /// Convert hex string to 32-byte array at compile time
 const fn hex_to_bytes32(hex: &str) -> [u8; 32] {
     let bytes = hex.as_bytes();
@@ -153,7 +158,74 @@ fn next_target(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static 
 }
 
 /// Optimized version with batch inversion (ONE fr_inv call)
+/// Uses FrLimbs internally to avoid byte conversion overhead between operations
 fn next_target_batch(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
+    if USE_FR_LIMBS {
+        next_target_batch_limbs(univariate, chi, is_zk)
+    } else {
+        next_target_batch_bytes(univariate, chi, is_zk)
+    }
+}
+
+/// FrLimbs-native version: converts at boundaries, all internal work in Montgomery form
+fn next_target_batch_limbs(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
+    let n = if is_zk { 9 } else { 8 };
+
+    // Convert inputs to FrLimbs (ONE conversion per input, not per operation!)
+    let chi_l = FrLimbs::from_bytes(chi);
+
+    // Convert I_FR constants to FrLimbs (these could be precomputed as consts)
+    let i_fr_limbs: Vec<FrLimbs> = (0..n).map(|i| FrLimbs::from_bytes(&I_FR[i])).collect();
+
+    // Convert barycentric constants
+    let bary_limbs: Vec<FrLimbs> = (0..n)
+        .map(|i| {
+            if is_zk {
+                FrLimbs::from_bytes(&BARY_9[i])
+            } else {
+                FrLimbs::from_bytes(&BARY_8[i])
+            }
+        })
+        .collect();
+
+    // Convert univariate coefficients
+    let u_limbs: Vec<FrLimbs> = univariate
+        .iter()
+        .take(n)
+        .map(|u| FrLimbs::from_bytes(u))
+        .collect();
+
+    // Step 1: Compute chi_minus[i] = χ - i for all i
+    let chi_minus: Vec<FrLimbs> = i_fr_limbs.iter().map(|i_l| chi_l.sub(i_l)).collect();
+
+    // Step 2: Compute B(χ) = ∏(χ - i) - single mul per element, no conversion!
+    let mut b = FrLimbs::ONE;
+    for cm in &chi_minus {
+        b = b.mul(cm);
+    }
+
+    // Step 3: Compute all denominators: denom[i] = BARY[i] * (χ - i)
+    let denoms: Vec<FrLimbs> = (0..n).map(|i| bary_limbs[i].mul(&chi_minus[i])).collect();
+
+    // Step 4: Batch invert all denominators with only ONE inversion!
+    let denom_invs = batch_inv_limbs(&denoms).ok_or("batch inversion failed in barycentric")?;
+
+    // Step 5: Accumulate: acc = Σ(u[i] * denom_inv[i])
+    let mut acc = FrLimbs::ZERO;
+    for i in 0..n {
+        let term = u_limbs[i].mul(&denom_invs[i]);
+        acc = acc.add(&term);
+    }
+
+    // result = B(χ) * acc
+    let result = b.mul(&acc);
+
+    // Convert back to bytes ONCE at the end
+    Ok(result.to_bytes())
+}
+
+/// Original version using Fr (bytes) throughout
+fn next_target_batch_bytes(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
     let n = if is_zk { 9 } else { 8 };
 
     // Step 1: Compute chi_minus[i] = χ - i for all i (reused in both B(χ) and denominators)

@@ -11,8 +11,9 @@ Here's what jumps out from the code + your BPF notes, focusing specifically on "
 | 5. Shplemini rho^k precompute       | ✅ DONE | Avoids O(k) exponentiation per shifted wire      |
 | 6. Shplemini batch inversion (3b2)  | ✅ DONE | Batched gemini + libra denominators              |
 | 7. Batch inv fold denoms (3b1)      | ✅ DONE | **60% savings** (1,337K → 534K CUs)              |
-| 8. Relation batching                | ⏳ TODO | Not yet implemented                              |
-| 9. Batch inv in phase3a (pos0/neg0) | ⏳ TODO | Small: only 3 inversions                         |
+| 8. **FrLimbs in sumcheck**          | ✅ DONE | **17.5% savings** per round (1.3M → 1.07M CUs)   |
+| 9. Relation batching                | ⏳ TODO | Not yet implemented                              |
+| 10. FrLimbs in shplemini            | ⏳ TODO | Expected ~15-20% savings                         |
 
 I'll give you:
 

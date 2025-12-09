@@ -42,6 +42,7 @@ pub mod verifier;
 
 // Re-export main types
 pub use errors::VerifyError;
+pub use field::{batch_inv_limbs, FrLimbs};
 pub use types::{Fr, Scalar, G1, G2};
 pub use verifier::{
     // Split delta computation

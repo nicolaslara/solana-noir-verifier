@@ -34,6 +34,158 @@ pub const MONT_ONE: [u64; 4] = [
 ];
 
 // ============================================================================
+// FrLimbs: Internal field representation in Montgomery form
+// ============================================================================
+//
+// This type stores field elements as 4 x u64 limbs in Montgomery form.
+// All arithmetic operations work directly on this representation, avoiding
+// the overhead of converting to/from bytes for every operation.
+//
+// Montgomery form: a' = a * R mod r, where R = 2^256 mod r
+// Multiplication: mont_mul(a', b') = a * b * R mod r (still in Montgomery form)
+//
+// Only convert to bytes (Fr) at boundaries: proof parsing, public inputs, etc.
+
+extern crate alloc;
+use alloc::vec::Vec;
+
+/// Field element in Montgomery form (4 x u64 limbs, little-endian)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrLimbs(pub [u64; 4]);
+
+impl FrLimbs {
+    /// Zero in Montgomery form
+    pub const ZERO: FrLimbs = FrLimbs([0, 0, 0, 0]);
+
+    /// One in Montgomery form
+    pub const ONE: FrLimbs = FrLimbs(MONT_ONE);
+
+    /// Create from bytes (Fr), converting to Montgomery form
+    #[inline]
+    pub fn from_bytes(fr: &Fr) -> Self {
+        let limbs = fr_to_limbs(fr);
+        FrLimbs(to_mont(&limbs))
+    }
+
+    /// Convert to bytes (Fr), converting from Montgomery form
+    #[inline]
+    pub fn to_bytes(&self) -> Fr {
+        let normal = from_mont(&self.0);
+        limbs_to_fr(&normal)
+    }
+
+    /// Create from raw limbs that are already in Montgomery form
+    #[inline]
+    pub const fn from_mont_limbs(limbs: [u64; 4]) -> Self {
+        FrLimbs(limbs)
+    }
+
+    /// Get raw limbs (in Montgomery form)
+    #[inline]
+    pub const fn as_limbs(&self) -> &[u64; 4] {
+        &self.0
+    }
+
+    /// Add: a + b mod r
+    #[inline]
+    pub fn add(&self, other: &FrLimbs) -> FrLimbs {
+        FrLimbs(add_mod(&self.0, &other.0))
+    }
+
+    /// Subtract: a - b mod r
+    #[inline]
+    pub fn sub(&self, other: &FrLimbs) -> FrLimbs {
+        FrLimbs(sub_mod(&self.0, &other.0))
+    }
+
+    /// Negate: -a mod r
+    #[inline]
+    pub fn neg(&self) -> FrLimbs {
+        if self.0 == [0, 0, 0, 0] {
+            FrLimbs::ZERO
+        } else {
+            FrLimbs(sub_mod(&R, &self.0))
+        }
+    }
+
+    /// Multiply: a * b mod r (single Montgomery multiplication!)
+    #[inline]
+    pub fn mul(&self, other: &FrLimbs) -> FrLimbs {
+        // Since both inputs are in Montgomery form (a' = a*R, b' = b*R),
+        // mont_mul(a', b') = a' * b' * R^-1 = a*R * b*R * R^-1 = a*b*R
+        // which is a*b in Montgomery form. Perfect!
+        FrLimbs(mont_mul(&self.0, &other.0))
+    }
+
+    /// Square: a^2 mod r
+    #[inline]
+    pub fn square(&self) -> FrLimbs {
+        self.mul(self)
+    }
+
+    /// Multiplicative inverse: a^{-1} mod r
+    /// Returns None if a is zero
+    #[inline]
+    pub fn inv(&self) -> Option<FrLimbs> {
+        if self.0 == [0, 0, 0, 0] {
+            return None;
+        }
+        // Convert out of Montgomery form, invert, convert back
+        let normal = from_mont(&self.0);
+        let inv_normal = binary_ext_gcd_inv(&normal);
+        Some(FrLimbs(to_mont(&inv_normal)))
+    }
+
+    /// Check if zero
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0, 0, 0, 0]
+    }
+}
+
+/// Batch inversion for FrLimbs using Montgomery's trick
+/// Given [a0, a1, ..., an-1], computes [1/a0, 1/a1, ..., 1/an-1] with only ONE inversion
+pub fn batch_inv_limbs(inputs: &[FrLimbs]) -> Option<Vec<FrLimbs>> {
+    let n = inputs.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+
+    // Check for zeros
+    for inp in inputs {
+        if inp.is_zero() {
+            return None;
+        }
+    }
+
+    if n == 1 {
+        return Some(vec![inputs[0].inv()?]);
+    }
+
+    // Step 1: Compute prefix products
+    let mut prefix = Vec::with_capacity(n);
+    prefix.push(FrLimbs::ONE);
+    for i in 0..n - 1 {
+        prefix.push(prefix[i].mul(&inputs[i]));
+    }
+
+    // Step 2: Compute product of all inputs and invert it
+    let all_product = prefix[n - 1].mul(&inputs[n - 1]);
+    let mut inv_suffix = all_product.inv()?;
+
+    // Step 3: Walk backwards to compute each inverse
+    let mut result = vec![FrLimbs::ZERO; n];
+    for i in (0..n).rev() {
+        result[i] = prefix[i].mul(&inv_suffix);
+        if i > 0 {
+            inv_suffix = inv_suffix.mul(&inputs[i]);
+        }
+    }
+
+    Some(result)
+}
+
+// ============================================================================
 // Montgomery Arithmetic (faster modular multiplication)
 // ============================================================================
 
@@ -196,9 +348,19 @@ pub fn fr_neg(a: &Fr) -> Fr {
 }
 
 /// Multiply two field elements: a * b mod r
-/// Uses Montgomery multiplication for efficiency
-/// Formula: mont_mul(mont_mul(a, b), R2) = a * b mod r
-/// Only 2 Montgomery multiplications instead of 4!
+/// Uses Montgomery multiplication for efficiency.
+///
+/// By converting to Montgomery form first, we only need ONE mont_mul:
+/// - Convert a -> a' = a*R (via mont_mul(a, R²))
+/// - Convert b -> b' = b*R (via mont_mul(b, R²))
+/// - Multiply: mont_mul(a', b') = a*R * b*R * R⁻¹ = a*b*R
+/// - Convert back: mont_mul(result, 1) = a*b*R * R⁻¹ = a*b
+///
+/// Total: 2 conversions + 1 mul + 1 conversion = 4 mont_mul
+/// But if inputs are already Fr (not Montgomery), we can be smarter:
+/// - mont_mul(a, b) = a * b * R⁻¹
+/// - mont_mul(result, R²) = a * b * R⁻¹ * R² * R⁻¹ = a * b
+/// Total: 2 mont_mul (current approach)
 pub fn fr_mul(a: &Fr, b: &Fr) -> Fr {
     let a_limbs = fr_to_limbs(a);
     let b_limbs = fr_to_limbs(b);
@@ -831,5 +993,114 @@ mod tests {
         let c = fr_sub(&a, &b); // Should be r - 5
         let d = fr_add(&c, &b); // Should be r - 5 + 10 = 5
         assert_eq!(d, a);
+    }
+
+    // ===== FrLimbs tests =====
+
+    #[test]
+    fn test_fr_limbs_roundtrip() {
+        // Test that FrLimbs <-> Fr conversion is lossless
+        let original = fr_from_u64(12345678);
+        let limbs = FrLimbs::from_bytes(&original);
+        let back = limbs.to_bytes();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_fr_limbs_add() {
+        let a = FrLimbs::from_bytes(&fr_from_u64(10));
+        let b = FrLimbs::from_bytes(&fr_from_u64(20));
+        let c = a.add(&b);
+        assert_eq!(c.to_bytes(), fr_from_u64(30));
+    }
+
+    #[test]
+    fn test_fr_limbs_sub() {
+        let a = FrLimbs::from_bytes(&fr_from_u64(30));
+        let b = FrLimbs::from_bytes(&fr_from_u64(10));
+        let c = a.sub(&b);
+        assert_eq!(c.to_bytes(), fr_from_u64(20));
+    }
+
+    #[test]
+    fn test_fr_limbs_mul() {
+        let a = FrLimbs::from_bytes(&fr_from_u64(6));
+        let b = FrLimbs::from_bytes(&fr_from_u64(7));
+        let c = a.mul(&b);
+        assert_eq!(c.to_bytes(), fr_from_u64(42));
+    }
+
+    #[test]
+    fn test_fr_limbs_mul_consistency() {
+        // Test that FrLimbs::mul matches fr_mul
+        let a = fr_from_u64(123456);
+        let b = fr_from_u64(789012);
+        let expected = fr_mul(&a, &b);
+
+        let a_limbs = FrLimbs::from_bytes(&a);
+        let b_limbs = FrLimbs::from_bytes(&b);
+        let result = a_limbs.mul(&b_limbs).to_bytes();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_fr_limbs_neg() {
+        let a = FrLimbs::from_bytes(&fr_from_u64(1));
+        let neg_a = a.neg();
+        let sum = a.add(&neg_a);
+        assert!(sum.is_zero());
+    }
+
+    #[test]
+    fn test_fr_limbs_inv() {
+        let a = FrLimbs::from_bytes(&fr_from_u64(7));
+        let a_inv = a.inv().unwrap();
+        let product = a.mul(&a_inv);
+        assert_eq!(product.to_bytes(), SCALAR_ONE);
+    }
+
+    #[test]
+    fn test_fr_limbs_inv_consistency() {
+        // Test that FrLimbs::inv matches fr_inv
+        let a = fr_from_u64(12345);
+        let expected = fr_inv(&a).unwrap();
+
+        let a_limbs = FrLimbs::from_bytes(&a);
+        let result = a_limbs.inv().unwrap().to_bytes();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_batch_inv_limbs() {
+        // Test batch inversion for FrLimbs
+        let values: Vec<FrLimbs> = (1..=5)
+            .map(|i| FrLimbs::from_bytes(&fr_from_u64(i)))
+            .collect();
+
+        let inverted = batch_inv_limbs(&values).unwrap();
+
+        // Verify each inverse
+        for (val, inv) in values.iter().zip(inverted.iter()) {
+            let product = val.mul(inv);
+            assert_eq!(product.to_bytes(), SCALAR_ONE);
+        }
+    }
+
+    #[test]
+    fn test_batch_inv_limbs_consistency() {
+        // Test that batch_inv_limbs matches batch_inv
+        let values: Vec<Fr> = (1..=5).map(|i| fr_from_u64(i)).collect();
+        let expected = batch_inv(&values).unwrap();
+
+        let limbs_values: Vec<FrLimbs> = values.iter().map(|v| FrLimbs::from_bytes(v)).collect();
+        let result: Vec<Fr> = batch_inv_limbs(&limbs_values)
+            .unwrap()
+            .iter()
+            .map(|l| l.to_bytes())
+            .collect();
+
+        assert_eq!(result, expected);
     }
 }
