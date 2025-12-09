@@ -104,7 +104,7 @@ cargo test -p example-verifier --test integration_test
 - [x] **All 28 subrelations implemented (relations.rs)** Updated from 26 to match Solidity
 - [x] **Shplemini structure implemented (shplemini.rs)**
 - [x] **Pairing check wired up**
-- [x] **📚 Theoretical documentation (docs/theory.md)**
+- [x] **📚 Theoretical documentation (docs/theory.md)** - Updated with glossary, working status
 - [x] **🧪 Validation script (scripts/validate_theory.py)**
 - [x] **Challenge matching verified** - All challenges (eta, beta, gamma, alpha, etc.) correct
 - [x] **Sumcheck rounds all pass** - 6/6 rounds verify correctly
