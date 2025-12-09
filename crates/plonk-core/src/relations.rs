@@ -911,8 +911,9 @@ mod tests {
 
     #[test]
     fn test_wire_index() {
+        // Wire enum indices match Solidity verifier's WIRE enum
         assert_eq!(Wire::Qm as usize, 0);
-        assert_eq!(Wire::Wl as usize, 27);
-        assert_eq!(Wire::ZPermShift as usize, 39);
+        assert_eq!(Wire::Wl as usize, 28); // Updated: was 27, now 28 after adding QNnf
+        assert_eq!(Wire::ZPermShift as usize, 40); // Updated: was 39, now 40
     }
 }

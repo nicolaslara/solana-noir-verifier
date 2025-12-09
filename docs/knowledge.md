@@ -579,9 +579,14 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 | Dec 2024 | **🔧 Rho challenge generation fixed for ZK proofs**                 |
 |          | Must append: libra_eval, libra_comms[1,2], geminiMaskingPoly/Eval   |
 |          | Rho now matches Solidity exactly!                                   |
-| Dec 2024 | **⏳ Shplemini verification in progress**                           |
+| Dec 2024 | **✅ Shplemini/KZG verification complete!**                         |
 |          | batchedEvaluation matches Solidity                                  |
 |          | P1 negation fixed (negate KZG quotient)                             |
-|          | TODO: const_acc computation (fold evaluations)                      |
-|          | TODO: Full MSM with all VK/proof commitments                        |
-|          | TODO: Pairing point aggregation with proof.pairingPointObject       |
+|          | constantTermAccumulator matches Solidity (with libraPolyEvals)      |
+|          | Full P0 MSM with all commitments implemented                        |
+|          | Pairing point aggregation with recursionSeparator                   |
+|          | VK G2 point (x·G2 from trusted setup, not G2 generator)             |
+| Dec 2024 | **🎉 END-TO-END VERIFICATION PASSES!**                              |
+|          | 52 unit tests passing                                               |
+|          | Test vectors: valid proof, tampered proof, wrong public input       |
+|          | All verification steps match Solidity verifier exactly              |

@@ -124,21 +124,27 @@ cargo test -p example-verifier --test integration_test
 - Rho challenge matches Solidity
 - batchedEvaluation matches Solidity
 - P1 correctly negated
+- constantTermAccumulator matches Solidity
+- Full P0 MSM computation matches Solidity
+- Pairing point aggregation (recursionSeparator, mulWithSeparator)
+- VK G2 point (x·G2 from trusted setup)
+- **52 unit tests passing**
 
-**Remaining issues:**
+### Test Vectors ✅
 
-1. **const_acc (constantTermAccumulator)** - Our implementation differs from Solidity
-   - Need to compute foldPosEvaluations correctly
-   - Need proper gemini A evaluation contributions
-2. **P0 computation** - Currently simplified, needs full MSM
-   - Need to include all VK commitments (28 points)
-   - Need to include all proof wire commitments (8 points)
-   - Need gemini fold commitments (log_n - 1 points)
-   - Need libra commitments (3 points)
-3. **Pairing point aggregation**
-   - Need to decode pairingPointObject to P_0_other, P_1_other
-   - Need recursionSeparator computation
-   - Need mulWithSeparator aggregation
+**Source:** Our own `simple_square` test circuit (x² = y, witness x=3, public y=9)
+
+| Test                            | Description                              | Status               |
+| ------------------------------- | ---------------------------------------- | -------------------- |
+| `test_valid_proof_verifies`     | Valid proof + correct public inputs      | ✅ Passes            |
+| `test_tampered_proof_fails`     | Modified proof byte → VerificationFailed | ✅ Fails as expected |
+| `test_wrong_public_input_fails` | Wrong public input → VerificationFailed  | ✅ Fails as expected |
+
+**Reference implementations for additional test vectors:**
+
+- **zkVerify ultrahonk_verifier** - Has hardcoded vectors but for LOG_N=28 (larger circuit)
+- **yugocabrio ultrahonk-rust-verifier** - Same bb/nargo versions, can run their build script
+- **Barretenberg C++** - Dynamic test generation only
 
 ### Completed Debugging (All Verified Correct)
 

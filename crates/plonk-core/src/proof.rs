@@ -547,7 +547,7 @@ mod tests {
         // For our test circuit with log_n=6 and non-ZK
         let expected = Proof::expected_size(6, false);
         // Non-ZK is smaller
-        assert_eq!(expected, 141);
+        assert_eq!(expected, 142);
     }
 
     #[test]

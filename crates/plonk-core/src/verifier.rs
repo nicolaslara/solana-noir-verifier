@@ -1038,4 +1038,281 @@ mod tests {
 
         println!("\n========== END NON-ZK DEBUG TEST ==========\n");
     }
+
+    // ============================================================================
+    // Test Vector Module: Valid Proof, Tampered Proof, Wrong Inputs
+    // ============================================================================
+    //
+    // These tests use the simple_square circuit: x * x = y
+    // - Private witness: x = 3
+    // - Public input: y = 9
+    //
+    // Reference: docs/theory.md for protocol details
+    // ============================================================================
+
+    /// Helper to load test artifacts from test-circuits/simple_square
+    fn load_test_artifacts() -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        use std::path::Path;
+
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-circuits/simple_square/target/keccak");
+
+        let vk_path = base.join("vk");
+        let proof_path = base.join("proof");
+        let pi_path = base.join("public_inputs");
+
+        if !vk_path.exists() {
+            return None;
+        }
+
+        let vk_bytes = std::fs::read(&vk_path).ok()?;
+        let proof_bytes = std::fs::read(&proof_path).ok()?;
+        let pi_bytes = std::fs::read(&pi_path).ok()?;
+
+        Some((vk_bytes, proof_bytes, pi_bytes))
+    }
+
+    /// Test 1: Valid proof with correct public inputs should verify
+    ///
+    /// Circuit: simple_square (x * x = y)
+    /// Witness: x = 3 (private)
+    /// Public input: y = 9
+    ///
+    /// This is the positive test case - a legitimately generated proof.
+    #[test]
+    fn test_valid_proof_verifies() {
+        let Some((vk_bytes, proof_bytes, pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            println!("   Generate with: cd test-circuits/simple_square && nargo compile && nargo execute");
+            println!("   Then: bb prove -b ./target/circuit.json -w ./target/circuit.gz --oracle_hash keccak --write_vk -o ./target/keccak");
+            return;
+        };
+
+        // Verify sizes match expected
+        assert_eq!(vk_bytes.len(), crate::VK_SIZE, "VK size mismatch");
+        assert_eq!(pi_bytes.len(), 32, "Expected 1 public input (32 bytes)");
+
+        // Parse public inputs
+        let mut public_inputs = Vec::new();
+        let mut pi = [0u8; 32];
+        pi.copy_from_slice(&pi_bytes[0..32]);
+        public_inputs.push(pi);
+
+        // Verify the public input is y = 9
+        let mut expected_pi = [0u8; 32];
+        expected_pi[31] = 9; // Big-endian: 9 in last byte
+        assert_eq!(pi, expected_pi, "Public input should be y = 9");
+
+        // Prepare VK array
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        // Verify - this should pass
+        let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+        assert!(
+            result.is_ok(),
+            "Valid proof should verify: {:?}",
+            result.err()
+        );
+    }
+
+    /// Test 2: Tampered proof (modified bytes) should NOT verify
+    ///
+    /// We flip bits in various parts of the proof to ensure the verifier
+    /// properly rejects invalid proofs at different stages.
+    #[test]
+    fn test_tampered_proof_fails() {
+        let Some((vk_bytes, proof_bytes, pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            return;
+        };
+
+        // Prepare VK
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        // Prepare public inputs
+        let mut pi = [0u8; 32];
+        pi.copy_from_slice(&pi_bytes[0..32]);
+        let public_inputs = vec![pi];
+
+        // Test tampering at different offsets
+        let tamper_offsets = [
+            (512, "witness commitment W1"),   // First witness commitment
+            (544, "witness commitment W1 y"), // W1 y-coordinate
+            (1024, "sumcheck univariate"),    // Sumcheck data
+            (2048, "sumcheck evaluations"),   // Evaluations
+            (4096, "gemini data"),            // Gemini folding
+            (5000, "KZG quotient"),           // Near the end
+        ];
+
+        for (offset, description) in tamper_offsets.iter() {
+            if *offset >= proof_bytes.len() {
+                continue;
+            }
+
+            let mut tampered_proof = proof_bytes.clone();
+            // Flip all bits in one byte
+            tampered_proof[*offset] ^= 0xFF;
+
+            let result = verify(&vk_array, &tampered_proof, &public_inputs, true);
+            assert!(
+                result.is_err(),
+                "Tampered proof (at {}: {}) should NOT verify",
+                offset,
+                description
+            );
+        }
+    }
+
+    /// Test 3: Wrong public inputs should NOT verify
+    ///
+    /// The proof proves x*x = 9, so any other public input should fail.
+    #[test]
+    fn test_wrong_public_input_fails() {
+        let Some((vk_bytes, proof_bytes, _pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            return;
+        };
+
+        // Prepare VK
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        // Test with wrong public input values
+        let wrong_inputs = [
+            (
+                0u64,
+                "y = 0 (not a square of any field element we're proving)",
+            ),
+            (1u64, "y = 1 (would require x = 1)"),
+            (4u64, "y = 4 (would require x = 2)"),
+            (10u64, "y = 10 (not 9)"),
+            (16u64, "y = 16 (would require x = 4)"),
+        ];
+
+        for (wrong_value, description) in wrong_inputs.iter() {
+            let mut wrong_pi = [0u8; 32];
+            // Set value in big-endian
+            let value_bytes = wrong_value.to_be_bytes();
+            wrong_pi[24..32].copy_from_slice(&value_bytes);
+
+            let public_inputs = vec![wrong_pi];
+            let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+            assert!(
+                result.is_err(),
+                "Wrong public input ({}) should NOT verify",
+                description
+            );
+        }
+    }
+
+    /// Test 4: Empty/truncated proof should fail gracefully
+    #[test]
+    fn test_truncated_proof_fails() {
+        let Some((vk_bytes, proof_bytes, pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            return;
+        };
+
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        let mut pi = [0u8; 32];
+        pi.copy_from_slice(&pi_bytes[0..32]);
+        let public_inputs = vec![pi];
+
+        // Test with various truncated proofs
+        let truncation_sizes = [0, 32, 512, 1024, 2048, proof_bytes.len() - 32];
+
+        for size in truncation_sizes {
+            let truncated = &proof_bytes[..size];
+            let result = verify(&vk_array, truncated, &public_inputs, true);
+            assert!(
+                result.is_err(),
+                "Truncated proof (size={}) should NOT verify",
+                size
+            );
+        }
+    }
+
+    /// Test 5: Verify proof structure matches theory documentation
+    ///
+    /// Cross-reference with docs/theory.md Section 12 (Data Formats)
+    #[test]
+    fn test_proof_structure_matches_theory() {
+        let Some((vk_bytes, proof_bytes, _pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            return;
+        };
+
+        // Per theory.md Section 12:
+        // - VK: 1888 bytes (96 header + 28 * 64 commitments)
+        assert_eq!(vk_bytes.len(), 1888, "VK size per theory.md");
+
+        // Parse VK header
+        let log2_circuit = vk_bytes[31] as usize;
+        let log2_domain = vk_bytes[63] as usize;
+        let num_public_inputs = vk_bytes[95] as usize;
+
+        assert_eq!(log2_circuit, 6, "log2_circuit_size should be 6");
+        assert_eq!(log2_domain, 17, "log2_domain_size should be 17");
+        assert_eq!(num_public_inputs, 1, "num_public_inputs should be 1");
+
+        // Per theory.md: ZK proof with log_n=6 has 162 Fr elements = 5184 bytes
+        let expected_proof_size = 162 * 32;
+        assert_eq!(
+            proof_bytes.len(),
+            expected_proof_size,
+            "Proof size should match theory.md (162 Fr elements for ZK with log_n=6)"
+        );
+
+        // Verify proof structure offsets (per theory.md Section 12)
+        // Pairing Point Object: 16 Fr = 512 bytes at offset 0
+        // Witness Commitments: 8 G1 = 512 bytes starting at offset 512
+        let _ppo_start = 0;
+        let _ppo_end = 512;
+        let _witness_start = 512;
+        let _witness_end = 1024;
+
+        // Just verify the proof parses without error
+        let proof = crate::proof::Proof::from_bytes(&proof_bytes, log2_circuit, true);
+        assert!(proof.is_ok(), "Proof should parse: {:?}", proof.err());
+    }
+
+    /// Test 6: Verify VK hash matches expected value
+    ///
+    /// The VK hash is the first element added to the Fiat-Shamir transcript.
+    /// Per docs/theory.md, this must match bb's output.
+    #[test]
+    fn test_vk_hash_computation() {
+        let Some((vk_bytes, _proof_bytes, _pi_bytes)) = load_test_artifacts() else {
+            println!("⚠️  Test artifacts not found. Skipping test.");
+            return;
+        };
+
+        let mut vk_array = [0u8; crate::VK_SIZE];
+        vk_array.copy_from_slice(&vk_bytes);
+
+        let vk = crate::key::VerificationKey::from_bytes(&vk_array).unwrap();
+        let vk_hash = compute_vk_hash(&vk);
+
+        // Expected VK hash from bb verify output (documented in docs/theory.md)
+        let expected_hash =
+            hex_literal::hex!("093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75");
+
+        assert_eq!(
+            vk_hash,
+            expected_hash,
+            "VK hash mismatch - transcript will be wrong!\n\
+             Computed: 0x{}\n\
+             Expected: 0x{}",
+            hex::encode(vk_hash),
+            hex::encode(expected_hash)
+        );
+    }
 }
