@@ -173,6 +173,405 @@ pub fn verify_step4_pairing_check(p0: &G1, p1: &G1) -> Result<bool, VerifyError>
     ])?)
 }
 
+// ============================================================================
+// Incremental Challenge Generation (for multi-TX verification)
+// ============================================================================
+
+/// Result from Phase 1a: eta, beta, gamma challenges
+#[derive(Debug, Clone)]
+pub struct Phase1aResult {
+    pub eta: Fr,
+    pub eta_two: Fr,
+    pub eta_three: Fr,
+    pub beta: Fr,
+    pub gamma: Fr,
+    /// Transcript state to continue from (32 bytes)
+    pub transcript_state: Fr,
+}
+
+/// Result from Phase 1b: alphas and gate challenges  
+#[derive(Debug, Clone)]
+pub struct Phase1bResult {
+    pub alphas: Vec<Fr>,
+    pub gate_challenges: Vec<Fr>,
+    pub libra_challenge: Option<Fr>,
+    /// Transcript state to continue from
+    pub transcript_state: Fr,
+}
+
+/// Result from Phase 1c: first half of sumcheck challenges (rounds 0-13)
+#[derive(Debug, Clone)]
+pub struct Phase1cResult {
+    pub sumcheck_challenges: Vec<Fr>,
+    /// Transcript state to continue from
+    pub transcript_state: Fr,
+}
+
+/// Result from Phase 1d: remaining sumcheck + final challenges
+#[derive(Debug, Clone)]
+pub struct Phase1dResult {
+    pub sumcheck_challenges: Vec<Fr>, // rounds 14-27
+    pub rho: Fr,
+    pub gemini_r: Fr,
+    pub shplonk_nu: Fr,
+    pub shplonk_z: Fr,
+}
+
+/// Phase 1a: Generate eta, beta, gamma challenges
+/// Returns the challenges and transcript state to continue from
+#[inline(never)]
+pub fn generate_challenges_phase1a(
+    vk: &VerificationKey,
+    proof: &Proof,
+    public_inputs: &[Fr],
+) -> Result<Phase1aResult, VerifyError> {
+    let mut transcript = Transcript::new();
+
+    // Circuit metadata
+    let circuit_size = vk.circuit_size() as u64;
+    let public_inputs_size = vk.num_public_inputs as u64;
+    let pub_inputs_offset = 1u64;
+
+    transcript.append_u64(circuit_size);
+    transcript.append_u64(public_inputs_size);
+    transcript.append_u64(pub_inputs_offset);
+
+    // Public inputs
+    for pi in public_inputs.iter() {
+        transcript.append_scalar(pi);
+    }
+
+    // Pairing point object (16 Fr values)
+    let ppo = proof.pairing_point_object();
+    for ppo_elem in ppo {
+        transcript.append_scalar(&ppo_elem);
+    }
+
+    // First 3 wire commitments in limbed format
+    for i in 0..3 {
+        let limbed = proof.witness_commitment_limbed(i);
+        for limb in &limbed {
+            transcript.append_scalar(limb);
+        }
+    }
+
+    // Get eta challenges
+    let (eta, eta_two) = transcript.challenge_split();
+    let (eta_three, _) = transcript.challenge_split();
+
+    // Add lookup/w4 commitments for beta/gamma
+    for i in 3..6 {
+        let limbed = proof.witness_commitment_limbed(i);
+        for limb in &limbed {
+            transcript.append_scalar(limb);
+        }
+    }
+
+    // Get beta, gamma
+    let (beta, gamma) = transcript.challenge_split();
+
+    // Get transcript state (should be 32 bytes after challenge_split)
+    let state = transcript.get_state();
+    let mut transcript_state = [0u8; 32];
+    if state.len() == 32 {
+        transcript_state.copy_from_slice(&state);
+    }
+
+    Ok(Phase1aResult {
+        eta,
+        eta_two,
+        eta_three,
+        beta,
+        gamma,
+        transcript_state,
+    })
+}
+
+/// Phase 1b: Generate alpha and gate challenges
+/// Continues from Phase 1a transcript state
+#[inline(never)]
+pub fn generate_challenges_phase1b(
+    proof: &Proof,
+    transcript_state: &Fr,
+) -> Result<Phase1bResult, VerifyError> {
+    use crate::proof::CONST_PROOF_SIZE_LOG_N;
+    use crate::relations::NUMBER_OF_ALPHAS;
+
+    let mut transcript = Transcript::from_previous_challenge(transcript_state);
+
+    // Add lookupInverses (4 limbs) + zPerm (4 limbs)
+    let lookup_inv_limbed = proof.witness_commitment_limbed(6);
+    let z_perm_limbed = proof.witness_commitment_limbed(7);
+    for limb in &lookup_inv_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &z_perm_limbed {
+        transcript.append_scalar(limb);
+    }
+
+    // Generate alphas in pairs
+    let mut alphas = Vec::with_capacity(NUMBER_OF_ALPHAS);
+    let (alpha0, alpha1) = transcript.challenge_split();
+    alphas.push(alpha0);
+    alphas.push(alpha1);
+
+    for _ in 1..(NUMBER_OF_ALPHAS / 2) {
+        let (a0, a1) = transcript.challenge_split();
+        alphas.push(a0);
+        alphas.push(a1);
+    }
+
+    if NUMBER_OF_ALPHAS % 2 == 1 && NUMBER_OF_ALPHAS > 2 {
+        let (a_last, _) = transcript.challenge_split();
+        alphas.push(a_last);
+    }
+
+    // Generate gate challenges
+    let mut gate_challenges = Vec::with_capacity(proof.log_n);
+    for i in 0..CONST_PROOF_SIZE_LOG_N {
+        let (gc, _) = transcript.challenge_split();
+        if i < proof.log_n {
+            gate_challenges.push(gc);
+        }
+    }
+
+    // For ZK proofs: generate libra challenge
+    let libra_challenge = if proof.is_zk {
+        let libra_limbed = proof.libra_commitment_0_limbed();
+        for limb in &libra_limbed {
+            transcript.append_scalar(limb);
+        }
+        let libra_sum = proof.libra_sum();
+        transcript.append_scalar(&libra_sum);
+        let (lc, _) = transcript.challenge_split();
+        Some(lc)
+    } else {
+        None
+    };
+
+    let state = transcript.get_state();
+    let mut new_state = [0u8; 32];
+    if state.len() == 32 {
+        new_state.copy_from_slice(&state);
+    }
+
+    Ok(Phase1bResult {
+        alphas,
+        gate_challenges,
+        libra_challenge,
+        transcript_state: new_state,
+    })
+}
+
+/// Phase 1c: Generate first half of sumcheck challenges (rounds 0-13)
+#[inline(never)]
+pub fn generate_challenges_phase1c(
+    proof: &Proof,
+    transcript_state: &Fr,
+) -> Result<Phase1cResult, VerifyError> {
+    let mut transcript = Transcript::from_previous_challenge(transcript_state);
+    let mut sumcheck_challenges = Vec::with_capacity(14);
+
+    for r in 0..14 {
+        let univariate = proof.sumcheck_univariates_for_round(r);
+        for coeff in &univariate {
+            transcript.append_scalar(coeff);
+        }
+        let (lo, _) = transcript.challenge_split();
+        sumcheck_challenges.push(lo);
+    }
+
+    let state = transcript.get_state();
+    let mut new_state = [0u8; 32];
+    if state.len() == 32 {
+        new_state.copy_from_slice(&state);
+    }
+
+    Ok(Phase1cResult {
+        sumcheck_challenges,
+        transcript_state: new_state,
+    })
+}
+
+/// Phase 1d: Generate remaining sumcheck challenges + final challenges
+#[inline(never)]
+pub fn generate_challenges_phase1d(
+    proof: &Proof,
+    transcript_state: &Fr,
+    is_zk: bool,
+) -> Result<Phase1dResult, VerifyError> {
+    use crate::proof::CONST_PROOF_SIZE_LOG_N;
+
+    let mut transcript = Transcript::from_previous_challenge(transcript_state);
+    let mut sumcheck_challenges = Vec::with_capacity(14);
+
+    // Rounds 14-27
+    for r in 14..CONST_PROOF_SIZE_LOG_N {
+        let univariate = proof.sumcheck_univariates_for_round(r);
+        for coeff in &univariate {
+            transcript.append_scalar(coeff);
+        }
+        let (lo, _) = transcript.challenge_split();
+        sumcheck_challenges.push(lo);
+    }
+
+    // Add sumcheck evaluations
+    let sumcheck_evals = proof.sumcheck_evaluations();
+    for eval in &sumcheck_evals {
+        transcript.append_scalar(eval);
+    }
+
+    // ZK: add libra evaluation + commitments + masking poly
+    if is_zk {
+        let libra_eval = proof.libra_evaluation();
+        transcript.append_scalar(&libra_eval);
+
+        let libra1_limbed = proof.libra_commitment_1_limbed();
+        for limb in &libra1_limbed {
+            transcript.append_scalar(limb);
+        }
+
+        let libra2_limbed = proof.libra_commitment_2_limbed();
+        for limb in &libra2_limbed {
+            transcript.append_scalar(limb);
+        }
+
+        let masking_limbed = proof.gemini_masking_poly_limbed();
+        for limb in &masking_limbed {
+            transcript.append_scalar(limb);
+        }
+    }
+
+    // Rho challenge
+    let (rho, _) = transcript.challenge_split();
+
+    // Add Gemini fold commitments (log_n - 1 of them)
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
+        let fold_limbed = proof.gemini_fold_commitment_limbed(i);
+        for limb in &fold_limbed {
+            transcript.append_scalar(limb);
+        }
+    }
+
+    // Gemini r challenge
+    let gemini_r = transcript.challenge();
+
+    // Add Gemini evaluations (CONST_PROOF_SIZE_LOG_N of them)
+    for i in 0..CONST_PROOF_SIZE_LOG_N {
+        let eval = proof.gemini_a_evaluation(i);
+        transcript.append_scalar(&eval);
+    }
+
+    // ZK: add Gemini masking evaluation
+    if is_zk {
+        let masking_eval = proof.gemini_masking_eval();
+        transcript.append_scalar(&masking_eval);
+    }
+
+    // Shplonk nu challenge
+    let shplonk_nu = transcript.challenge();
+
+    // Add shplonk_q commitment
+    let shplonk_q = proof.shplonk_q();
+    transcript.append_g1(&shplonk_q);
+
+    // Shplonk z challenge (KZG)
+    let shplonk_z = transcript.challenge();
+
+    Ok(Phase1dResult {
+        sumcheck_challenges,
+        rho,
+        gemini_r,
+        shplonk_nu,
+        shplonk_z,
+    })
+}
+
+/// Result from partial delta computation
+#[derive(Debug, Clone)]
+pub struct DeltaPartialResult {
+    pub numerator: Fr,
+    pub denominator: Fr,
+    pub numerator_acc: Fr,
+    pub denominator_acc: Fr,
+    pub items_processed: usize,
+}
+
+/// Compute public_input_delta - Phase 1: First 9 items
+/// Returns partial accumulators to continue in next TX
+#[inline(never)]
+pub fn compute_delta_part1(
+    public_inputs: &[Fr],
+    proof: &Proof,
+    beta: &Fr,
+    gamma: &Fr,
+    circuit_size: u32,
+) -> DeltaPartialResult {
+    use crate::field::{fr_add, fr_from_u64, fr_mul, fr_sub};
+    use crate::types::SCALAR_ONE;
+
+    let n = circuit_size as u64;
+    let offset = 1u32;
+
+    let mut numerator = SCALAR_ONE;
+    let mut denominator = SCALAR_ONE;
+
+    let n_plus_offset = fr_from_u64(n + offset as u64);
+    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &n_plus_offset));
+
+    let offset_plus_one = fr_from_u64((offset + 1) as u64);
+    let mut denominator_acc = fr_sub(gamma, &fr_mul(beta, &offset_plus_one));
+
+    // Process public inputs (usually 1)
+    for pi in public_inputs {
+        numerator = fr_mul(&numerator, &fr_add(&numerator_acc, pi));
+        denominator = fr_mul(&denominator, &fr_add(&denominator_acc, pi));
+        numerator_acc = fr_add(&numerator_acc, beta);
+        denominator_acc = fr_sub(&denominator_acc, beta);
+    }
+
+    // Process first 8 pairing point elements (indices 0-7)
+    let ppo = proof.pairing_point_object();
+    for i in 0..8 {
+        numerator = fr_mul(&numerator, &fr_add(&numerator_acc, &ppo[i]));
+        denominator = fr_mul(&denominator, &fr_add(&denominator_acc, &ppo[i]));
+        numerator_acc = fr_add(&numerator_acc, beta);
+        denominator_acc = fr_sub(&denominator_acc, beta);
+    }
+
+    DeltaPartialResult {
+        numerator,
+        denominator,
+        numerator_acc,
+        denominator_acc,
+        items_processed: public_inputs.len() + 8,
+    }
+}
+
+/// Compute public_input_delta - Phase 2: Remaining 8 items + final division
+#[inline(never)]
+pub fn compute_delta_part2(proof: &Proof, beta: &Fr, partial: &DeltaPartialResult) -> Fr {
+    use crate::field::{fr_add, fr_div, fr_mul, fr_sub};
+    use crate::types::SCALAR_ONE;
+
+    let mut numerator = partial.numerator;
+    let mut denominator = partial.denominator;
+    let mut numerator_acc = partial.numerator_acc;
+    let mut denominator_acc = partial.denominator_acc;
+
+    // Process remaining 8 pairing point elements (indices 8-15)
+    let ppo = proof.pairing_point_object();
+    for i in 8..16 {
+        numerator = fr_mul(&numerator, &fr_add(&numerator_acc, &ppo[i]));
+        denominator = fr_mul(&denominator, &fr_add(&denominator_acc, &ppo[i]));
+        numerator_acc = fr_add(&numerator_acc, beta);
+        denominator_acc = fr_sub(&denominator_acc, beta);
+    }
+
+    // Final division
+    fr_div(&numerator, &denominator).unwrap_or(SCALAR_ONE)
+}
+
 /// Generate all challenges from the transcript
 ///
 /// Based on bb's UltraHonk transcript manifest (ultra_transcript.test.cpp)

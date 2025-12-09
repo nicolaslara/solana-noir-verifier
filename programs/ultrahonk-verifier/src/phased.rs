@@ -42,8 +42,10 @@ pub enum ChallengeSubPhase {
     SumcheckHalfDone = 3,
     /// all sumcheck + remaining challenges done
     AllChallengesDone = 4,
+    /// delta part 1 done (partial accumulators saved)
+    DeltaPart1Done = 5,
     /// public_input_delta computed, ready for next phase
-    DeltaComputed = 5,
+    DeltaComputed = 6,
 }
 
 impl From<u8> for Phase {
@@ -68,7 +70,8 @@ impl From<u8> for ChallengeSubPhase {
             2 => ChallengeSubPhase::AlphasGatesDone,
             3 => ChallengeSubPhase::SumcheckHalfDone,
             4 => ChallengeSubPhase::AllChallengesDone,
-            5 => ChallengeSubPhase::DeltaComputed,
+            5 => ChallengeSubPhase::DeltaPart1Done,
+            6 => ChallengeSubPhase::DeltaComputed,
             _ => ChallengeSubPhase::NotStarted,
         }
     }
@@ -126,6 +129,13 @@ pub struct VerificationState {
     pub shplonk_nu: [u8; 32],
     pub shplonk_z: [u8; 32],
 
+    // === Partial delta computation (between 1e1 and 1e2) ===
+    // 4 × 32 = 128 bytes
+    pub delta_numerator: [u8; 32],
+    pub delta_denominator: [u8; 32],
+    pub delta_numerator_acc: [u8; 32],
+    pub delta_denominator_acc: [u8; 32],
+
     // === Sumcheck result (Phase 3 output) ===
     pub sumcheck_passed: u8,
     pub _sumcheck_padding: [u8; 31],
@@ -141,18 +151,18 @@ pub struct VerificationState {
 
 impl VerificationState {
     /// Size of the state account in bytes
-    pub const SIZE: usize = 
-        8 +           // header (phase, challenge_sub_phase, log_n, is_zk, num_pi, reserved)
+    pub const SIZE: usize = 8 +           // header (phase, challenge_sub_phase, log_n, is_zk, num_pi, reserved)
         32 +          // transcript_state
         192 +         // relation_params (eta, eta_two, eta_three, beta, gamma, public_input_delta)
         800 +         // alphas (25 × 32)
         896 +         // gate_challenges (28 × 32)
         896 +         // sumcheck_challenges (28 × 32)
         160 +         // other challenges (libra, rho, gemini_r, shplonk_nu, shplonk_z)
+        128 +         // partial delta (4 × 32)
         32 +          // sumcheck_passed + padding
         128 +         // P0 + P1
-        32;           // verified + padding
-                      // Total: 3176 bytes
+        32; // verified + padding
+            // Total: 3304 bytes
 
     /// Initialize state from account data
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
@@ -194,7 +204,7 @@ impl VerificationState {
 }
 
 // Verify the size at compile time
-const _: () = assert!(VerificationState::SIZE == 3176);
+const _: () = assert!(VerificationState::SIZE == 3304);
 
 /// Account indices for phased verification instructions
 pub mod accounts {

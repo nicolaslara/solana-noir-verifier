@@ -133,16 +133,143 @@ pub fn fr_square(a: &Fr) -> Fr {
     fr_mul(a, a)
 }
 
-/// Compute multiplicative inverse: a^{-1} mod r
+/// Compute multiplicative inverse: a^{-1} mod r using binary extended GCD
+/// This is much faster than Fermat's theorem on BPF (O(n) vs O(n^2) for naive impl)
 /// Returns None if a is zero
 pub fn fr_inv(a: &Fr) -> Option<Fr> {
     if *a == SCALAR_ZERO {
         return None;
     }
-    // Use Fermat's little theorem: a^{-1} = a^{r-2} mod r
+
+    // Binary extended GCD algorithm
+    // Computes x such that a * x ≡ 1 (mod r)
     let a_limbs = fr_to_limbs(a);
-    let result = pow_mod(&a_limbs, &R_MINUS_2);
+    let result = binary_ext_gcd_inv(&a_limbs);
     Some(limbs_to_fr(&result))
+}
+
+/// Binary extended GCD for modular inverse
+/// Much faster than Fermat's theorem on BPF
+fn binary_ext_gcd_inv(a: &[u64; 4]) -> [u64; 4] {
+    // BN254 scalar field modulus r
+    const R: [u64; 4] = [
+        0x43e1f593f0000001,
+        0x2833e84879b97091,
+        0xb85045b68181585d,
+        0x30644e72e131a029,
+    ];
+
+    let mut u = *a;
+    let mut v = R;
+    let mut x1 = [1u64, 0, 0, 0];
+    let mut x2 = [0u64; 4];
+
+    // Continue until u = 1
+    while !is_one(&u) && !is_one(&v) {
+        // While u is even
+        while (u[0] & 1) == 0 {
+            shr1(&mut u);
+            if (x1[0] & 1) == 0 {
+                shr1(&mut x1);
+            } else {
+                add_assign(&mut x1, &R);
+                shr1(&mut x1);
+            }
+        }
+
+        // While v is even
+        while (v[0] & 1) == 0 {
+            shr1(&mut v);
+            if (x2[0] & 1) == 0 {
+                shr1(&mut x2);
+            } else {
+                add_assign(&mut x2, &R);
+                shr1(&mut x2);
+            }
+        }
+
+        // If u >= v: u = u - v, x1 = x1 - x2
+        if ge(&u, &v) {
+            sub_assign(&mut u, &v);
+            sub_mod_assign(&mut x1, &x2, &R);
+        } else {
+            sub_assign(&mut v, &u);
+            sub_mod_assign(&mut x2, &x1, &R);
+        }
+    }
+
+    if is_one(&u) {
+        x1
+    } else {
+        x2
+    }
+}
+
+/// Check if limbs equal 1
+fn is_one(a: &[u64; 4]) -> bool {
+    a[0] == 1 && a[1] == 0 && a[2] == 0 && a[3] == 0
+}
+
+/// Shift right by 1 (divide by 2)
+fn shr1(a: &mut [u64; 4]) {
+    a[0] = (a[0] >> 1) | (a[1] << 63);
+    a[1] = (a[1] >> 1) | (a[2] << 63);
+    a[2] = (a[2] >> 1) | (a[3] << 63);
+    a[3] >>= 1;
+}
+
+/// Add b to a in place (no modular reduction)
+fn add_assign(a: &mut [u64; 4], b: &[u64; 4]) {
+    let (r0, c0) = a[0].overflowing_add(b[0]);
+    let (r1, c1) = a[1].overflowing_add(b[1]);
+    let (r1, c1b) = r1.overflowing_add(c0 as u64);
+    let (r2, c2) = a[2].overflowing_add(b[2]);
+    let (r2, c2b) = r2.overflowing_add((c1 || c1b) as u64);
+    let (r3, _) = a[3].overflowing_add(b[3]);
+    let (r3, _) = r3.overflowing_add((c2 || c2b) as u64);
+    a[0] = r0;
+    a[1] = r1;
+    a[2] = r2;
+    a[3] = r3;
+}
+
+/// Subtract b from a in place (assumes a >= b)
+fn sub_assign(a: &mut [u64; 4], b: &[u64; 4]) {
+    let (r0, borrow0) = a[0].overflowing_sub(b[0]);
+    let (r1, borrow1) = a[1].overflowing_sub(b[1]);
+    let (r1, borrow1b) = r1.overflowing_sub(borrow0 as u64);
+    let (r2, borrow2) = a[2].overflowing_sub(b[2]);
+    let (r2, borrow2b) = r2.overflowing_sub((borrow1 || borrow1b) as u64);
+    let (r3, _) = a[3].overflowing_sub(b[3]);
+    let (r3, _) = r3.overflowing_sub((borrow2 || borrow2b) as u64);
+    a[0] = r0;
+    a[1] = r1;
+    a[2] = r2;
+    a[3] = r3;
+}
+
+/// Subtract b from a mod m (handles underflow by adding m)
+fn sub_mod_assign(a: &mut [u64; 4], b: &[u64; 4], m: &[u64; 4]) {
+    if ge(a, b) {
+        sub_assign(a, b);
+    } else {
+        // a < b, so compute a + m - b
+        add_assign(a, m);
+        sub_assign(a, b);
+    }
+}
+
+/// Compare a >= b
+fn ge(a: &[u64; 4], b: &[u64; 4]) -> bool {
+    for i in (0..4).rev() {
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
+    }
+    true // equal
 }
 
 /// Divide two field elements: a / b mod r

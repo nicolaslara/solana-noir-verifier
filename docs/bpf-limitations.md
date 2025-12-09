@@ -10,10 +10,25 @@
 - ✅ **Proof upload**: Account-based chunked upload works
 - ✅ **Stack overflow fixed**: Using `#[inline(never)]` and heap allocation
 - ✅ **Keccak syscall**: Using `sol_keccak256` for Fiat-Shamir (~100 CUs each)
+- ✅ **Challenge generation**: Split into 6 sub-phases, all succeed!
 
-### What Doesn't Work
+### Challenge Generation Results (WORKING!)
 
-- ❌ **On-chain verification**: Exceeds 1.4M compute unit limit
+| Phase     | Description            | CUs         |
+| --------- | ---------------------- | ----------- |
+| 1a        | eta/beta/gamma         | 6,209       |
+| 1b        | alphas + gates         | 15,018      |
+| 1c        | sumcheck 0-13          | 12,935      |
+| 1d        | sumcheck 14-27 + final | 23,831      |
+| 1e1       | delta part 1           | 915,210     |
+| 1e2       | delta part 2           | 1,068,277   |
+| **Total** | **6 transactions**     | **~2M CUs** |
+
+### What Doesn't Work Yet
+
+- ❌ **Phase 2 (Sumcheck verification)**: Exceeds 1.4M CUs - needs splitting
+- ❌ **Phase 3 (MSM)**: Not yet tested
+- ❌ **Phase 4 (Pairing)**: Not yet tested
 
 ## Compute Unit Analysis
 

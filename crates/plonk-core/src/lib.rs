@@ -44,8 +44,27 @@ pub mod verifier;
 pub use errors::VerifyError;
 pub use types::{Fr, Scalar, G1, G2};
 pub use verifier::{
-    verify, verify_inner, verify_step1_challenges, verify_step2_sumcheck,
-    verify_step3_pairing_points, verify_step4_pairing_check, Challenges, RelationParameters,
+    // Split delta computation
+    compute_delta_part1,
+    compute_delta_part2,
+    // Incremental challenge generation for multi-TX verification
+    generate_challenges_phase1a,
+    generate_challenges_phase1b,
+    generate_challenges_phase1c,
+    generate_challenges_phase1d,
+    verify,
+    verify_inner,
+    verify_step1_challenges,
+    verify_step2_sumcheck,
+    verify_step3_pairing_points,
+    verify_step4_pairing_check,
+    Challenges,
+    DeltaPartialResult,
+    Phase1aResult,
+    Phase1bResult,
+    Phase1cResult,
+    Phase1dResult,
+    RelationParameters,
 };
 
 /// VK size for new format (bb v0.84.0+)

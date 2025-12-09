@@ -28,34 +28,62 @@ const IX_PHASED_GENERATE_CHALLENGES = 10;
 const IX_PHASED_VERIFY_SUMCHECK = 11;
 const IX_PHASED_COMPUTE_MSM = 12;
 const IX_PHASED_FINAL_CHECK = 13;
+// Sub-phased challenge generation
+const IX_PHASE1A = 20;
+const IX_PHASE1B = 21;
+const IX_PHASE1C = 22;
+const IX_PHASE1D = 23;
+const IX_PHASE1E1 = 24;
+const IX_PHASE1E2 = 25;
 
 // Constants
 const PROOF_SIZE = 16224;
 const BUFFER_HEADER_SIZE = 5;
-const STATE_SIZE = 3144;
+const STATE_SIZE = 3304;
 const MAX_CHUNK_SIZE = 900;
 
 const proofPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/proof');
 const piPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/public_inputs');
 
-async function simulateWithCU(connection, tx, description) {
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function executeWithCU(connection, tx, signers, description) {
     console.log(`\n${description}...`);
     try {
+        // First simulate to get CU estimate
         const sim = await connection.simulateTransaction(tx);
+        const cus = sim.value.unitsConsumed || 0;
+        
         if (sim.value.err) {
-            console.log(`  ❌ Error: ${JSON.stringify(sim.value.err)}`);
-            const cuLog = (sim.value.logs || []).find(l => l.includes('consumed'));
-            if (cuLog) console.log(`  CU: ${cuLog}`);
-            // Print all logs for debugging
+            console.log(`  ❌ Simulation Error: ${JSON.stringify(sim.value.err)}`);
             console.log('  Logs:');
             for (const log of (sim.value.logs || [])) {
                 console.log(`    ${log}`);
             }
-            return { success: false, cus: sim.value.unitsConsumed };
-        } else {
-            console.log(`  ✅ Success! CUs: ${sim.value.unitsConsumed}`);
-            return { success: true, cus: sim.value.unitsConsumed };
+            return { success: false, cus };
         }
+        
+        // Execute the transaction
+        const sig = await connection.sendTransaction(tx, signers, { skipPreflight: true });
+        
+        // Poll for confirmation
+        for (let i = 0; i < 30; i++) {
+            await sleep(500);
+            const status = await connection.getSignatureStatus(sig);
+            if (status.value?.confirmationStatus === 'confirmed' || 
+                status.value?.confirmationStatus === 'finalized') {
+                if (status.value?.err) {
+                    console.log(`  ❌ TX Error: ${JSON.stringify(status.value.err)}`);
+                    return { success: false, cus };
+                }
+                console.log(`  ✅ Success! CUs: ${cus}`);
+                return { success: true, cus };
+            }
+        }
+        console.log(`  ⏳ Timeout waiting for confirmation`);
+        return { success: false, cus };
     } catch (e) {
         console.log(`  ❌ Exception: ${e.message}`);
         return { success: false, cus: 0 };
@@ -131,7 +159,8 @@ async function main() {
     }));
     await sendAndConfirmTransaction(connection, piTx, [payer]);
     
-    // Upload proof in chunks
+    // Upload proof in chunks (parallel)
+    const uploadPromises = [];
     let offset = 0;
     while (offset < proof.length) {
         const chunkSize = Math.min(MAX_CHUNK_SIZE, proof.length - offset);
@@ -145,18 +174,19 @@ async function main() {
             programId: PROGRAM_ID,
             data: uploadData,
         }));
-        await sendAndConfirmTransaction(connection, uploadTx, [payer]);
+        uploadPromises.push(sendAndConfirmTransaction(connection, uploadTx, [payer]));
         offset += chunkSize;
     }
-    console.log('Proof uploaded ✓\n');
+    await Promise.all(uploadPromises);
+    console.log(`Proof uploaded (${uploadPromises.length} chunks in parallel) ✓\n`);
     
-    // ===== PHASED VERIFICATION =====
-    console.log('=== PHASED VERIFICATION ===');
+    // ===== SUB-PHASED CHALLENGE GENERATION =====
+    console.log('=== SUB-PHASED CHALLENGE GENERATION ===');
     
     const results = {};
     
-    // Phase 1: Generate Challenges
-    {
+    // Helper to create a phased TX
+    async function createPhaseTx(ixCode, description) {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
         const ix = new TransactionInstruction({
             keys: [
@@ -164,50 +194,64 @@ async function main() {
                 { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
             ],
             programId: PROGRAM_ID,
-            data: Buffer.from([IX_PHASED_GENERATE_CHALLENGES]),
+            data: Buffer.from([ixCode]),
         });
         const tx = new Transaction().add(computeIx).add(ix);
         tx.feePayer = payer.publicKey;
         tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-        results.phase1 = await simulateWithCU(connection, tx, 'Phase 1: Generate Challenges');
+        return executeWithCU(connection, tx, [payer], description);
+    }
+    
+    // Execute each phase sequentially (state persists between TXs)
+    results.phase1a = await createPhaseTx(IX_PHASE1A, 'Phase 1a: eta/beta/gamma');
+    if (!results.phase1a.success) console.log('  Stopping - phase failed');
+    
+    if (results.phase1a.success) {
+        results.phase1b = await createPhaseTx(IX_PHASE1B, 'Phase 1b: alphas/gates');
+    } else {
+        results.phase1b = { success: false, cus: 0 };
+    }
+    
+    if (results.phase1b.success) {
+        results.phase1c = await createPhaseTx(IX_PHASE1C, 'Phase 1c: sumcheck 0-13');
+    } else {
+        results.phase1c = { success: false, cus: 0 };
+    }
+    
+    if (results.phase1c.success) {
+        results.phase1d = await createPhaseTx(IX_PHASE1D, 'Phase 1d: sumcheck 14-27 + final');
+    } else {
+        results.phase1d = { success: false, cus: 0 };
+    }
+    
+    if (results.phase1d.success) {
+        results.phase1e1 = await createPhaseTx(IX_PHASE1E1, 'Phase 1e1: delta part1');
+    } else {
+        results.phase1e1 = { success: false, cus: 0 };
+    }
+    
+    if (results.phase1e1.success) {
+        results.phase1e2 = await createPhaseTx(IX_PHASE1E2, 'Phase 1e2: delta part2');
+    } else {
+        results.phase1e2 = { success: false, cus: 0 };
     }
     
     // Phase 2: Verify Sumcheck
-    {
-        const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
-        const ix = new TransactionInstruction({
-            keys: [
-                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
-                { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
-            ],
-            programId: PROGRAM_ID,
-            data: Buffer.from([IX_PHASED_VERIFY_SUMCHECK]),
-        });
-        const tx = new Transaction().add(computeIx).add(ix);
-        tx.feePayer = payer.publicKey;
-        tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-        results.phase2 = await simulateWithCU(connection, tx, 'Phase 2: Verify Sumcheck');
+    if (results.phase1e2.success) {
+        results.phase2 = await createPhaseTx(IX_PHASED_VERIFY_SUMCHECK, 'Phase 2: Verify Sumcheck');
+    } else {
+        results.phase2 = { success: false, cus: 0 };
     }
     
     // Phase 3: Compute MSM
-    {
-        const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
-        const ix = new TransactionInstruction({
-            keys: [
-                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
-                { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
-            ],
-            programId: PROGRAM_ID,
-            data: Buffer.from([IX_PHASED_COMPUTE_MSM]),
-        });
-        const tx = new Transaction().add(computeIx).add(ix);
-        tx.feePayer = payer.publicKey;
-        tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-        results.phase3 = await simulateWithCU(connection, tx, 'Phase 3: Compute MSM (P0/P1)');
+    if (results.phase2.success) {
+        results.phase3 = await createPhaseTx(IX_PHASED_COMPUTE_MSM, 'Phase 3: Compute MSM (P0/P1)');
+    } else {
+        results.phase3 = { success: false, cus: 0 };
     }
     
-    // Phase 4: Final Pairing Check
-    {
+    // Phase 4: Final Pairing Check (no proof_data needed)
+    if (results.phase3.success) {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
         const ix = new TransactionInstruction({
             keys: [
@@ -219,25 +263,44 @@ async function main() {
         const tx = new Transaction().add(computeIx).add(ix);
         tx.feePayer = payer.publicKey;
         tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-        results.phase4 = await simulateWithCU(connection, tx, 'Phase 4: Final Pairing Check');
+        results.phase4 = await executeWithCU(connection, tx, [payer], 'Phase 4: Final Pairing Check');
+    } else {
+        results.phase4 = { success: false, cus: 0 };
     }
     
     // Summary
     console.log('\n=== SUMMARY ===');
-    console.log(`Phase 1 (Challenges):  ${results.phase1.success ? '✅' : '❌'} ${results.phase1.cus?.toLocaleString()} CUs`);
-    console.log(`Phase 2 (Sumcheck):    ${results.phase2.success ? '✅' : '❌'} ${results.phase2.cus?.toLocaleString()} CUs`);
-    console.log(`Phase 3 (MSM):         ${results.phase3.success ? '✅' : '❌'} ${results.phase3.cus?.toLocaleString()} CUs`);
-    console.log(`Phase 4 (Pairing):     ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
+    console.log('Challenge Generation Sub-Phases:');
+    console.log(`  1a (eta/beta/gamma):  ${results.phase1a.success ? '✅' : '❌'} ${results.phase1a.cus?.toLocaleString()} CUs`);
+    console.log(`  1b (alphas/gates):    ${results.phase1b.success ? '✅' : '❌'} ${results.phase1b.cus?.toLocaleString()} CUs`);
+    console.log(`  1c (sumcheck 0-13):   ${results.phase1c.success ? '✅' : '❌'} ${results.phase1c.cus?.toLocaleString()} CUs`);
+    console.log(`  1d (sumcheck 14-27):  ${results.phase1d.success ? '✅' : '❌'} ${results.phase1d.cus?.toLocaleString()} CUs`);
+    console.log(`  1e1 (delta part1):    ${results.phase1e1.success ? '✅' : '❌'} ${results.phase1e1.cus?.toLocaleString()} CUs`);
+    console.log(`  1e2 (delta part2):    ${results.phase1e2.success ? '✅' : '❌'} ${results.phase1e2.cus?.toLocaleString()} CUs`);
+    console.log('Verification Phases:');
+    console.log(`  2 (Sumcheck):         ${results.phase2.success ? '✅' : '❌'} ${results.phase2.cus?.toLocaleString()} CUs`);
+    console.log(`  3 (MSM):              ${results.phase3.success ? '✅' : '❌'} ${results.phase3.cus?.toLocaleString()} CUs`);
+    console.log(`  4 (Pairing):          ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
     
-    const total = (results.phase1.cus || 0) + (results.phase2.cus || 0) + 
-                  (results.phase3.cus || 0) + (results.phase4.cus || 0);
-    console.log(`\nTotal: ${total.toLocaleString()} CUs across 4 transactions`);
+    const challengeCUs = (results.phase1a.cus || 0) + (results.phase1b.cus || 0) + 
+                         (results.phase1c.cus || 0) + (results.phase1d.cus || 0) + 
+                         (results.phase1e1.cus || 0) + (results.phase1e2.cus || 0);
+    const verifyCUs = (results.phase2.cus || 0) + (results.phase3.cus || 0) + (results.phase4.cus || 0);
+    const total = challengeCUs + verifyCUs;
     
-    if (results.phase1.success && results.phase2.success && 
-        results.phase3.success && results.phase4.success) {
+    console.log(`\nChallenge Generation: ${challengeCUs.toLocaleString()} CUs (6 TXs)`);
+    console.log(`Verification: ${verifyCUs.toLocaleString()} CUs (3 TXs)`);
+    console.log(`Total: ${total.toLocaleString()} CUs across 9 transactions`);
+    
+    const allSuccess = results.phase1a.success && results.phase1b.success && 
+                       results.phase1c.success && results.phase1d.success && 
+                       results.phase1e1.success && results.phase1e2.success &&
+                       results.phase2.success && results.phase3.success && results.phase4.success;
+    
+    if (allSuccess) {
         console.log('\n🎉 All phases passed! Verification complete.');
     } else {
-        console.log('\n⚠️  Some phases failed. Need further splitting.');
+        console.log('\n⚠️  Some phases failed. Need further analysis.');
     }
 }
 

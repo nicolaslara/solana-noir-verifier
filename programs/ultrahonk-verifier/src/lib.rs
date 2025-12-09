@@ -24,8 +24,21 @@
 pub mod phased;
 
 use plonk_solana_core::{
-    verify, verify_step1_challenges, verify_step2_sumcheck, verify_step3_pairing_points,
-    verify_step4_pairing_check, Challenges, Fr,
+    // Split delta computation
+    compute_delta_part1,
+    compute_delta_part2,
+    // Incremental challenge generation
+    generate_challenges_phase1a,
+    generate_challenges_phase1b,
+    generate_challenges_phase1c,
+    generate_challenges_phase1d,
+    verify_step1_challenges,
+    verify_step2_sumcheck,
+    verify_step3_pairing_points,
+    verify_step4_pairing_check,
+    Challenges,
+    DeltaPartialResult,
+    Fr,
 };
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
@@ -93,26 +106,47 @@ pub enum Instruction {
     /// Data: [instruction(1), public_inputs...]
     SetPublicInputs = 3,
 
-    // === Multi-TX phased verification ===
-    /// Phase 1: Initialize state + generate challenges
+    // === Multi-TX phased verification (original - exceeds CU) ===
+    /// Phase 1: Initialize state + generate challenges (FAILS: >1.4M CUs)
     /// Accounts: [state (writable), proof_data (readonly)]
-    /// Data: [instruction(1)]
     PhasedGenerateChallenges = 10,
 
     /// Phase 2: Verify sumcheck
     /// Accounts: [state (writable), proof_data (readonly)]
-    /// Data: [instruction(1)]
     PhasedVerifySumcheck = 11,
 
     /// Phase 3: Compute P0/P1 (Shplemini MSM)
     /// Accounts: [state (writable), proof_data (readonly)]
-    /// Data: [instruction(1)]
     PhasedComputeMSM = 12,
 
     /// Phase 4: Final pairing check
     /// Accounts: [state (writable)]
-    /// Data: [instruction(1)]
     PhasedFinalCheck = 13,
+
+    // === Sub-phased challenge generation (splits Phase 1) ===
+    /// Phase 1a: eta, beta/gamma challenges
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1aEtaBetaGamma = 20,
+
+    /// Phase 1b: alpha + gate challenges
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1bAlphasGates = 21,
+
+    /// Phase 1c: sumcheck rounds 0-13
+    /// Accounts: [state (writable), proof_data (readonly)]  
+    Phase1cSumcheckHalf = 22,
+
+    /// Phase 1d: sumcheck rounds 14-27 + final challenges
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1dSumcheckRest = 23,
+
+    /// Phase 1e1: public_input_delta part 1 (first 9 items)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1e1DeltaPart1 = 24,
+
+    /// Phase 1e2: public_input_delta part 2 (remaining 8 items + division)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase1e2DeltaPart2 = 25,
 }
 
 // ============================================================================
@@ -154,11 +188,19 @@ pub fn process_instruction(
         2 => process_verify(program_id, accounts),
         3 => process_set_public_inputs(program_id, accounts, &instruction_data[1..]),
 
-        // Multi-TX phased verification
+        // Multi-TX phased verification (original - may exceed CU)
         10 => process_phased_generate_challenges(program_id, accounts),
         11 => process_phased_verify_sumcheck(program_id, accounts),
         12 => process_phased_compute_msm(program_id, accounts),
         13 => process_phased_final_check(program_id, accounts),
+
+        // Sub-phased challenge generation
+        20 => process_phase1a_eta_beta_gamma(program_id, accounts),
+        21 => process_phase1b_alphas_gates(program_id, accounts),
+        22 => process_phase1c_sumcheck_half(program_id, accounts),
+        23 => process_phase1d_sumcheck_rest(program_id, accounts),
+        24 => process_phase1e1_delta_part1(program_id, accounts),
+        25 => process_phase1e2_delta_part2(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -754,6 +796,402 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
         return Err(ProgramError::InvalidAccountData);
     }
 
+    sol_log_compute_units();
+    Ok(())
+}
+
+// ============================================================================
+// Sub-Phased Challenge Generation (splits Phase 1)
+// ============================================================================
+
+/// Phase 1a: Generate eta, beta/gamma challenges
+fn process_phase1a_eta_beta_gamma(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1a: eta/beta/gamma");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're at the start
+    let sub_phase = state.get_challenge_sub_phase();
+    if sub_phase != phased::ChallengeSubPhase::NotStarted {
+        msg!("Invalid sub-phase: expected NotStarted");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    if proof_data[0] != BufferStatus::Ready as u8 {
+        msg!("Proof buffer not ready");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse public inputs
+    let mut public_inputs: Vec<Fr> = Vec::with_capacity(num_pi);
+    for i in 0..num_pi {
+        let start = BUFFER_HEADER_SIZE + (i * 32);
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&proof_data[start..start + 32]);
+        public_inputs.push(arr);
+    }
+
+    msg!("Parsing VK/Proof...");
+    sol_log_compute_units();
+
+    // Parse VK and proof
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let log_n = vk.log2_circuit_size as usize;
+    let is_zk = true;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(proof_bytes, log_n, is_zk)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Generating eta/beta/gamma...");
+    sol_log_compute_units();
+
+    // Generate phase 1a challenges
+    let result = generate_challenges_phase1a(&vk, &proof, &public_inputs)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Save to state
+    state.log_n = log_n as u8;
+    state.is_zk = 1;
+    state.num_public_inputs = num_pi as u16;
+    state.eta = result.eta;
+    state.eta_two = result.eta_two;
+    state.eta_three = result.eta_three;
+    state.beta = result.beta;
+    state.gamma = result.gamma;
+    state.transcript_state = result.transcript_state;
+
+    state.set_phase(phased::Phase::ChallengesInProgress);
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::EtaBetaGammaDone);
+
+    msg!("Phase 1a complete");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 1b: Generate alpha and gate challenges
+fn process_phase1b_alphas_gates(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1b: alphas/gates");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check sub-phase
+    if state.get_challenge_sub_phase() != phased::ChallengeSubPhase::EtaBetaGammaDone {
+        msg!("Invalid sub-phase: expected EtaBetaGammaDone");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Generating alphas/gates...");
+    sol_log_compute_units();
+
+    let result = generate_challenges_phase1b(&proof, &state.transcript_state)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Save alphas
+    for (i, alpha) in result.alphas.iter().enumerate() {
+        if i < 25 {
+            state.alphas[i] = *alpha;
+        }
+    }
+
+    // Save gate challenges
+    for (i, gc) in result.gate_challenges.iter().enumerate() {
+        if i < 28 {
+            state.gate_challenges[i] = *gc;
+        }
+    }
+
+    state.libra_challenge = result.libra_challenge.unwrap_or([0u8; 32]);
+    state.transcript_state = result.transcript_state;
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::AlphasGatesDone);
+
+    msg!("Phase 1b complete");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 1c: Generate sumcheck challenges (rounds 0-13)
+fn process_phase1c_sumcheck_half(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1c: sumcheck 0-13");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    if state.get_challenge_sub_phase() != phased::ChallengeSubPhase::AlphasGatesDone {
+        msg!("Invalid sub-phase: expected AlphasGatesDone");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Generating sumcheck 0-13...");
+    sol_log_compute_units();
+
+    let result = generate_challenges_phase1c(&proof, &state.transcript_state)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Save sumcheck challenges (first 14)
+    for (i, sc) in result.sumcheck_challenges.iter().enumerate() {
+        if i < 14 {
+            state.sumcheck_challenges[i] = *sc;
+        }
+    }
+
+    state.transcript_state = result.transcript_state;
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::SumcheckHalfDone);
+
+    msg!("Phase 1c complete");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 1d: Generate remaining sumcheck + final challenges
+fn process_phase1d_sumcheck_rest(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1d: sumcheck 14-27 + final");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    if state.get_challenge_sub_phase() != phased::ChallengeSubPhase::SumcheckHalfDone {
+        msg!("Invalid sub-phase: expected SumcheckHalfDone");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Generating sumcheck 14-27 + final...");
+    sol_log_compute_units();
+
+    let result = generate_challenges_phase1d(&proof, &state.transcript_state, state.is_zk != 0)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Save remaining sumcheck challenges (14-27)
+    for (i, sc) in result.sumcheck_challenges.iter().enumerate() {
+        state.sumcheck_challenges[14 + i] = *sc;
+    }
+
+    state.rho = result.rho;
+    state.gemini_r = result.gemini_r;
+    state.shplonk_nu = result.shplonk_nu;
+    state.shplonk_z = result.shplonk_z;
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::AllChallengesDone);
+
+    msg!("Phase 1d complete");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 1e1: Compute public_input_delta part 1 (first 9 items)
+fn process_phase1e1_delta_part1(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1e1: delta part1");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    if state.get_challenge_sub_phase() != phased::ChallengeSubPhase::AllChallengesDone {
+        msg!("Invalid sub-phase: expected AllChallengesDone");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof and public inputs
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse public inputs
+    let mut public_inputs: Vec<Fr> = Vec::with_capacity(num_pi);
+    for i in 0..num_pi {
+        let start = BUFFER_HEADER_SIZE + (i * 32);
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&proof_data[start..start + 32]);
+        public_inputs.push(arr);
+    }
+
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    msg!("Computing delta part1...");
+    sol_log_compute_units();
+
+    let partial = compute_delta_part1(
+        &public_inputs,
+        &proof,
+        &state.beta,
+        &state.gamma,
+        vk.circuit_size(),
+    );
+
+    // Save partial result
+    state.delta_numerator = partial.numerator;
+    state.delta_denominator = partial.denominator;
+    state.delta_numerator_acc = partial.numerator_acc;
+    state.delta_denominator_acc = partial.denominator_acc;
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::DeltaPart1Done);
+
+    msg!("Phase 1e1 complete");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 1e2: Compute public_input_delta part 2 (remaining items + division)
+fn process_phase1e2_delta_part2(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 1e2: delta part2");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    if state.get_challenge_sub_phase() != phased::ChallengeSubPhase::DeltaPart1Done {
+        msg!("Invalid sub-phase: expected DeltaPart1Done");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct partial result
+    let partial = DeltaPartialResult {
+        numerator: state.delta_numerator,
+        denominator: state.delta_denominator,
+        numerator_acc: state.delta_numerator_acc,
+        denominator_acc: state.delta_denominator_acc,
+        items_processed: 9, // 1 public input + 8 ppo elements
+    };
+
+    msg!("Computing delta part2...");
+    sol_log_compute_units();
+
+    let delta = compute_delta_part2(&proof, &state.beta, &partial);
+
+    state.public_input_delta = delta;
+    state.set_challenge_sub_phase(phased::ChallengeSubPhase::DeltaComputed);
+    state.set_phase(phased::Phase::ChallengesGenerated);
+
+    msg!("Phase 1e2 complete - all challenges generated!");
     sol_log_compute_units();
     Ok(())
 }

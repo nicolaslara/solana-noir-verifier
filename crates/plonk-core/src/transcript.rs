@@ -264,9 +264,9 @@ mod tests {
         let result = reduce_hash_to_fr(&large);
         // Should not be all 0xff after reduction
         assert_ne!(result, large);
-}
+    }
 
-#[test]
+    #[test]
     fn test_split_challenge() {
         // Create a challenge with known pattern
         let mut challenge = [0u8; 32];
@@ -284,9 +284,9 @@ mod tests {
         // hi should have the upper 128 bits shifted down
         assert_eq!(hi[31], 0x01);
         assert_eq!(hi[15], 0x00);
-}
+    }
 
-#[test]
+    #[test]
     fn test_transcript_basic() {
         let mut t = Transcript::new();
 
@@ -299,9 +299,9 @@ mod tests {
 
         // Challenge should be non-zero
         assert_ne!(c, SCALAR_ZERO);
-}
+    }
 
-#[test]
+    #[test]
     fn test_actual_eta_computation() {
         // Build the same buffer as the Solidity verifier
         let mut t = Transcript::new();
