@@ -8,8 +8,9 @@ Here's what jumps out from the code + your BPF notes, focusing specifically on "
 | 2. Precompute I_FR constants        | ✅ DONE | Avoids fr_from_u64 calls                         |
 | 3. Montgomery multiplication        | ✅ DONE | **7x faster** field muls                         |
 | 4. Binary Extended GCD              | ✅ DONE | Much faster than Fermat                          |
-| 5. Shplemini MSM precompute         | ⏳ TODO | Not yet implemented                              |
-| 6. Relation batching                | ⏳ TODO | Not yet implemented                              |
+| 5. Shplemini rho^k precompute       | ✅ DONE | Avoids O(k) exponentiation per shifted wire      |
+| 6. Shplemini batch inversion        | ⏳ TODO | ~100K CUs savings expected                       |
+| 7. Relation batching                | ⏳ TODO | Not yet implemented                              |
 
 I'll give you:
 
