@@ -30,9 +30,27 @@ pub enum Phase {
     /// Sumcheck rounds in progress (check sumcheck_sub_phase)
     SumcheckInProgress = 3,
     SumcheckVerified = 4,
-    MsmComputed = 5,
-    Complete = 6,
+    /// MSM computation in progress (check shplemini_sub_phase)
+    MsmInProgress = 5,
+    MsmComputed = 6,
+    Complete = 7,
     Failed = 255,
+}
+
+/// Sub-phases for Shplemini MSM computation
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShpleminiSubPhase {
+    /// Not started
+    NotStarted = 0,
+    /// Phase 3a done: weights + scalar accumulation
+    Phase3aDone = 1,
+    /// Phase 3b1 done: folding only
+    Phase3b1Done = 2,
+    /// Phase 3b2 done: gemini + libra
+    Phase3b2Done = 3,
+    /// Phase 3c done: MSM complete
+    Complete = 4,
 }
 
 /// Sub-phases for challenge generation
@@ -63,9 +81,23 @@ impl From<u8> for Phase {
             2 => Phase::ChallengesGenerated,
             3 => Phase::SumcheckInProgress,
             4 => Phase::SumcheckVerified,
-            5 => Phase::MsmComputed,
-            6 => Phase::Complete,
+            5 => Phase::MsmInProgress,
+            6 => Phase::MsmComputed,
+            7 => Phase::Complete,
             _ => Phase::Failed,
+        }
+    }
+}
+
+impl From<u8> for ShpleminiSubPhase {
+    fn from(v: u8) -> Self {
+        match v {
+            0 => ShpleminiSubPhase::NotStarted,
+            1 => ShpleminiSubPhase::Phase3aDone,
+            2 => ShpleminiSubPhase::Phase3b1Done,
+            3 => ShpleminiSubPhase::Phase3b2Done,
+            4 => ShpleminiSubPhase::Complete,
+            _ => ShpleminiSubPhase::NotStarted,
         }
     }
 }
@@ -187,11 +219,40 @@ pub struct VerificationState {
     pub sumcheck_passed: u8,
     pub _sumcheck_padding: [u8; 31],
 
-    // === P0/P1 (Phase 4 output) ===
+    // === Shplemini intermediate state (Phase 3a output) ===
+    /// r^(2^i) powers - 28 Fr = 896 bytes
+    pub shplemini_r_pows: [[u8; 32]; 28],
+    /// pos0 = 1/(z - r)
+    pub shplemini_pos0: [u8; 32],
+    /// neg0 = 1/(z + r)
+    pub shplemini_neg0: [u8; 32],
+    /// unshifted scalar
+    pub shplemini_unshifted: [u8; 32],
+    /// shifted scalar
+    pub shplemini_shifted: [u8; 32],
+    /// eval_acc accumulator
+    pub shplemini_eval_acc: [u8; 32],
+
+    // === Shplemini intermediate state (Phase 3b1 output) ===
+    /// fold_pos - up to 28 Fr (log_n max) = 896 bytes
+    pub shplemini_fold_pos: [[u8; 32]; 28],
+    /// const_acc accumulator (from Phase 3b1)
+    pub shplemini_const_acc: [u8; 32],
+
+    // === Shplemini intermediate state (Phase 3b2 output) ===
+    /// gemini_scalars - 27 Fr = 864 bytes
+    pub shplemini_gemini_scalars: [[u8; 32]; 27],
+    /// libra_scalars - 3 Fr = 96 bytes  
+    pub shplemini_libra_scalars: [[u8; 32]; 3],
+    /// Shplemini sub-phase tracker
+    pub shplemini_sub_phase: u8,
+    pub _shplemini_padding: [u8; 31],
+
+    // === P0/P1 (Phase 3c output) ===
     pub p0: [u8; 64], // G1 point
     pub p1: [u8; 64], // G1 point
 
-    // === Final result (Phase 5 output) ===
+    // === Final result (Phase 4 output) ===
     pub verified: u8,
     pub _final_padding: [u8; 31],
 }
@@ -208,9 +269,24 @@ impl VerificationState {
         128 +         // partial delta (4 × 32)
         96 +          // sumcheck rounds intermediate (target, pow_partial, rounds_completed + padding)
         32 +          // sumcheck_passed + padding
+        // Shplemini Phase 3a intermediate state:
+        896 +         // r_pows (28 × 32)
+        32 +          // pos0
+        32 +          // neg0
+        32 +          // unshifted
+        32 +          // shifted
+        32 +          // eval_acc
+        // Shplemini Phase 3b1 intermediate state:
+        896 +         // fold_pos (28 × 32)
+        32 +          // const_acc
+        // Shplemini Phase 3b2 intermediate state:
+        864 +         // gemini_scalars (27 × 32)
+        96 +          // libra_scalars (3 × 32)
+        32 +          // shplemini_sub_phase + padding
+        // Final outputs:
         128 +         // P0 + P1
         32; // verified + padding
-            // Total: 3400 bytes
+            // Total: 6376 bytes
 
     /// Initialize state from account data
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
@@ -259,10 +335,20 @@ impl VerificationState {
     pub fn set_sumcheck_sub_phase(&mut self, sub_phase: SumcheckSubPhase) {
         self.sumcheck_sub_phase = sub_phase as u8;
     }
+
+    /// Get current shplemini sub-phase
+    pub fn get_shplemini_sub_phase(&self) -> ShpleminiSubPhase {
+        ShpleminiSubPhase::from(self.shplemini_sub_phase)
+    }
+
+    /// Set shplemini sub-phase
+    pub fn set_shplemini_sub_phase(&mut self, sub_phase: ShpleminiSubPhase) {
+        self.shplemini_sub_phase = sub_phase as u8;
+    }
 }
 
 // Verify the size at compile time
-const _: () = assert!(VerificationState::SIZE == 3400);
+const _: () = assert!(VerificationState::SIZE == 6376);
 
 /// Account indices for phased verification instructions
 pub mod accounts {

@@ -270,6 +270,44 @@ pub fn generate_challenges_phase1a(
     // Get beta, gamma
     let (beta, gamma) = transcript.challenge_split();
 
+    // Debug: print challenges from phase1a (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "1a eta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            eta[24],
+            eta[25],
+            eta[26],
+            eta[27],
+            eta[28],
+            eta[29],
+            eta[30],
+            eta[31]
+        );
+        solana_program::msg!(
+            "1a beta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            beta[24],
+            beta[25],
+            beta[26],
+            beta[27],
+            beta[28],
+            beta[29],
+            beta[30],
+            beta[31]
+        );
+        solana_program::msg!(
+            "1a gamma[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            gamma[24],
+            gamma[25],
+            gamma[26],
+            gamma[27],
+            gamma[28],
+            gamma[29],
+            gamma[30],
+            gamma[31]
+        );
+    }
+
     // Get transcript state (should be 32 bytes after challenge_split)
     let state = transcript.get_state();
     let mut transcript_state = [0u8; 32];
@@ -385,6 +423,23 @@ pub fn generate_challenges_phase1c(
     let mut new_state = [0u8; 32];
     if state.len() == 32 {
         new_state.copy_from_slice(&state);
+    } else {
+        // BUG: transcript state is not 32 bytes!
+        #[cfg(feature = "solana")]
+        {
+            solana_program::msg!("BUG: transcript state len = {}", state.len());
+        }
+    }
+
+    // Debug: print transcript state after phase1c
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "DEBUG phase1c transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            new_state[24], new_state[25], new_state[26], new_state[27],
+            new_state[28], new_state[29], new_state[30], new_state[31]
+        );
     }
 
     Ok(Phase1cResult {
@@ -421,7 +476,7 @@ pub fn generate_challenges_phase1d(
         transcript.append_scalar(eval);
     }
 
-    // ZK: add libra evaluation + commitments + masking poly
+    // ZK: add libra evaluation + commitments + masking poly + masking eval
     if is_zk {
         let libra_eval = proof.libra_evaluation();
         transcript.append_scalar(&libra_eval);
@@ -440,10 +495,30 @@ pub fn generate_challenges_phase1d(
         for limb in &masking_limbed {
             transcript.append_scalar(limb);
         }
+
+        // geminiMaskingEval - was missing!
+        let masking_eval = proof.gemini_masking_eval();
+        transcript.append_scalar(&masking_eval);
     }
 
     // Rho challenge
     let (rho, _) = transcript.challenge_split();
+
+    // Debug: print rho (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "1d rho[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            rho[24],
+            rho[25],
+            rho[26],
+            rho[27],
+            rho[28],
+            rho[29],
+            rho[30],
+            rho[31]
+        );
+    }
 
     // Add Gemini fold commitments (log_n - 1 of them)
     for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
@@ -456,27 +531,74 @@ pub fn generate_challenges_phase1d(
     // Gemini r challenge
     let gemini_r = transcript.challenge();
 
+    // Debug: print gemini_r (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "1d gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            gemini_r[24],
+            gemini_r[25],
+            gemini_r[26],
+            gemini_r[27],
+            gemini_r[28],
+            gemini_r[29],
+            gemini_r[30],
+            gemini_r[31]
+        );
+    }
+
     // Add Gemini evaluations (CONST_PROOF_SIZE_LOG_N of them)
     for i in 0..CONST_PROOF_SIZE_LOG_N {
         let eval = proof.gemini_a_evaluation(i);
         transcript.append_scalar(&eval);
     }
 
-    // ZK: add Gemini masking evaluation
+    // ZK: add libra poly evals before shplonk_nu (NOT masking_eval - that was before rho)
     if is_zk {
-        let masking_eval = proof.gemini_masking_eval();
-        transcript.append_scalar(&masking_eval);
+        let libra_evals = proof.libra_poly_evals();
+        for eval in &libra_evals {
+            transcript.append_scalar(eval);
+        }
     }
 
     // Shplonk nu challenge
-    let shplonk_nu = transcript.challenge();
+    let (shplonk_nu, _) = transcript.challenge_split();
 
-    // Add shplonk_q commitment
-    let shplonk_q = proof.shplonk_q();
-    transcript.append_g1(&shplonk_q);
+    // Add shplonk_q commitment in LIMBED format
+    let shplonk_q_limbed = proof.shplonk_q_limbed();
+    for limb in &shplonk_q_limbed {
+        transcript.append_scalar(limb);
+    }
 
     // Shplonk z challenge (KZG)
-    let shplonk_z = transcript.challenge();
+    let (shplonk_z, _) = transcript.challenge_split();
+
+    // Debug: print shplonk challenges (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "1d shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            shplonk_nu[24],
+            shplonk_nu[25],
+            shplonk_nu[26],
+            shplonk_nu[27],
+            shplonk_nu[28],
+            shplonk_nu[29],
+            shplonk_nu[30],
+            shplonk_nu[31]
+        );
+        solana_program::msg!(
+            "1d shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            shplonk_z[24],
+            shplonk_z[25],
+            shplonk_z[26],
+            shplonk_z[27],
+            shplonk_z[28],
+            shplonk_z[29],
+            shplonk_z[30],
+            shplonk_z[31]
+        );
+    }
 
     Ok(Phase1dResult {
         sumcheck_challenges,
@@ -642,6 +764,23 @@ fn generate_challenges(
     crate::dbg_fr!("eta_two", &eta_two);
     crate::dbg_fr!("eta_three", &eta_three);
 
+    // Debug: print eta challenges
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "SINGLE_PASS eta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            eta[24],
+            eta[25],
+            eta[26],
+            eta[27],
+            eta[28],
+            eta[29],
+            eta[30],
+            eta[31]
+        );
+    }
+
     // Add lookup commitments and w4 in LIMBED format
     // bb 0.87: [previousChallenge, lookupReadCounts(4), lookupReadTags(4), w4(4)]
     let lookup_read_counts_limbed = proof.witness_commitment_limbed(3);
@@ -661,6 +800,34 @@ fn generate_challenges(
     let (beta, gamma) = transcript.challenge_split();
     crate::dbg_fr!("beta", &beta);
     crate::dbg_fr!("gamma", &gamma);
+
+    // Debug: print beta/gamma challenges
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "SINGLE_PASS beta[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            beta[24],
+            beta[25],
+            beta[26],
+            beta[27],
+            beta[28],
+            beta[29],
+            beta[30],
+            beta[31]
+        );
+        std::println!(
+            "SINGLE_PASS gamma[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            gamma[24],
+            gamma[25],
+            gamma[26],
+            gamma[27],
+            gamma[28],
+            gamma[29],
+            gamma[30],
+            gamma[31]
+        );
+    }
 
     // NOTE: lookup_inverses and z_perm are NOT appended here!
     // They're appended in limbed format for alpha challenge generation (see below)
@@ -774,6 +941,20 @@ fn generate_challenges(
         None
     };
 
+    // Debug: print transcript state after libra_challenge (end of phase 1b equivalent)
+    #[cfg(test)]
+    {
+        extern crate std;
+        let state_1b = transcript.get_state();
+        if state_1b.len() == 32 {
+            std::println!(
+                "SINGLE_PASS 1b_end transcript[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                state_1b[24], state_1b[25], state_1b[26], state_1b[27],
+                state_1b[28], state_1b[29], state_1b[30], state_1b[31]
+            );
+        }
+    }
+
     // Get sumcheck u challenges
     // Per Solidity verifier: ONE hash per round, take ONLY lower 128 bits, discard upper!
     // See generateSumcheckChallenges in the generated HonkVerifier.sol
@@ -809,6 +990,20 @@ fn generate_challenges(
             crate::dbg_fr!(&alloc::format!("sumcheck_u[{}]", r), &lo);
         }
         sumcheck_challenges.push(lo);
+
+        // Debug: print transcript state after round 13 (end of phase1c equivalent)
+        #[cfg(test)]
+        if r == 13 {
+            extern crate std;
+            let state_1c = transcript.get_state();
+            if state_1c.len() == 32 {
+                std::println!(
+                    "SINGLE_PASS 1c_end (round 13) transcript[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    state_1c[24], state_1c[25], state_1c[26], state_1c[27],
+                    state_1c[28], state_1c[29], state_1c[30], state_1c[31]
+                );
+            }
+        }
     }
 
     // Add sumcheck evaluations to transcript
@@ -868,6 +1063,23 @@ fn generate_challenges(
     let (rho, _) = transcript.challenge_split();
     crate::dbg_fr!("rho", &rho);
 
+    // Debug: print rho challenge
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "SINGLE_PASS rho[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            rho[24],
+            rho[25],
+            rho[26],
+            rho[27],
+            rho[28],
+            rho[29],
+            rho[30],
+            rho[31]
+        );
+    }
+
     // Add Gemini fold commitments to transcript
     // Solidity uses CONST_PROOF_SIZE_LOG_N - 1 = 27 fold comms in LIMBED format
     crate::trace!(
@@ -887,6 +1099,23 @@ fn generate_challenges(
     // Get gemini_r challenge
     let (gemini_r, _) = transcript.challenge_split();
     crate::dbg_fr!("gemini_r", &gemini_r);
+
+    // Debug: print gemini_r
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "SINGLE_PASS gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            gemini_r[24],
+            gemini_r[25],
+            gemini_r[26],
+            gemini_r[27],
+            gemini_r[28],
+            gemini_r[29],
+            gemini_r[30],
+            gemini_r[31]
+        );
+    }
 
     // Add Gemini A evaluations to transcript
     // Solidity uses CONST_PROOF_SIZE_LOG_N = 28 evaluations

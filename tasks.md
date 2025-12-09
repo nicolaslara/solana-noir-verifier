@@ -128,13 +128,26 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
   - 1 TX for relations: ~1.1M CUs
   - **Total Phase 2: ~5.1M CUs** ✅
 
-### In Progress 🔧
+### Completed 🎉
 
-- [ ] Phase 3 (MSM computation) - exceeds 1.4M CUs, needs splitting
+- [x] Phase 3 (MSM computation) - split into 4 transactions:
 
-### Pending ⏳
+  - 3a (weights): ~677K CUs
+  - 3b1 (folding): ~896K CUs
+  - 3b2 (gemini+libra): ~1.02M CUs
+  - 3c (MSM): ~736K CUs
+  - **Total Phase 3: ~3.3M CUs** ✅
 
-- [ ] Phase 4 (Pairing check) - not yet tested
+- [x] Phase 4 (Pairing check) - **54K CUs** ✅
+  - Uses Solana's bn254 pairing syscall
+  - Single transaction
+
+### Bug Fixes During Multi-TX Implementation
+
+- [x] **Fixed `generate_challenges_phase1d`** - Three bugs were causing pairing check to fail:
+  1. Missing `geminiMaskingEval` before rho challenge
+  2. Missing `libra_poly_evals` before shplonk_nu challenge
+  3. Using G1 format instead of LIMBED format for shplonk_q commitment
 
 ### Optimization Progress
 

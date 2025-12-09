@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::field::{fr_add, fr_inv, fr_mul, fr_neg, fr_sub};
+use crate::field::{batch_inv, fr_add, fr_inv, fr_mul, fr_neg, fr_sub};
 use crate::key::VerificationKey;
 use crate::ops;
 use crate::proof::{Proof, CONST_PROOF_SIZE_LOG_N};
@@ -22,6 +22,522 @@ use crate::verifier::Challenges;
 
 /// Number of unshifted evaluations (indices 0-34) - matches Solidity bb 0.87
 pub const NUMBER_UNSHIFTED: usize = 35;
+
+// ============================================================================
+// Intermediate state for multi-TX Shplemini verification
+// ============================================================================
+
+/// Intermediate state after Phase 3a (weights + scalar accumulation)
+#[derive(Clone)]
+pub struct ShpleminiPhase3aResult {
+    pub r_pows: Vec<Fr>,
+    pub pos0: Fr,
+    pub neg0: Fr,
+    pub unshifted: Fr,
+    pub shifted: Fr,
+    pub eval_acc: Fr,
+}
+
+/// Intermediate state after Phase 3b (folding)
+#[derive(Clone)]
+pub struct ShpleminiPhase3bResult {
+    pub const_acc: Fr,
+    pub gemini_scalars: Vec<Fr>,
+    pub libra_scalars: Vec<Fr>,
+    pub r_pows: Vec<Fr>,
+    pub unshifted: Fr,
+    pub shifted: Fr,
+}
+
+/// Phase 3a: Compute weights and scalar accumulation (~870K CUs)
+#[inline(never)]
+pub fn shplemini_phase3a(
+    proof: &Proof,
+    challenges: &Challenges,
+    log_n: usize,
+) -> Result<ShpleminiPhase3aResult, &'static str> {
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3a: start");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // Debug: print key challenges (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.gemini_r[24], challenges.gemini_r[25], challenges.gemini_r[26], challenges.gemini_r[27],
+            challenges.gemini_r[28], challenges.gemini_r[29], challenges.gemini_r[30], challenges.gemini_r[31]
+        );
+        solana_program::msg!(
+            "shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_z[24], challenges.shplonk_z[25], challenges.shplonk_z[26], challenges.shplonk_z[27],
+            challenges.shplonk_z[28], challenges.shplonk_z[29], challenges.shplonk_z[30], challenges.shplonk_z[31]
+        );
+        solana_program::msg!(
+            "shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_nu[24], challenges.shplonk_nu[25], challenges.shplonk_nu[26], challenges.shplonk_nu[27],
+            challenges.shplonk_nu[28], challenges.shplonk_nu[29], challenges.shplonk_nu[30], challenges.shplonk_nu[31]
+        );
+    }
+
+    // 1) Compute r^(2^i) powers
+    let mut r_pows = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
+    r_pows.push(challenges.gemini_r);
+    for i in 1..CONST_PROOF_SIZE_LOG_N {
+        r_pows.push(fr_mul(&r_pows[i - 1], &r_pows[i - 1]));
+    }
+
+    // 2) Compute shplonk weights
+    let z_minus_r0 = fr_sub(&challenges.shplonk_z, &r_pows[0]);
+    let z_plus_r0 = fr_add(&challenges.shplonk_z, &r_pows[0]);
+    let pos0 = fr_inv(&z_minus_r0).ok_or("shplonk denominator z - r^0 is zero")?;
+    let neg0 = fr_inv(&z_plus_r0).ok_or("shplonk denominator z + r^0 is zero")?;
+
+    let unshifted = fr_add(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0));
+    let r_inv = fr_inv(&challenges.gemini_r).ok_or("gemini_r is zero")?;
+    let shifted = fr_mul(
+        &r_inv,
+        &fr_sub(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0)),
+    );
+
+    // Debug: print unshifted (only when debug-solana feature is enabled)
+    #[cfg(all(feature = "solana", feature = "debug-solana"))]
+    {
+        solana_program::msg!(
+            "3a unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            unshifted[0], unshifted[1], unshifted[2], unshifted[3],
+            unshifted[4], unshifted[5], unshifted[6], unshifted[7]
+        );
+        solana_program::msg!(
+            "3a pos0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            pos0[0], pos0[1], pos0[2], pos0[3], pos0[4], pos0[5], pos0[6], pos0[7]
+        );
+        solana_program::msg!(
+            "3a neg0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            neg0[0], neg0[1], neg0[2], neg0[3], neg0[4], neg0[5], neg0[6], neg0[7]
+        );
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3a: after weights");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // 3) Accumulate evals with rho powers
+    let evals = proof.sumcheck_evaluations();
+    let mut rho_pow = challenges.rho;
+    let mut eval_acc = if proof.is_zk {
+        proof.gemini_masking_eval()
+    } else {
+        SCALAR_ZERO
+    };
+
+    for eval in evals.iter().take(NUMBER_OF_ENTITIES) {
+        eval_acc = fr_add(&eval_acc, &fr_mul(eval, &rho_pow));
+        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3a: done");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    Ok(ShpleminiPhase3aResult {
+        r_pows,
+        pos0,
+        neg0,
+        unshifted,
+        shifted,
+        eval_acc,
+    })
+}
+
+/// Phase 3b: Folding rounds + gemini loop + libra (~500K CUs)
+#[inline(never)]
+pub fn shplemini_phase3b(
+    proof: &Proof,
+    challenges: &Challenges,
+    phase3a: &ShpleminiPhase3aResult,
+    log_n: usize,
+) -> Result<ShpleminiPhase3bResult, &'static str> {
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b: start");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    let r_pows = &phase3a.r_pows;
+    let pos0 = &phase3a.pos0;
+    let neg0 = &phase3a.neg0;
+
+    // 4) Folding rounds
+    let mut fold_pos = vec![SCALAR_ZERO; log_n];
+    let mut cur = phase3a.eval_acc;
+    let gemini_a_evals = proof.gemini_a_evaluations();
+
+    for j in (1..=log_n).rev() {
+        let r2 = r_pows[j - 1];
+        let u = challenges.sumcheck_challenges[j - 1];
+
+        let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
+        let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
+        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
+        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
+        let bracket = fr_sub(&r2_one_minus_u, &u);
+        let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
+        let num = fr_sub(&term1, &term2);
+        let den = fr_add(&r2_one_minus_u, &u);
+        let den_inv = fr_inv(&den).ok_or("fold round denominator is zero")?;
+        cur = fr_mul(&num, &den_inv);
+        fold_pos[j - 1] = cur;
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b: after fold");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // 5) Constant term accumulation
+    let mut const_acc = fr_add(
+        &fr_mul(&fold_pos[0], pos0),
+        &fr_mul(&fr_mul(&gemini_a_evals[0], &challenges.shplonk_nu), neg0),
+    );
+
+    // 6) Gemini fold loop
+    let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
+    let mut gemini_scalars = vec![SCALAR_ZERO; CONST_PROOF_SIZE_LOG_N - 1];
+
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
+        let dummy_round = i >= log_n - 1;
+
+        if !dummy_round {
+            let j = i + 1;
+            let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
+            let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
+            let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
+            let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
+            let sp = fr_mul(&v_pow, &pos_inv);
+            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
+            gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
+            const_acc = fr_add(
+                &const_acc,
+                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
+            );
+        }
+
+        v_pow = fr_mul(
+            &v_pow,
+            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
+        );
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b: after gemini");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // 7) Libra (ZK only)
+    let mut libra_scalars = vec![SCALAR_ZERO; 3];
+
+    if proof.is_zk {
+        let subgroup_generator: Fr = [
+            0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36,
+            0xff, 0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91,
+            0x74, 0xa5, 0x7a, 0x76,
+        ];
+
+        let denom0 = fr_inv(&fr_sub(&challenges.shplonk_z, &challenges.gemini_r))
+            .ok_or("libra denominator 0 is zero")?;
+        let denom1 = fr_inv(&fr_sub(
+            &challenges.shplonk_z,
+            &fr_mul(&subgroup_generator, &challenges.gemini_r),
+        ))
+        .ok_or("libra denominator 1 is zero")?;
+
+        v_pow = fr_mul(
+            &v_pow,
+            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
+        );
+
+        let libra_evals = proof.libra_poly_evals();
+        let denominators = [denom0, denom1, denom0, denom0];
+        let mut batching_scalars = [SCALAR_ZERO; 4];
+        for (i, eval) in libra_evals.iter().enumerate() {
+            let scaling_factor = fr_mul(&denominators[i], &v_pow);
+            batching_scalars[i] = fr_neg(&scaling_factor);
+            const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
+            v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
+        }
+
+        libra_scalars[0] = batching_scalars[0];
+        libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
+        libra_scalars[2] = batching_scalars[3];
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b: done");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    Ok(ShpleminiPhase3bResult {
+        const_acc,
+        gemini_scalars,
+        libra_scalars,
+        r_pows: phase3a.r_pows.clone(),
+        unshifted: phase3a.unshifted,
+        shifted: phase3a.shifted,
+    })
+}
+
+/// Intermediate state after Phase 3b1 (folding only)
+#[derive(Clone)]
+pub struct ShpleminiPhase3b1Result {
+    pub fold_pos: Vec<Fr>,
+    pub const_acc: Fr,
+}
+
+/// Phase 3b1: Folding rounds only (~870K CUs)
+#[inline(never)]
+pub fn shplemini_phase3b1(
+    proof: &Proof,
+    challenges: &Challenges,
+    phase3a: &ShpleminiPhase3aResult,
+    log_n: usize,
+) -> Result<ShpleminiPhase3b1Result, &'static str> {
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b1: folding");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    let r_pows = &phase3a.r_pows;
+    let pos0 = &phase3a.pos0;
+    let neg0 = &phase3a.neg0;
+
+    // Folding rounds
+    let mut fold_pos = vec![SCALAR_ZERO; log_n];
+    let mut cur = phase3a.eval_acc;
+    let gemini_a_evals = proof.gemini_a_evaluations();
+
+    for j in (1..=log_n).rev() {
+        let r2 = r_pows[j - 1];
+        let u = challenges.sumcheck_challenges[j - 1];
+
+        let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
+        let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
+        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
+        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
+        let bracket = fr_sub(&r2_one_minus_u, &u);
+        let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
+        let num = fr_sub(&term1, &term2);
+        let den = fr_add(&r2_one_minus_u, &u);
+        let den_inv = fr_inv(&den).ok_or("fold round denominator is zero")?;
+        cur = fr_mul(&num, &den_inv);
+        fold_pos[j - 1] = cur;
+    }
+
+    // Initial constant term accumulation
+    let const_acc = fr_add(
+        &fr_mul(&fold_pos[0], pos0),
+        &fr_mul(&fr_mul(&gemini_a_evals[0], &challenges.shplonk_nu), neg0),
+    );
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b1: done");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    Ok(ShpleminiPhase3b1Result {
+        fold_pos,
+        const_acc,
+    })
+}
+
+/// Phase 3b2: Gemini loop + libra (~500K CUs)
+#[inline(never)]
+pub fn shplemini_phase3b2(
+    proof: &Proof,
+    challenges: &Challenges,
+    phase3a: &ShpleminiPhase3aResult,
+    phase3b1: &ShpleminiPhase3b1Result,
+    log_n: usize,
+) -> Result<ShpleminiPhase3bResult, &'static str> {
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b2: gemini+libra");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    let r_pows = &phase3a.r_pows;
+    let gemini_a_evals = proof.gemini_a_evaluations();
+    let fold_pos = &phase3b1.fold_pos;
+    let mut const_acc = phase3b1.const_acc;
+
+    // BATCH INVERSION OPTIMIZATION:
+    // Collect all denominators first, then batch invert them
+    // This replaces ~44 individual inversions with 1 batch inversion
+
+    // Collect denominators for gemini loop (non-dummy rounds only)
+    let num_non_dummy = if log_n > 1 { log_n - 1 } else { 0 };
+    let mut all_denoms: Vec<Fr> = Vec::with_capacity(num_non_dummy * 2 + 4); // gemini + libra
+
+    // Gemini denominators: z - r^j and z + r^j for j = 1..log_n-1
+    for i in 0..num_non_dummy {
+        let j = i + 1;
+        let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
+        let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
+        all_denoms.push(z_minus_rj);
+        all_denoms.push(z_plus_rj);
+    }
+
+    // Libra denominators (ZK only)
+    let libra_start_idx = all_denoms.len();
+    if proof.is_zk {
+        let subgroup_generator: Fr = [
+            0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36,
+            0xff, 0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91,
+            0x74, 0xa5, 0x7a, 0x76,
+        ];
+        // denom0 = z - r
+        all_denoms.push(fr_sub(&challenges.shplonk_z, &challenges.gemini_r));
+        // denom1 = z - subgroup_generator * r
+        all_denoms.push(fr_sub(
+            &challenges.shplonk_z,
+            &fr_mul(&subgroup_generator, &challenges.gemini_r),
+        ));
+    }
+
+    // Batch invert all denominators at once
+    let all_invs = batch_inv(&all_denoms).ok_or("batch inversion failed")?;
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b2: after batch inv");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // Now use the precomputed inverses in the gemini loop
+    let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
+    let mut gemini_scalars = vec![SCALAR_ZERO; CONST_PROOF_SIZE_LOG_N - 1];
+
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
+        let dummy_round = i >= log_n - 1;
+
+        if !dummy_round {
+            let j = i + 1;
+            // Use precomputed inverses
+            let pos_inv = all_invs[i * 2]; // 1/(z - r^j)
+            let neg_inv = all_invs[i * 2 + 1]; // 1/(z + r^j)
+
+            let sp = fr_mul(&v_pow, &pos_inv);
+            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
+            gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
+            const_acc = fr_add(
+                &const_acc,
+                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
+            );
+        }
+
+        v_pow = fr_mul(
+            &v_pow,
+            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
+        );
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b2: after gemini");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // Libra (ZK only) - use precomputed inverses
+    let mut libra_scalars = vec![SCALAR_ZERO; 3];
+
+    if proof.is_zk {
+        let denom0 = all_invs[libra_start_idx];
+        let denom1 = all_invs[libra_start_idx + 1];
+
+        v_pow = fr_mul(
+            &v_pow,
+            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
+        );
+
+        let libra_evals = proof.libra_poly_evals();
+        let denominators = [denom0, denom1, denom0, denom0];
+        let mut batching_scalars = [SCALAR_ZERO; 4];
+        for (i, eval) in libra_evals.iter().enumerate() {
+            let scaling_factor = fr_mul(&denominators[i], &v_pow);
+            batching_scalars[i] = fr_neg(&scaling_factor);
+            const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
+            v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
+        }
+
+        libra_scalars[0] = batching_scalars[0];
+        libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
+        libra_scalars[2] = batching_scalars[3];
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3b2: done");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    Ok(ShpleminiPhase3bResult {
+        const_acc,
+        gemini_scalars,
+        libra_scalars,
+        r_pows: phase3a.r_pows.clone(),
+        unshifted: phase3a.unshifted,
+        shifted: phase3a.shifted,
+    })
+}
+
+/// Phase 3c: MSM computation (~500K CUs estimated)
+#[inline(never)]
+pub fn shplemini_phase3c(
+    proof: &Proof,
+    vk: &VerificationKey,
+    challenges: &Challenges,
+    phase3b: &ShpleminiPhase3bResult,
+) -> Result<(G1, G1), &'static str> {
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3c: start MSM");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    let p0 = compute_p0_full(
+        proof,
+        vk,
+        challenges,
+        &phase3b.const_acc,
+        &phase3b.unshifted,
+        &phase3b.shifted,
+        &phase3b.r_pows,
+        &phase3b.gemini_scalars,
+        &phase3b.libra_scalars,
+    )?;
+
+    let kzg_quotient = proof.kzg_quotient();
+    let p1 = ops::g1_neg(&kzg_quotient).map_err(|_| "G1 negate failed")?;
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini 3c: done");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    Ok((p0, p1))
+}
 
 /// Number of shifted evaluations (indices 35-39) - bb 0.87
 pub const NUMBER_TO_BE_SHIFTED: usize = 5;
@@ -49,6 +565,12 @@ pub fn compute_shplemini_pairing_points(
 ) -> Result<(G1, G1), &'static str> {
     let log_n = vk.log2_circuit_size as usize;
 
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini: start");
+        solana_program::log::sol_log_compute_units();
+    }
+
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== SHPLEMINI VERIFICATION =====");
@@ -57,6 +579,45 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("shplonk_z", &challenges.shplonk_z);
         crate::dbg_fr!("shplonk_nu", &challenges.shplonk_nu);
         crate::dbg_fr!("rho", &challenges.rho);
+    }
+
+    // Debug: print key challenges for comparison with phased (last 8 bytes)
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "DEBUG gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.gemini_r[24],
+            challenges.gemini_r[25],
+            challenges.gemini_r[26],
+            challenges.gemini_r[27],
+            challenges.gemini_r[28],
+            challenges.gemini_r[29],
+            challenges.gemini_r[30],
+            challenges.gemini_r[31]
+        );
+        std::println!(
+            "DEBUG shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_z[24],
+            challenges.shplonk_z[25],
+            challenges.shplonk_z[26],
+            challenges.shplonk_z[27],
+            challenges.shplonk_z[28],
+            challenges.shplonk_z[29],
+            challenges.shplonk_z[30],
+            challenges.shplonk_z[31]
+        );
+        std::println!(
+            "DEBUG shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_nu[24],
+            challenges.shplonk_nu[25],
+            challenges.shplonk_nu[26],
+            challenges.shplonk_nu[27],
+            challenges.shplonk_nu[28],
+            challenges.shplonk_nu[29],
+            challenges.shplonk_nu[30],
+            challenges.shplonk_nu[31]
+        );
     }
 
     // 1) Compute r^(2^i) powers
@@ -109,6 +670,73 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("shiftedScalar", &shifted);
     }
 
+    // Debug: print key values in single-pass
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "SINGLE_PASS shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_z[24],
+            challenges.shplonk_z[25],
+            challenges.shplonk_z[26],
+            challenges.shplonk_z[27],
+            challenges.shplonk_z[28],
+            challenges.shplonk_z[29],
+            challenges.shplonk_z[30],
+            challenges.shplonk_z[31]
+        );
+        std::println!(
+            "SINGLE_PASS shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            challenges.shplonk_nu[24],
+            challenges.shplonk_nu[25],
+            challenges.shplonk_nu[26],
+            challenges.shplonk_nu[27],
+            challenges.shplonk_nu[28],
+            challenges.shplonk_nu[29],
+            challenges.shplonk_nu[30],
+            challenges.shplonk_nu[31]
+        );
+        std::println!(
+            "SINGLE_PASS unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            unshifted[0],
+            unshifted[1],
+            unshifted[2],
+            unshifted[3],
+            unshifted[4],
+            unshifted[5],
+            unshifted[6],
+            unshifted[7]
+        );
+        std::println!(
+            "SINGLE_PASS pos0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            pos0[0],
+            pos0[1],
+            pos0[2],
+            pos0[3],
+            pos0[4],
+            pos0[5],
+            pos0[6],
+            pos0[7]
+        );
+        std::println!(
+            "SINGLE_PASS neg0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            neg0[0],
+            neg0[1],
+            neg0[2],
+            neg0[3],
+            neg0[4],
+            neg0[5],
+            neg0[6],
+            neg0[7]
+        );
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini: after weights");
+        solana_program::log::sol_log_compute_units();
+    }
+
     // 3) Accumulate scalars for commitments
     // For now, we'll compute P0 as the MSM result
 
@@ -150,6 +778,12 @@ pub fn compute_shplemini_pairing_points(
     #[cfg(feature = "debug")]
     {
         crate::dbg_fr!("batchedEvaluation after unshifted+shifted", &eval_acc);
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini: after scalar accum");
+        solana_program::log::sol_log_compute_units();
     }
 
     // 4) Folding rounds
@@ -215,6 +849,12 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("const_acc after initial term", &const_acc);
     }
 
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini: after fold rounds");
+        solana_program::log::sol_log_compute_units();
+    }
+
     // 6) Further folding (gemini fold loop: i = 0 to CONST_PROOF_SIZE_LOG_N - 2)
     // Solidity loops 27 times, but only accumulates for i < LOG_N - 1 (non-dummy rounds)
     // IMPORTANT: v_pow is ALWAYS updated even in dummy rounds!
@@ -227,24 +867,24 @@ pub fn compute_shplemini_pairing_points(
         if !dummy_round {
             let j = i + 1; // Our index into r_pows, fold_pos, gemini_a_evals
 
-        let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
-        let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
+            let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
+            let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
 
-        let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
-        let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
+            let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
+            let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
 
-        let sp = fr_mul(&v_pow, &pos_inv);
-        let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
+            let sp = fr_mul(&v_pow, &pos_inv);
+            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
 
             // Compute gemini scalar for this fold commitment
             // scalars[boundary + i] = -scalingFactorNeg - scalingFactorPos
             gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
 
-        // Update const_acc
-        const_acc = fr_add(
-            &const_acc,
-            &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
-        );
+            // Update const_acc
+            const_acc = fr_add(
+                &const_acc,
+                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
+            );
         }
 
         // ALWAYS update v_pow, even in dummy rounds!
@@ -336,6 +976,40 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("shifted scalar", &shifted);
     }
 
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("Shplemini: before MSM");
+        solana_program::log::sol_log_compute_units();
+    }
+
+    // Debug: print key values for comparison
+    #[cfg(test)]
+    {
+        extern crate std;
+        std::println!(
+            "DEBUG const_acc[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            const_acc[0],
+            const_acc[1],
+            const_acc[2],
+            const_acc[3],
+            const_acc[4],
+            const_acc[5],
+            const_acc[6],
+            const_acc[7]
+        );
+        std::println!(
+            "DEBUG unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            unshifted[0],
+            unshifted[1],
+            unshifted[2],
+            unshifted[3],
+            unshifted[4],
+            unshifted[5],
+            unshifted[6],
+            unshifted[7]
+        );
+    }
+
     // 8) Build the final pairing points
     // P0 = MSM(commitments, scalars)
     // P1 = -kzg_quotient (NEGATED!)
@@ -383,6 +1057,16 @@ fn compute_p0_full(
     libra_scalars: &[Fr],
 ) -> Result<G1, &'static str> {
     let log_n = vk.log2_circuit_size as usize;
+
+    // OPTIMIZATION: Precompute all rho powers to avoid O(n²) loop
+    // We need rho^1 through rho^42 (for shifted contributions rho^37-41 plus some buffer)
+    const MAX_RHO_POWERS: usize = 45;
+    let mut rho_pows = [SCALAR_ZERO; MAX_RHO_POWERS];
+    rho_pows[0] = SCALAR_ONE;
+    rho_pows[1] = challenges.rho;
+    for i in 2..MAX_RHO_POWERS {
+        rho_pows[i] = fr_mul(&rho_pows[i - 1], &challenges.rho);
+    }
 
     // We compute P0 as the MSM of all commitments with their scalars
     // Solidity order:
@@ -434,9 +1118,8 @@ fn compute_p0_full(
     // scalars[i+2] = -unshifted * rho^(i+1) for i = 0..num_commitments
     // Note: batchingChallenge starts at rho, so first scalar is -unshifted * rho
     let num_vk_commitments = vk.num_commitments;
-    let mut rho_pow = challenges.rho;
     for i in 0..num_vk_commitments {
-        let scalar = fr_mul(&neg_unshifted, &rho_pow);
+        let scalar = fr_mul(&neg_unshifted, &rho_pows[i + 1]);
         let commitment = vk.commitments[i];
         let scaled = ops::g1_scalar_mul(&commitment, &scalar).map_err(|_| "G1 mul failed")?;
         p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
@@ -445,8 +1128,14 @@ fn compute_p0_full(
         if i < 3 || i == num_vk_commitments - 1 {
             crate::dbg_fr!(&format!("VK[{}] scalar (rho^{})", i, i + 1), &scalar);
         }
+    }
+    // Track rho index for wire commitments
+    let mut rho_idx = num_vk_commitments + 1;
 
-        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("MSM: after VK comms");
+        solana_program::log::sol_log_compute_units();
     }
 
     #[cfg(feature = "debug")]
@@ -454,10 +1143,10 @@ fn compute_p0_full(
         crate::dbg_g1!("P0 after VK commitments", &p0);
         crate::dbg_fr!(
             &format!(
-                "rho_pow after VK (should be rho^{})",
+                "rho_pows[0] after VK (should be rho^{})",
                 num_vk_commitments + 1
             ),
-            &rho_pow
+            &rho_pows[0]
         );
     }
 
@@ -479,9 +1168,9 @@ fn compute_p0_full(
         let commitment = proof.witness_commitment(our_idx);
 
         // Solidity scalars[30..38] start with unshifted scalar contribution
-        // After VK loop (28 iterations), rho_pow = rho^29
-        // Wire scalars use rho^29, rho^30, ..., rho^36
-        let mut scalar = fr_mul(&neg_unshifted, &rho_pow);
+        // After VK loop (27 iterations), rho_idx = 28
+        // Wire scalars use rho^28, rho^29, ..., rho^35
+        let mut scalar = fr_mul(&neg_unshifted, &rho_pows[rho_idx]);
 
         #[cfg(feature = "debug")]
         {
@@ -494,16 +1183,13 @@ fn compute_p0_full(
         // For shifted commitments (indices 30-34 in Solidity, 0-4 in wire_mapping)
         // we also add the shifted contribution
         if sol_idx < NUMBER_TO_BE_SHIFTED {
-            // Compute the shifted rho power
+            // Use precomputed rho power
             // In Solidity, after unshifted loop (36 iterations starting with rho),
             // batchingChallenge = rho^37
             // So shifted contribution uses rho^(37 + sol_idx)
             // NUMBER_UNSHIFTED = 36, so we need rho^(37 + sol_idx) = rho^(NUMBER_UNSHIFTED + 1 + sol_idx)
             let shifted_rho_idx = NUMBER_UNSHIFTED + 1 + sol_idx; // 37, 38, 39, 40, 41
-            let mut shifted_rho_pow = SCALAR_ONE;
-            for _ in 0..shifted_rho_idx {
-                shifted_rho_pow = fr_mul(&shifted_rho_pow, &challenges.rho);
-            }
+            let shifted_rho_pow = rho_pows[shifted_rho_idx];
             let shifted_contrib = fr_mul(&neg_shifted, &shifted_rho_pow);
 
             #[cfg(feature = "debug")]
@@ -541,12 +1227,18 @@ fn compute_p0_full(
 
         let scaled = ops::g1_scalar_mul(&commitment, &scalar).map_err(|_| "G1 mul failed")?;
         p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
-        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+        rho_idx += 1;
     }
 
     #[cfg(feature = "debug")]
     {
         crate::dbg_g1!("P0 after wire commitments", &p0);
+    }
+
+    #[cfg(feature = "solana")]
+    {
+        solana_program::msg!("MSM: after wire comms");
+        solana_program::log::sol_log_compute_units();
     }
 
     // Add gemini fold commitments with their scalars

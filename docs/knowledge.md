@@ -631,11 +631,32 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 |          | simple_square, iterated_square_100/1000/10k, fib_chain_100          |
 |          | hash_batch (log_n=17), merkle_membership (log_n=18)                 |
 |          | 56 unit tests passing                                               |
-| Dec 2024 | **🚀 ON-CHAIN VERIFICATION (Surfpool)**                             |
-|          | Phase 1 (Challenges): 296K CUs in 6 TXs ✅                          |
-|          | Phase 2 (Sumcheck): 5.1M CUs in 7 TXs ✅                            |
-|          | Phase 3 (MSM): >1.4M CUs - needs splitting                          |
-|          | Batch inversion: **38% savings** (1,065K → 655K CUs per 2 rounds)   |
+| Dec 2024 | **🚀 ON-CHAIN VERIFICATION COMPLETE (Surfpool)**                    |
+|          | Phase 1 (Challenges): 315K CUs in 6 TXs ✅                          |
+|          | Phase 2 (Sumcheck): 5.0M CUs in 4 TXs ✅                            |
+|          | Phase 3 (MSM): 3.3M CUs in 4 TXs ✅                                 |
+|          | Phase 4 (Pairing): 55K CUs in 1 TX ✅                               |
+|          | **Total: 8.7M CUs across 15 transactions** 🎉                       |
+
+---
+
+## Bug Fix: Phase 1d Transcript Divergence (Dec 2024)
+
+**Problem:** Pairing check was failing during multi-TX verification.
+
+**Root Cause:** Three bugs in `generate_challenges_phase1d`:
+
+1. Missing `geminiMaskingEval` before rho challenge
+2. Missing `libra_poly_evals` before shplonk_nu challenge
+3. Using G1 format instead of LIMBED format for shplonk_q commitment
+
+**Debugging Method:**
+
+- Added debug prints for all challenges (eta, beta, gamma, rho, gemini_r, shplonk_nu, shplonk_z)
+- Compared phased execution vs single-pass unit tests
+- Found challenges diverged after phase 1b, traced to missing transcript elements
+
+**Lesson:** When splitting transcript-based verification across transactions, ensure EVERY element is added to the transcript in the exact same order as single-pass verification.
 
 ---
 
@@ -643,14 +664,14 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 
 For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggested-optimizations.md)**:
 
-| Optimization                     | Status  | Impact                     |
-| -------------------------------- | ------- | -------------------------- |
-| Montgomery multiplication        | ✅ Done | **7x faster** field muls   |
-| Batch inversion (sumcheck)       | ✅ Done | **38% savings** per round  |
-| Precompute I_FR constants        | ✅ Done | Avoids fr_from_u64         |
-| Binary Extended GCD              | ✅ Done | Faster inversions          |
-| **Batch inversion (Shplemini)**  | ⏳ Next | Est. 60-130K CUs savings   |
-| **Precompute rho powers**        | ⏳ Next | Est. 150K CUs savings      |
+| Optimization                    | Status  | Impact                    |
+| ------------------------------- | ------- | ------------------------- |
+| Montgomery multiplication       | ✅ Done | **7x faster** field muls  |
+| Batch inversion (sumcheck)      | ✅ Done | **38% savings** per round |
+| Precompute I_FR constants       | ✅ Done | Avoids fr_from_u64        |
+| Binary Extended GCD             | ✅ Done | Faster inversions         |
+| **Batch inversion (Shplemini)** | ⏳ Next | Est. 60-130K CUs savings  |
+| **Precompute rho powers**       | ⏳ Next | Est. 150K CUs savings     |
 
-**Current bottleneck:** Phase 3 (Shplemini MSM) exceeds 1.4M CUs.
-Target the next two optimizations to reduce Phase 3 enough to fit or minimize splits.
+**Current status:** Full verification working across 15 transactions.
+Further optimizations can reduce the number of transactions.

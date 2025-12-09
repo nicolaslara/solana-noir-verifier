@@ -73,6 +73,12 @@ pub use sumcheck::{
     SumcheckRoundsState,
 };
 
+// Re-export incremental shplemini (MSM) types and functions
+pub use shplemini::{
+    shplemini_phase3a, shplemini_phase3b, shplemini_phase3b1, shplemini_phase3b2,
+    shplemini_phase3c, ShpleminiPhase3aResult, ShpleminiPhase3b1Result, ShpleminiPhase3bResult,
+};
+
 /// VK size for new format (bb v0.84.0+)
 /// = 32-byte header + 27 G1 commitments (64 bytes each)
 /// = 32 + 1728 = 1760 bytes

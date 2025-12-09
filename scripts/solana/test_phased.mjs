@@ -38,15 +38,25 @@ const IX_PHASE1E2 = 25;
 // Sub-phased sumcheck verification
 const IX_PHASE2_ROUNDS = 40;  // Takes start_round, end_round in instruction data
 const IX_PHASE2D_RELATIONS = 43;
+// Sub-phased MSM computation
+const IX_PHASE3A_WEIGHTS = 50;
+const IX_PHASE3B1_FOLDING = 51;
+const IX_PHASE3B2_GEMINI = 52;
+const IX_PHASE3C_MSM = 53;
 
 // Constants
 const PROOF_SIZE = 16224;
 const BUFFER_HEADER_SIZE = 5;
-const STATE_SIZE = 3400; // Updated for sumcheck intermediate state
+const STATE_SIZE = 6376; // Updated for fold_pos storage
 const MAX_CHUNK_SIZE = 900;
 
-const proofPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/proof');
-const piPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/public_inputs');
+// Get circuit name from environment or default to simple_square
+const CIRCUIT_NAME = process.env.CIRCUIT || 'simple_square';
+const proofPath = path.join(__dirname, `../../test-circuits/${CIRCUIT_NAME}/target/keccak/proof`);
+const piPath = path.join(__dirname, `../../test-circuits/${CIRCUIT_NAME}/target/keccak/public_inputs`);
+
+// Debug logging - set DEBUG=1 to enable verbose logs
+const DEBUG = process.env.DEBUG === '1';
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -97,6 +107,13 @@ async function executeWithCU(connection, tx, signers, description, skipSimulatio
                 const txDetails = await connection.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
                 cus = txDetails?.meta?.computeUnitsConsumed || cus;
                 console.log(`  ✅ Success! CUs: ${cus}`);
+                // Show full logs only when DEBUG=1
+                if (DEBUG && txDetails?.meta?.logMessages) {
+                    console.log('  Logs:');
+                    for (const log of txDetails.meta.logMessages) {
+                        console.log(`    ${log}`);
+                    }
+                }
                 return { success: true, cus };
             }
         }
@@ -110,6 +127,16 @@ async function executeWithCU(connection, tx, signers, description, skipSimulatio
 
 async function main() {
     console.log('\n=== Phased UltraHonk Verification Test ===\n');
+    console.log(`Circuit: ${CIRCUIT_NAME}`);
+    if (DEBUG) console.log('Debug logging: ENABLED');
+    
+    // WARNING: The on-chain program has an embedded VK for simple_square.
+    // Using a different circuit will fail the pairing check because the VK doesn't match.
+    if (CIRCUIT_NAME !== 'simple_square') {
+        console.log('\n⚠️  WARNING: The on-chain verifier has an embedded VK for simple_square.');
+        console.log('   Different circuits will fail because the VK doesn\'t match.');
+        console.log('   To test other circuits, regenerate the program with a different VK.\n');
+    }
     
     const proof = fs.readFileSync(proofPath);
     const publicInputs = fs.readFileSync(piPath);
@@ -277,9 +304,11 @@ async function main() {
             console.log(`Circuit log_n: ${logN}`);
         }
     }
+
     
-    // Verify 2 rounds per TX
-    const ROUNDS_PER_TX = 2;
+    // Configurable rounds per TX (test with 2, 3, 4, etc.)
+    const ROUNDS_PER_TX = parseInt(process.env.ROUNDS_PER_TX || '4');
+    console.log(`Rounds per TX: ${ROUNDS_PER_TX}`);
     const roundResults = [];
     let allRoundsSuccess = results.phase1.success;
     
@@ -306,11 +335,45 @@ async function main() {
         roundResults 
     };
     
-    // Phase 3: Compute MSM
+    // Phase 3: Compute MSM (split into sub-phases)
     if (results.phase2.success) {
-        results.phase3 = await createPhaseTx(IX_PHASED_COMPUTE_MSM, 'Phase 3: Compute MSM (P0/P1)');
+        // Phase 3a: Weights + scalar accumulation
+        results.phase3a = await createPhaseTx(IX_PHASE3A_WEIGHTS, 'Phase 3a: Weights + scalar accum');
+        
+        // Phase 3b1: Folding only
+        if (results.phase3a?.success) {
+            results.phase3b1 = await createPhaseTx(IX_PHASE3B1_FOLDING, 'Phase 3b1: Folding');
+        } else {
+            results.phase3b1 = { success: false, cus: 0 };
+        }
+        
+        // Phase 3b2: Gemini + libra
+        if (results.phase3b1?.success) {
+            results.phase3b2 = await createPhaseTx(IX_PHASE3B2_GEMINI, 'Phase 3b2: Gemini + libra');
+        } else {
+            results.phase3b2 = { success: false, cus: 0 };
+        }
+        
+        // Phase 3c: MSM computation
+        if (results.phase3b2?.success) {
+            results.phase3c = await createPhaseTx(IX_PHASE3C_MSM, 'Phase 3c: MSM');
+        } else {
+            results.phase3c = { success: false, cus: 0 };
+        }
+        
+        // Aggregate Phase 3 results
+        const phase3Total = (results.phase3a?.cus || 0) + (results.phase3b1?.cus || 0) + 
+                           (results.phase3b2?.cus || 0) + (results.phase3c?.cus || 0);
+        results.phase3 = {
+            success: results.phase3c?.success || false,
+            cus: phase3Total
+        };
     } else {
         results.phase3 = { success: false, cus: 0 };
+        results.phase3a = { success: false, cus: 0 };
+        results.phase3b1 = { success: false, cus: 0 };
+        results.phase3b2 = { success: false, cus: 0 };
+        results.phase3c = { success: false, cus: 0 };
     }
     
     // Phase 4: Final Pairing Check (no proof_data needed)
@@ -318,7 +381,7 @@ async function main() {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
         const ix = new TransactionInstruction({
             keys: [
-                { pubkey: activeStateBuffer.publicKey, isSigner: false, isWritable: true },
+                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
             ],
             programId: PROGRAM_ID,
             data: Buffer.from([IX_PHASED_FINAL_CHECK]),
@@ -349,21 +412,28 @@ async function main() {
     }
     console.log(`  relations:            ${results.phase2d?.success ? '✅' : '❌'} ${(results.phase2d?.cus || 0).toLocaleString()} CUs`);
     
-    console.log('Phase 3-4 - Final Verification:');
-    console.log(`  3 (MSM):              ${results.phase3.success ? '✅' : '❌'} ${results.phase3.cus?.toLocaleString()} CUs`);
+    console.log('Phase 3 - MSM Computation (4 TXs):');
+    console.log(`  3a (weights):         ${results.phase3a?.success ? '✅' : '❌'} ${(results.phase3a?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  3b1 (folding):        ${results.phase3b1?.success ? '✅' : '❌'} ${(results.phase3b1?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  3b2 (gemini+libra):   ${results.phase3b2?.success ? '✅' : '❌'} ${(results.phase3b2?.cus || 0).toLocaleString()} CUs`);
+    console.log(`  3c (MSM):             ${results.phase3c?.success ? '✅' : '❌'} ${(results.phase3c?.cus || 0).toLocaleString()} CUs`);
+    
+    console.log('Phase 4 - Pairing Check (1 TX):');
     console.log(`  4 (Pairing):          ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
     
     const challengeCUs = results.phase1.cus || 0;
     const sumcheckCUs = results.phase2.cus || 0;
-    const finalCUs = (results.phase3.cus || 0) + (results.phase4.cus || 0);
-    const total = challengeCUs + sumcheckCUs + finalCUs;
+    const msmCUs = results.phase3.cus || 0;
+    const pairingCUs = results.phase4.cus || 0;
+    const total = challengeCUs + sumcheckCUs + msmCUs + pairingCUs;
     
     const numRoundTXs = phase2Rounds.length;
-    const totalTXs = 6 + numRoundTXs + 1 + 2; // Phase 1 + rounds + relations + Phase 3-4
+    const totalTXs = 6 + numRoundTXs + 1 + 4 + 1; // Phase 1(6) + rounds + relations + Phase 3(4) + Phase 4(1)
     
     console.log(`\nPhase 1 (Challenges): ${challengeCUs.toLocaleString()} CUs (6 TXs)`);
     console.log(`Phase 2 (Sumcheck):   ${sumcheckCUs.toLocaleString()} CUs (${numRoundTXs + 1} TXs)`);
-    console.log(`Phase 3-4 (Final):    ${finalCUs.toLocaleString()} CUs (2 TXs)`);
+    console.log(`Phase 3 (MSM):        ${msmCUs.toLocaleString()} CUs (4 TXs)`);
+    console.log(`Phase 4 (Pairing):    ${pairingCUs.toLocaleString()} CUs (1 TX)`);
     console.log(`Total: ${total.toLocaleString()} CUs across ${totalTXs} transactions`);
     
     const allSuccess = results.phase1.success && 

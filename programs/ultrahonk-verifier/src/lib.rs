@@ -32,6 +32,11 @@ use plonk_solana_core::{
     generate_challenges_phase1b,
     generate_challenges_phase1c,
     generate_challenges_phase1d,
+    // Incremental shplemini (MSM) verification
+    shplemini_phase3a,
+    shplemini_phase3b1,
+    shplemini_phase3b2,
+    shplemini_phase3c,
     // Incremental sumcheck verification
     sumcheck_rounds_init,
     verify_step1_challenges,
@@ -43,6 +48,9 @@ use plonk_solana_core::{
     Challenges,
     DeltaPartialResult,
     Fr,
+    ShpleminiPhase3aResult,
+    ShpleminiPhase3b1Result,
+    ShpleminiPhase3bResult,
     SumcheckRoundsState,
 };
 use solana_program::{
@@ -167,6 +175,23 @@ pub enum Instruction {
     /// Phase 2d: Relations + final check
     /// Accounts: [state (writable), proof_data (readonly)]
     Phase2dRelations = 43,
+
+    // === Sub-phased MSM computation (splits Phase 3) ===
+    /// Phase 3a: Weights + scalar accumulation (~870K CUs)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase3aWeights = 50,
+
+    /// Phase 3b1: Folding rounds only (~870K CUs)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase3b1Folding = 51,
+
+    /// Phase 3b2: Gemini + libra (~500K CUs)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase3b2Gemini = 52,
+
+    /// Phase 3c: MSM computation (~500K CUs)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase3cMsm = 53,
 }
 
 // ============================================================================
@@ -228,6 +253,12 @@ pub fn process_instruction(
         // Sub-phased sumcheck verification
         40 => process_phase2_rounds(program_id, accounts, instruction_data),
         43 => process_phase2d_relations(program_id, accounts),
+
+        // Sub-phased MSM computation
+        50 => process_phase3a_weights(program_id, accounts),
+        51 => process_phase3b1_folding(program_id, accounts),
+        52 => process_phase3b2_gemini(program_id, accounts),
+        53 => process_phase3c_msm(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -805,6 +836,30 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
     msg!("Running pairing check...");
     sol_log_compute_units();
 
+    // Debug: print first 8 bytes of P0 and P1
+    msg!(
+        "P0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.p0[0],
+        state.p0[1],
+        state.p0[2],
+        state.p0[3],
+        state.p0[4],
+        state.p0[5],
+        state.p0[6],
+        state.p0[7]
+    );
+    msg!(
+        "P1[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.p1[0],
+        state.p1[1],
+        state.p1[2],
+        state.p1[3],
+        state.p1[4],
+        state.p1[5],
+        state.p1[6],
+        state.p1[7]
+    );
+
     // Final pairing check
     let pairing_ok = verify_step4_pairing_check(&state.p0, &state.p1).map_err(|e| {
         msg!("Pairing check failed: {:?}", e);
@@ -981,6 +1036,13 @@ fn process_phase1b_alphas_gates(_program_id: &Pubkey, accounts: &[AccountInfo]) 
     state.transcript_state = result.transcript_state;
     state.set_challenge_sub_phase(phased::ChallengeSubPhase::AlphasGatesDone);
 
+    // Debug: print transcript state after phase 1b
+    msg!(
+        "1b transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.transcript_state[24], state.transcript_state[25], state.transcript_state[26], state.transcript_state[27],
+        state.transcript_state[28], state.transcript_state[29], state.transcript_state[30], state.transcript_state[31]
+    );
+
     msg!("Phase 1b complete");
     sol_log_compute_units();
     Ok(())
@@ -1038,6 +1100,13 @@ fn process_phase1c_sumcheck_half(_program_id: &Pubkey, accounts: &[AccountInfo])
     state.transcript_state = result.transcript_state;
     state.set_challenge_sub_phase(phased::ChallengeSubPhase::SumcheckHalfDone);
 
+    // Debug: print transcript state after phase 1c
+    msg!(
+        "1c transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.transcript_state[24], state.transcript_state[25], state.transcript_state[26], state.transcript_state[27],
+        state.transcript_state[28], state.transcript_state[29], state.transcript_state[30], state.transcript_state[31]
+    );
+
     msg!("Phase 1c complete");
     sol_log_compute_units();
     Ok(())
@@ -1081,6 +1150,19 @@ fn process_phase1d_sumcheck_rest(_program_id: &Pubkey, accounts: &[AccountInfo])
 
     msg!("Generating sumcheck 14-27 + final...");
     sol_log_compute_units();
+
+    // Debug: print transcript state
+    msg!(
+        "transcript_state[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.transcript_state[24],
+        state.transcript_state[25],
+        state.transcript_state[26],
+        state.transcript_state[27],
+        state.transcript_state[28],
+        state.transcript_state[29],
+        state.transcript_state[30],
+        state.transcript_state[31]
+    );
 
     let result = generate_challenges_phase1d(&proof, &state.transcript_state, state.is_zk != 0)
         .map_err(|_| ProgramError::InvalidAccountData)?;
@@ -1441,6 +1523,388 @@ fn process_phase2d_relations(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     state.set_phase(phased::Phase::SumcheckVerified);
 
     msg!("Phase 2d complete - sumcheck verified!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+// ============================================================================
+// Sub-Phased MSM Computation (splits Phase 3)
+// ============================================================================
+
+/// Phase 3a: Compute weights and scalar accumulation (~870K CUs)
+fn process_phase3a_weights(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 3a: weights + scalar accum");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase - we can start from SumcheckVerified or MsmInProgress with Phase3a not done
+    let phase = state.get_phase();
+    if phase != phased::Phase::SumcheckVerified
+        && !(phase == phased::Phase::MsmInProgress
+            && state.get_shplemini_sub_phase() == phased::ShpleminiSubPhase::NotStarted)
+    {
+        msg!("Invalid phase: expected SumcheckVerified or MsmInProgress(NotStarted)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse proof
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges from state
+    let challenges = reconstruct_challenges(state);
+
+    msg!("Computing shplemini phase 3a...");
+    sol_log_compute_units();
+
+    // Compute Phase 3a
+    let result = shplemini_phase3a(&proof, &challenges, state.log_n as usize).map_err(|e| {
+        msg!("Phase 3a failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save intermediate state
+    for (i, r) in result.r_pows.iter().enumerate() {
+        if i < 28 {
+            state.shplemini_r_pows[i] = *r;
+        }
+    }
+    state.shplemini_pos0 = result.pos0;
+    state.shplemini_neg0 = result.neg0;
+    state.shplemini_unshifted = result.unshifted;
+    state.shplemini_shifted = result.shifted;
+    state.shplemini_eval_acc = result.eval_acc;
+
+    state.set_phase(phased::Phase::MsmInProgress);
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3aDone);
+
+    msg!("Phase 3a complete!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 3b1: Folding rounds only (~870K CUs)
+fn process_phase3b1_folding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 3b1: folding");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase
+    if state.get_phase() != phased::Phase::MsmInProgress
+        || state.get_shplemini_sub_phase() != phased::ShpleminiSubPhase::Phase3aDone
+    {
+        msg!("Invalid phase: expected MsmInProgress(Phase3aDone)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse proof
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges and Phase 3a result from state
+    let challenges = reconstruct_challenges(state);
+    let phase3a_result = ShpleminiPhase3aResult {
+        r_pows: state.shplemini_r_pows.to_vec(),
+        pos0: state.shplemini_pos0,
+        neg0: state.shplemini_neg0,
+        unshifted: state.shplemini_unshifted,
+        shifted: state.shplemini_shifted,
+        eval_acc: state.shplemini_eval_acc,
+    };
+
+    msg!("Computing shplemini phase 3b1 (folding)...");
+    sol_log_compute_units();
+
+    // Compute Phase 3b1 (folding only)
+    let result = shplemini_phase3b1(&proof, &challenges, &phase3a_result, state.log_n as usize)
+        .map_err(|e| {
+            msg!("Phase 3b1 failed: {}", e);
+            state.set_phase(phased::Phase::Failed);
+            ProgramError::InvalidAccountData
+        })?;
+
+    // Save fold_pos and const_acc
+    for (i, f) in result.fold_pos.iter().enumerate() {
+        if i < 28 {
+            state.shplemini_fold_pos[i] = *f;
+        }
+    }
+    state.shplemini_const_acc = result.const_acc;
+
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3b1Done);
+
+    msg!("Phase 3b1 complete!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 3b2: Gemini + libra (~500K CUs)
+fn process_phase3b2_gemini(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 3b2: gemini + libra");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase
+    if state.get_phase() != phased::Phase::MsmInProgress
+        || state.get_shplemini_sub_phase() != phased::ShpleminiSubPhase::Phase3b1Done
+    {
+        msg!("Invalid phase: expected MsmInProgress(Phase3b1Done)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse proof
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct from state
+    let challenges = reconstruct_challenges(state);
+    let phase3a_result = ShpleminiPhase3aResult {
+        r_pows: state.shplemini_r_pows.to_vec(),
+        pos0: state.shplemini_pos0,
+        neg0: state.shplemini_neg0,
+        unshifted: state.shplemini_unshifted,
+        shifted: state.shplemini_shifted,
+        eval_acc: state.shplemini_eval_acc,
+    };
+    let phase3b1_result = ShpleminiPhase3b1Result {
+        fold_pos: state.shplemini_fold_pos.to_vec(),
+        const_acc: state.shplemini_const_acc,
+    };
+
+    msg!("Computing shplemini phase 3b2 (gemini+libra)...");
+    sol_log_compute_units();
+
+    // Compute Phase 3b2 (gemini + libra)
+    let result = shplemini_phase3b2(
+        &proof,
+        &challenges,
+        &phase3a_result,
+        &phase3b1_result,
+        state.log_n as usize,
+    )
+    .map_err(|e| {
+        msg!("Phase 3b2 failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save intermediate state
+    state.shplemini_const_acc = result.const_acc;
+    for (i, s) in result.gemini_scalars.iter().enumerate() {
+        if i < 27 {
+            state.shplemini_gemini_scalars[i] = *s;
+        }
+    }
+    for (i, s) in result.libra_scalars.iter().enumerate() {
+        if i < 3 {
+            state.shplemini_libra_scalars[i] = *s;
+        }
+    }
+
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3b2Done);
+
+    msg!("Phase 3b2 complete!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 3c: MSM computation (~500K CUs)
+fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 3c: MSM");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase
+    if state.get_phase() != phased::Phase::MsmInProgress
+        || state.get_shplemini_sub_phase() != phased::ShpleminiSubPhase::Phase3b2Done
+    {
+        msg!("Invalid phase: expected MsmInProgress(Phase3b2Done)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse VK and proof
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges and Phase 3b result from state
+    let challenges = reconstruct_challenges(state);
+
+    // Debug: print key challenge values
+    msg!(
+        "rho[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        challenges.rho[0],
+        challenges.rho[1],
+        challenges.rho[2],
+        challenges.rho[3],
+        challenges.rho[4],
+        challenges.rho[5],
+        challenges.rho[6],
+        challenges.rho[7]
+    );
+    msg!(
+        "const_acc[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.shplemini_const_acc[0],
+        state.shplemini_const_acc[1],
+        state.shplemini_const_acc[2],
+        state.shplemini_const_acc[3],
+        state.shplemini_const_acc[4],
+        state.shplemini_const_acc[5],
+        state.shplemini_const_acc[6],
+        state.shplemini_const_acc[7]
+    );
+    msg!(
+        "unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        state.shplemini_unshifted[0],
+        state.shplemini_unshifted[1],
+        state.shplemini_unshifted[2],
+        state.shplemini_unshifted[3],
+        state.shplemini_unshifted[4],
+        state.shplemini_unshifted[5],
+        state.shplemini_unshifted[6],
+        state.shplemini_unshifted[7]
+    );
+
+    let phase3b_result = ShpleminiPhase3bResult {
+        const_acc: state.shplemini_const_acc,
+        gemini_scalars: state.shplemini_gemini_scalars.to_vec(),
+        libra_scalars: state.shplemini_libra_scalars.to_vec(),
+        r_pows: state.shplemini_r_pows.to_vec(),
+        unshifted: state.shplemini_unshifted,
+        shifted: state.shplemini_shifted,
+    };
+
+    msg!("Computing shplemini phase 3c (MSM)...");
+    sol_log_compute_units();
+
+    // Compute Phase 3c (final MSM)
+    let (p0, p1) = shplemini_phase3c(&proof, &vk, &challenges, &phase3b_result).map_err(|e| {
+        msg!("Phase 3c failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Debug: print first 8 bytes of computed P0 and P1
+    msg!(
+        "Computed P0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        p0[0],
+        p0[1],
+        p0[2],
+        p0[3],
+        p0[4],
+        p0[5],
+        p0[6],
+        p0[7]
+    );
+    msg!(
+        "Computed P1[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        p1[0],
+        p1[1],
+        p1[2],
+        p1[3],
+        p1[4],
+        p1[5],
+        p1[6],
+        p1[7]
+    );
+
+    // Save P0/P1 to state
+    state.p0 = p0;
+    state.p1 = p1;
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Complete);
+    state.set_phase(phased::Phase::MsmComputed);
+
+    msg!("Phase 3c complete - P0/P1 computed!");
     sol_log_compute_units();
     Ok(())
 }
