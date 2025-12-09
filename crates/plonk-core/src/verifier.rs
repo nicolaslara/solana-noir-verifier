@@ -1,6 +1,6 @@
 //! UltraHonk verification logic
 //!
-//! This module implements verification for bb 3.0 UltraHonk proofs.
+//! This module implements verification for bb v0.84.0+ UltraHonk proofs.
 //!
 //! The verification algorithm follows Barretenberg's UltraHonk verifier:
 //! 1. OinkVerifier: Generate relation parameters (eta, beta, gamma) and receive witness commitments
@@ -35,6 +35,7 @@ pub struct RelationParameters {
 pub struct Challenges {
     pub relation_params: RelationParameters,
     pub alpha: Fr,
+    pub alphas: Vec<Fr>,             // All 25 alpha challenges (bb 0.87)
     pub libra_challenge: Option<Fr>, // ZK only
     pub gate_challenges: Vec<Fr>,
     pub sumcheck_challenges: Vec<Fr>,
@@ -47,7 +48,7 @@ pub struct Challenges {
 /// Verify an UltraHonk proof
 ///
 /// # Arguments
-/// * `vk_bytes` - Verification key (1888 bytes)
+/// * `vk_bytes` - Verification key (1760 bytes for new format, 1888 bytes for old format)
 /// * `proof_bytes` - Proof bytes (variable size based on circuit's log_n)
 /// * `public_inputs` - Array of public inputs (32 bytes each, big-endian)
 /// * `is_zk` - Whether this is a ZK proof (true for default Keccak proofs)
@@ -67,14 +68,18 @@ pub fn verify(
     // Get log_circuit_size from VK
     let log_n = vk.log2_circuit_size as usize;
 
-    // Validate public inputs count
-    // The num_public_inputs in VK is the actual count of public inputs for the circuit
-    // (The pairing point object is part of the proof, not public inputs)
-    if public_inputs.len() != vk.num_public_inputs as usize {
+    // Validate public inputs count (bb 0.87)
+    // In bb 0.87, vk.num_public_inputs includes PAIRING_POINTS_SIZE (16) + actual user inputs
+    // User-provided public_inputs should match: vk.num_public_inputs - PAIRING_POINTS_SIZE
+    const PAIRING_POINTS_SIZE: usize = 16;
+    let expected_user_pi = (vk.num_public_inputs as usize).saturating_sub(PAIRING_POINTS_SIZE);
+    if public_inputs.len() != expected_user_pi {
         return Err(VerifyError::PublicInput(alloc::format!(
-            "Expected {} public inputs, got {}",
+            "Expected {} public inputs, got {} (vk.num_public_inputs={}, pairing_points={})",
+            expected_user_pi,
+            public_inputs.len(),
             vk.num_public_inputs,
-            public_inputs.len()
+            PAIRING_POINTS_SIZE
         )));
     }
 
@@ -101,54 +106,23 @@ fn verify_inner(
         return Err(VerifyError::VerificationFailed);
     }
 
-    // Step 3: Compute the batched opening claim (P0, P1 before aggregation)
+    // Step 3: Compute the batched opening claim (P0, P1)
     let (p0, p1) = compute_pairing_points(vk, proof, &challenges)?;
 
     #[cfg(feature = "debug")]
     {
-        crate::trace!("===== PAIRING AGGREGATION =====");
-        crate::dbg_g1!("P0 (before aggregation)", &p0);
-        crate::dbg_g1!("P1 (before aggregation)", &p1);
+        crate::trace!("===== FINAL PAIRING CHECK =====");
+        crate::dbg_g1!("P0", &p0);
+        crate::dbg_g1!("P1", &p1);
     }
 
-    // Step 4: Convert pairing point object to G1 points
-    let ppo = proof.pairing_point_object();
-    let (p0_other, p1_other) = convert_pairing_points_to_g1(ppo)?;
+    // NOTE: bb 0.87 does NOT aggregate with pairing point object here.
+    // The pairing point object is only used as public inputs in computePublicInputDelta.
+    // Skip the old recursion separator aggregation (which was for bb 0.84).
 
-    #[cfg(feature = "debug")]
-    {
-        crate::dbg_g1!("P0_other (from proof)", &p0_other);
-        crate::dbg_g1!("P1_other (from proof)", &p1_other);
-    }
-
-    // Step 5: Generate recursion separator
-    let recursion_separator = generate_recursion_separator(&p0_other, &p1_other, &p0, &p1)?;
-
-    #[cfg(feature = "debug")]
-    {
-        crate::dbg_fr!("recursion_separator", &recursion_separator);
-    }
-
-    // Step 6: Aggregate pairing points
-    // Final P0 = P0 * recursion_separator + P0_other
-    // Final P1 = P1 * recursion_separator + P1_other
-    let p0_scaled = ops::g1_scalar_mul(&p0, &recursion_separator)?;
-    let final_p0 = ops::g1_add(&p0_scaled, &p0_other)?;
-
-    let p1_scaled = ops::g1_scalar_mul(&p1, &recursion_separator)?;
-    let final_p1 = ops::g1_add(&p1_scaled, &p1_other)?;
-
-    #[cfg(feature = "debug")]
-    {
-        crate::dbg_g1!("Final P0", &final_p0);
-        crate::dbg_g1!("Final P1", &final_p1);
-    }
-
-    // Step 7: Final pairing check: e(P0, G2) * e(P1, x·G2) == 1
-    // Equivalently: e(P0, G2) * e(-P1, x·G2) == 1 where P1 is already negated from Shplemini
-    // Actually, Solidity does: pairing(pair.P_0, pair.P_1) which checks e(P0, G2_gen) * e(P1, G2_x) == 1
-    // The G2 points are: G2_generator and x·G2 (from trusted setup)
-    let pairing_result = ops::pairing_check(&[(final_p0, g2_generator()), (final_p1, vk_g2())])?;
+    // Step 4: Final pairing check: e(P0, G2_gen) * e(P1, G2_x) == 1
+    // where G2_x is the x·G2 from the trusted setup
+    let pairing_result = ops::pairing_check(&[(p0, g2_generator()), (p1, vk_g2())])?;
 
     if pairing_result {
         crate::trace!("VERIFICATION PASSED!");
@@ -173,61 +147,52 @@ fn generate_challenges(
     crate::trace!("circuit_size = {}", vk.circuit_size());
     crate::trace!("num_public_inputs = {}", public_inputs.len());
 
-    // VK hash is computed and added to transcript first
-    // This is done by bb's OinkVerifier before anything else
-    let vk_hash = compute_vk_hash(vk);
-    crate::dbg_fr!("vk_hash", &vk_hash);
-    transcript.append_scalar(&vk_hash);
+    // bb 0.87 transcript order for generateEtaChallenge:
+    // [circuitSize, publicInputsSize, pubInputsOffset, publicInputs[], pairingPointObject[16], w1(4 limbs), w2(4 limbs), w3(4 limbs)]
+    // NOTE: No vk_hash in bb 0.87!
 
-    // NOTE: bb does NOT add circuit_size, num_public_inputs, offset to transcript!
-    // Only vk_hash and public_input values are added.
+    // Add circuit metadata (as 32-byte big-endian)
+    let circuit_size = vk.circuit_size() as u64;
+    let public_inputs_size = vk.num_public_inputs as u64; // Total including pairing points
+    let pub_inputs_offset = 1u64; // Standard offset
 
-    // Add public inputs (actual user inputs)
+    transcript.append_u64(circuit_size);
+    transcript.append_u64(public_inputs_size);
+    transcript.append_u64(pub_inputs_offset);
+
+    crate::trace!(
+        "transcript: circuitSize={}, publicInputsSize={}, pubInputsOffset={}",
+        circuit_size,
+        public_inputs_size,
+        pub_inputs_offset
+    );
+
+    // Add user public inputs (actual user inputs, not pairing points)
     for (i, pi) in public_inputs.iter().enumerate() {
         crate::dbg_fr!(&alloc::format!("public_input[{}]", i), pi);
         transcript.append_scalar(pi);
     }
 
-    // Add pairing point object (16 Fr values) - these are also public inputs for DefaultIO
-    // In bb's manifest: public_input_0 = user input, public_input_1..16 = pairing points
+    // Add pairing point object (16 Fr values)
     let ppo = proof.pairing_point_object();
     crate::trace!("pairing_point_object has {} elements", ppo.len());
-    for (i, p) in ppo.iter().enumerate() {
-        if i < 2 {
-            crate::dbg_fr!(&alloc::format!("ppo[{}]", i), p);
-        }
-    }
     for ppo_elem in ppo {
-        transcript.append_scalar(ppo_elem);
+        transcript.append_scalar(&ppo_elem);
     }
 
-    // NOTE: For UltraKeccakZK, gemini_masking is NOT added to transcript before wires!
-    // It's added later as part of the rho challenge buffer (after sumcheck evaluations).
-    // This differs from other ZK flavors which add gemini_masking during Oink.
-
-    // Add first 3 wire commitments (w1, w2, w3)
-    let w1 = proof.wire_commitment(0);
-    let w2 = proof.wire_commitment(1);
-    let w3 = proof.wire_commitment(2);
-    crate::dbg_g1!("w1", &w1);
-    crate::dbg_g1!("w2", &w2);
-    crate::dbg_g1!("w3", &w3);
-    transcript.append_g1(&w1);
-    transcript.append_g1(&w2);
-    transcript.append_g1(&w3);
-
-    // Debug: print transcript buffer size before first challenge
-    #[cfg(all(feature = "debug", not(target_family = "solana")))]
-    {
-        // Print what Solidity expects:
-        // 24 elements: vkHash(1) + pi(1) + ppo(16) + w1(2) + w2(2) + w3(2) = 24 * 32 = 768 bytes
-        crate::trace!(
-            "Transcript buffer before eta: {} + {} + {} + {} = expected 768 bytes",
-            32,
-            32,
-            512,
-            192
-        );
+    // Add first 3 wire commitments (w1, w2, w3) in LIMBED format
+    // bb 0.87 uses 4 limbs per G1 point: [x_0, x_1, y_0, y_1]
+    let w1_limbed = proof.witness_commitment_limbed(0);
+    let w2_limbed = proof.witness_commitment_limbed(1);
+    let w3_limbed = proof.witness_commitment_limbed(2);
+    for limb in &w1_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &w2_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &w3_limbed {
+        transcript.append_scalar(limb);
     }
 
     // Get eta challenges (eta, eta_two, eta_three)
@@ -237,29 +202,28 @@ fn generate_challenges(
     crate::dbg_fr!("eta_two", &eta_two);
     crate::dbg_fr!("eta_three", &eta_three);
 
-    // Add lookup commitments and w4
-    let lookup_read_counts = proof.wire_commitment(3);
-    let lookup_read_tags = proof.wire_commitment(4);
-    let w4 = proof.wire_commitment(5);
-    crate::dbg_g1!("lookup_read_counts", &lookup_read_counts);
-    crate::dbg_g1!("lookup_read_tags", &lookup_read_tags);
-    crate::dbg_g1!("w4", &w4);
-    transcript.append_g1(&lookup_read_counts);
-    transcript.append_g1(&lookup_read_tags);
-    transcript.append_g1(&w4);
+    // Add lookup commitments and w4 in LIMBED format
+    // bb 0.87: [previousChallenge, lookupReadCounts(4), lookupReadTags(4), w4(4)]
+    let lookup_read_counts_limbed = proof.witness_commitment_limbed(3);
+    let lookup_read_tags_limbed = proof.witness_commitment_limbed(4);
+    let w4_limbed = proof.witness_commitment_limbed(5);
+    for limb in &lookup_read_counts_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &lookup_read_tags_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &w4_limbed {
+        transcript.append_scalar(limb);
+    }
 
     // Get beta, gamma challenges
     let (beta, gamma) = transcript.challenge_split();
     crate::dbg_fr!("beta", &beta);
     crate::dbg_fr!("gamma", &gamma);
 
-    // Add lookup_inverses and z_perm
-    let lookup_inverses = proof.wire_commitment(6);
-    let z_perm = proof.wire_commitment(7);
-    crate::dbg_g1!("lookup_inverses", &lookup_inverses);
-    crate::dbg_g1!("z_perm", &z_perm);
-    transcript.append_g1(&lookup_inverses);
-    transcript.append_g1(&z_perm);
+    // NOTE: lookup_inverses and z_perm are NOT appended here!
+    // They're appended in limbed format for alpha challenge generation (see below)
 
     // Convert pairing point object slice to array for compute_public_input_delta_with_ppo
     let ppo_slice = proof.pairing_point_object();
@@ -289,39 +253,85 @@ fn generate_challenges(
     };
 
     // Get alpha challenges (NUM_SUBRELATIONS - 1 = 25 alphas)
-    let alpha = transcript.challenge();
-    crate::dbg_fr!("alpha", &alpha);
+    // bb 0.87: First hash includes lookupInverses + zPerm (limbed format)
+    // Then loop to generate pairs of alphas via split
+    use crate::relations::NUMBER_OF_ALPHAS;
 
-    // Get gate challenge (SPLIT challenge, then expanded to powers via squaring)
-    // gate_challenges = [c, c^2, c^4, c^8, ...]
-    // bb generates log_n gate challenges, not CONST_PROOF_SIZE_LOG_N
-    let (gate_challenge_base, _) = transcript.challenge_split();
-    crate::dbg_fr!("gate_challenge_base", &gate_challenge_base);
+    // Append lookupInverses (4 limbs) + zPerm (4 limbs) for first alpha hash
+    // lookupInverses = witness_commitment(6), zPerm = witness_commitment(7)
+    let lookup_inv_limbed = proof.witness_commitment_limbed(6);
+    let z_perm_limbed = proof.witness_commitment_limbed(7);
+    for limb in &lookup_inv_limbed {
+        transcript.append_scalar(limb);
+    }
+    for limb in &z_perm_limbed {
+        transcript.append_scalar(limb);
+    }
 
-    let mut gate_challenges = Vec::with_capacity(proof.log_n);
-    let mut gc = gate_challenge_base;
-    for i in 0..proof.log_n {
-        if i < 2 {
-            crate::dbg_fr!(&alloc::format!("gate_challenges[{}]", i), &gc);
+    // Generate alphas in pairs via split
+    let mut alphas = Vec::with_capacity(NUMBER_OF_ALPHAS);
+    let (alpha0, alpha1) = transcript.challenge_split();
+    crate::dbg_fr!("alpha[0]", &alpha0);
+    alphas.push(alpha0);
+    alphas.push(alpha1);
+
+    // Loop to generate remaining alphas (pairs)
+    for i in 1..(NUMBER_OF_ALPHAS / 2) {
+        let (a0, a1) = transcript.challenge_split();
+        alphas.push(a0);
+        alphas.push(a1);
+    }
+
+    // If odd number of alphas, generate one more
+    if NUMBER_OF_ALPHAS % 2 == 1 && NUMBER_OF_ALPHAS > 2 {
+        let (a_last, _) = transcript.challenge_split();
+        alphas.push(a_last);
+    }
+
+    // Debug: print all alphas
+    #[cfg(feature = "debug")]
+    {
+        crate::trace!("===== ALL {} ALPHA CHALLENGES =====", alphas.len());
+        for (i, a) in alphas.iter().enumerate() {
+            crate::dbg_fr!(&alloc::format!("alpha[{:2}]", i), a);
         }
-        gate_challenges.push(gc);
-        gc = fr_mul(&gc, &gc); // Square for next power
+    }
+
+    let alpha = alphas[0]; // Keep for compatibility
+
+    // Get gate challenges (bb 0.87: hash CONST_PROOF_SIZE_LOG_N times)
+    // Each iteration: hash(previousChallenge) -> split -> gateChallenges[i]
+    // The final previousChallenge state is then used for libra challenge
+    use crate::proof::CONST_PROOF_SIZE_LOG_N;
+    let mut gate_challenges = Vec::with_capacity(proof.log_n);
+    for i in 0..CONST_PROOF_SIZE_LOG_N {
+        let (gc, _) = transcript.challenge_split();
+        if i < proof.log_n {
+            if i < 2 {
+                crate::dbg_fr!(&alloc::format!("gate_challenges[{}]", i), &gc);
+            }
+            gate_challenges.push(gc);
+        }
     }
 
     // For ZK proofs: add libra commitment and sum, generate libra challenge
     // This happens AFTER gate_challenge but BEFORE sumcheck univariates
     // The initial sumcheck target = libra_sum * libra_challenge
-    // NOTE: libra_challenge uses full challenge (not split)
+    // NOTE: bb 0.87 uses the LIMBED format (4 × 32 bytes) for libra commitment in transcript
+    // NOTE: libra_challenge uses split challenge (lower 128 bits only)
     let libra_challenge = if proof.is_zk {
-        if let Some(libra_concat) = proof.libra_concat_commitment() {
-            crate::dbg_g1!("libra_concat", &libra_concat);
-            transcript.append_g1(&libra_concat);
+        // bb 0.87: append x_0, x_1, y_0, y_1 (limbed format) + libraSum
+        let libra_limbed = proof.libra_commitment_0_limbed();
+        for limb in &libra_limbed {
+            transcript.append_scalar(limb);
         }
-        if let Some(libra_sum) = proof.libra_sum() {
-            crate::dbg_fr!("libra_sum", &libra_sum);
-            transcript.append_scalar(&libra_sum);
-        }
-        let lc = transcript.challenge(); // Full challenge, not split!
+
+        let libra_sum = proof.libra_sum();
+        crate::dbg_fr!("libra_sum", &libra_sum);
+        transcript.append_scalar(&libra_sum);
+
+        // bb 0.87: use split challenge (lower 128 bits)
+        let (lc, _) = transcript.challenge_split();
         crate::dbg_fr!("libra_challenge", &lc);
         Some(lc)
     } else {
@@ -331,14 +341,17 @@ fn generate_challenges(
     // Get sumcheck u challenges
     // Per Solidity verifier: ONE hash per round, take ONLY lower 128 bits, discard upper!
     // See generateSumcheckChallenges in the generated HonkVerifier.sol
+    // IMPORTANT: Solidity loops CONST_PROOF_SIZE_LOG_N times (28), not just log_n!
+    // This affects the transcript state for subsequent challenges
     crate::trace!(
-        "===== SUMCHECK ROUND CHALLENGES (log_n = {}) =====",
-        proof.log_n
+        "===== SUMCHECK ROUND CHALLENGES (log_n = {}, loops = {}) =====",
+        proof.log_n,
+        CONST_PROOF_SIZE_LOG_N
     );
-    let mut sumcheck_challenges = Vec::with_capacity(proof.log_n);
+    let mut sumcheck_challenges = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
 
-    for r in 0..proof.log_n {
-        let univariate = proof.sumcheck_univariate(r);
+    for r in 0..CONST_PROOF_SIZE_LOG_N {
+        let univariate = proof.sumcheck_univariates_for_round(r);
 
         // Add univariate to transcript (one hash per round)
         if r < 3 {
@@ -349,7 +362,7 @@ fn generate_challenges(
                 &univariate[1][0..4]
             );
         }
-        for coeff in univariate {
+        for coeff in &univariate {
             transcript.append_scalar(coeff);
         }
 
@@ -368,47 +381,51 @@ fn generate_challenges(
     if !sumcheck_evals.is_empty() {
         crate::dbg_fr!("sumcheck_eval[0]", &sumcheck_evals[0]);
     }
-    for eval in sumcheck_evals {
+    for eval in &sumcheck_evals {
         transcript.append_scalar(eval);
     }
 
     // For ZK proofs, add additional elements before rho challenge:
     // - libraEvaluation
-    // - libraCommitments[1] (x, y)
-    // - libraCommitments[2] (x, y)
-    // - geminiMaskingPoly (x, y)
+    // - libraCommitments[1] (4 limbs: x_0, x_1, y_0, y_1)
+    // - libraCommitments[2] (4 limbs)
+    // - geminiMaskingPoly (4 limbs)
     // - geminiMaskingEval
+    // Note: Solidity uses limbed format for G1 points here!
     if proof.is_zk {
         // libraEvaluation
-        if let Some(libra_eval) = proof.libra_evaluation() {
-            transcript.append_scalar(&libra_eval);
-            crate::dbg_fr!("rho transcript: libra_eval", &libra_eval);
-        }
+        let libra_eval = proof.libra_evaluation();
+        transcript.append_scalar(&libra_eval);
+        crate::dbg_fr!("rho transcript: libra_eval", &libra_eval);
 
-        // libraCommitments[1] and [2] (these are the "grand sum" and "quotient" commitments)
-        // From Solidity: libraCommitments[1].x, libraCommitments[1].y, libraCommitments[2].x, libraCommitments[2].y
-        if let Some(libra_comms) = proof.libra_commitments() {
-            // libra_comms[0] is already included earlier
-            // libra_comms[1] and libra_comms[2] are added here
-            if libra_comms.len() >= 3 {
-                transcript.append_g1(&libra_comms[1]);
-                transcript.append_g1(&libra_comms[2]);
-                crate::dbg_g1!("rho transcript: libra_comm[1]", &libra_comms[1]);
-                crate::dbg_g1!("rho transcript: libra_comm[2]", &libra_comms[2]);
-            }
+        // libraCommitments[1] in limbed format (4 x 32 bytes)
+        let libra_comm_1_limbed = proof.libra_commitment_1_limbed();
+        for limb in &libra_comm_1_limbed {
+            transcript.append_scalar(limb);
         }
+        crate::dbg_g1!("rho transcript: libra_comm[1]", &proof.libra_commitment_1());
 
-        // geminiMaskingPoly
-        if let Some(masking_poly) = proof.gemini_masking_commitment() {
-            transcript.append_g1(&masking_poly);
-            crate::dbg_g1!("rho transcript: gemini_masking_poly", &masking_poly);
+        // libraCommitments[2] in limbed format
+        let libra_comm_2_limbed = proof.libra_commitment_2_limbed();
+        for limb in &libra_comm_2_limbed {
+            transcript.append_scalar(limb);
         }
+        crate::dbg_g1!("rho transcript: libra_comm[2]", &proof.libra_commitment_2());
+
+        // geminiMaskingPoly in limbed format
+        let masking_poly_limbed = proof.gemini_masking_poly_limbed();
+        for limb in &masking_poly_limbed {
+            transcript.append_scalar(limb);
+        }
+        crate::dbg_g1!(
+            "rho transcript: gemini_masking_poly",
+            &proof.gemini_masking_poly()
+        );
 
         // geminiMaskingEval
-        if let Some(masking_eval) = proof.gemini_masking_eval() {
-            transcript.append_scalar(&masking_eval);
-            crate::dbg_fr!("rho transcript: gemini_masking_eval", &masking_eval);
-        }
+        let masking_eval = proof.gemini_masking_eval();
+        transcript.append_scalar(&masking_eval);
+        crate::dbg_fr!("rho transcript: gemini_masking_eval", &masking_eval);
     }
 
     // Get rho challenge
@@ -416,14 +433,19 @@ fn generate_challenges(
     crate::dbg_fr!("rho", &rho);
 
     // Add Gemini fold commitments to transcript
-    // Note: number of fold comms = log_n - 1
-    crate::trace!("gemini_fold_comms count = {}", proof.log_n - 1);
-    for i in 0..(proof.log_n - 1) {
-        let fold_comm = proof.gemini_fold_comm(i);
+    // Solidity uses CONST_PROOF_SIZE_LOG_N - 1 = 27 fold comms in LIMBED format
+    crate::trace!(
+        "gemini_fold_comms count = {} (CONST_PROOF_SIZE_LOG_N - 1)",
+        CONST_PROOF_SIZE_LOG_N - 1
+    );
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
+        let fold_comm_limbed = proof.gemini_fold_commitment_limbed(i);
         if i == 0 {
-            crate::dbg_g1!("gemini_fold_comm[0]", &fold_comm);
+            crate::dbg_g1!("gemini_fold_comm[0]", &proof.gemini_fold_commitment(0));
         }
-        transcript.append_g1(&fold_comm);
+        for limb in &fold_comm_limbed {
+            transcript.append_scalar(limb);
+        }
     }
 
     // Get gemini_r challenge
@@ -431,19 +453,22 @@ fn generate_challenges(
     crate::dbg_fr!("gemini_r", &gemini_r);
 
     // Add Gemini A evaluations to transcript
-    let gemini_a_evals = proof.gemini_a_evaluations();
-    crate::trace!("gemini_a_evaluations count = {}", gemini_a_evals.len());
-    for eval in gemini_a_evals {
-        transcript.append_scalar(eval);
+    // Solidity uses CONST_PROOF_SIZE_LOG_N = 28 evaluations
+    crate::trace!(
+        "gemini_a_evaluations count = {} (CONST_PROOF_SIZE_LOG_N)",
+        CONST_PROOF_SIZE_LOG_N
+    );
+    for i in 0..CONST_PROOF_SIZE_LOG_N {
+        let eval = proof.gemini_a_evaluation(i);
+        transcript.append_scalar(&eval);
     }
 
     // Add libra poly evals to transcript (ZK only) - required for shplonk_nu challenge
-    // Solidity: shplonkNuChallengeElements = [prevChallenge, geminiAEvals[0..logN], libraPolyEvals[0..4]]
+    // Solidity: shplonkNuChallengeElements = [prevChallenge, geminiAEvals[0..CONST_PROOF_SIZE_LOG_N], libraPolyEvals[0..4]]
     if proof.is_zk {
-        if let Some(libra_evals) = proof.libra_poly_evals() {
-            for eval in libra_evals {
-                transcript.append_scalar(eval);
-            }
+        let libra_evals = proof.libra_poly_evals();
+        for eval in &libra_evals {
+            transcript.append_scalar(eval);
         }
     }
 
@@ -451,10 +476,12 @@ fn generate_challenges(
     let (shplonk_nu, _) = transcript.challenge_split();
     crate::dbg_fr!("shplonk_nu", &shplonk_nu);
 
-    // Add shplonk_q to transcript
-    let shplonk_q = proof.shplonk_q();
-    crate::dbg_g1!("shplonk_q", &shplonk_q);
-    transcript.append_g1(&shplonk_q);
+    // Add shplonk_q to transcript in LIMBED format
+    let shplonk_q_limbed = proof.shplonk_q_limbed();
+    crate::dbg_g1!("shplonk_q", &proof.shplonk_q());
+    for limb in &shplonk_q_limbed {
+        transcript.append_scalar(limb);
+    }
 
     // Get shplonk_z challenge
     let (shplonk_z, _) = transcript.challenge_split();
@@ -464,6 +491,7 @@ fn generate_challenges(
     Ok(Challenges {
         relation_params,
         alpha,
+        alphas,
         libra_challenge,
         gate_challenges,
         sumcheck_challenges,
@@ -516,21 +544,20 @@ fn compute_public_input_delta_with_ppo(
     pairing_point_object: &[Fr; 16],
     beta: &Fr,
     gamma: &Fr,
-    _circuit_size: u32,
+    circuit_size: u32,
     offset: u32,
 ) -> Fr {
-    // CRITICAL: Solidity uses PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28, NOT circuit_size!
-    const PERMUTATION_ARGUMENT_VALUE_SEPARATOR: u64 = 1 << 28;
+    // bb 0.87: Solidity uses N (circuit_size) for numeratorAcc
+    // numeratorAcc = gamma + beta * (N + offset)
+    let n = circuit_size as u64;
 
     let mut numerator = SCALAR_ONE;
     let mut denominator = SCALAR_ONE;
 
-    let offset_fr = fr_from_u64(offset as u64);
-
-    // numerator_acc = gamma + beta * (SEPARATOR + offset)
-    // Solidity: Fr numeratorAcc = gamma + (beta * FrLib.from(PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset));
-    let separator_plus_offset = fr_from_u64(PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset as u64);
-    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &separator_plus_offset));
+    // numerator_acc = gamma + beta * (N + offset)
+    // Solidity: Fr numeratorAcc = gamma + (beta * FrLib.from(N + offset));
+    let n_plus_offset = fr_from_u64(n + offset as u64);
+    let mut numerator_acc = fr_add(gamma, &fr_mul(beta, &n_plus_offset));
 
     // denominator_acc = gamma - beta * (offset + 1)
     let offset_plus_one = fr_from_u64((offset + 1) as u64);
@@ -541,10 +568,8 @@ fn compute_public_input_delta_with_ppo(
         crate::trace!("===== PUBLIC_INPUT_DELTA COMPUTATION =====");
         crate::dbg_fr!("beta", beta);
         crate::dbg_fr!("gamma", gamma);
-        crate::trace!(
-            "separator + offset = {}",
-            PERMUTATION_ARGUMENT_VALUE_SEPARATOR + offset as u64
-        );
+        crate::trace!("N (circuit_size) = {}", n);
+        crate::trace!("N + offset = {}", n + offset as u64);
         crate::dbg_fr!("initial numerator_acc", &numerator_acc);
         crate::dbg_fr!("initial denominator_acc", &denominator_acc);
         crate::trace!(
@@ -604,19 +629,12 @@ fn verify_sumcheck(
         public_inputs_delta: challenges.relation_params.public_input_delta,
     };
 
-    // Generate alpha challenges (NUM_SUBRELATIONS - 1 = 27 alphas)
-    // Solidity: NUMBER_OF_ALPHAS = NUMBER_OF_SUBRELATIONS - 1 = 28 - 1 = 27
-    let mut alphas = Vec::with_capacity(27);
-    let mut alpha_pow = challenges.alpha;
-    for _ in 0..27 {
-        alphas.push(alpha_pow);
-        alpha_pow = fr_mul(&alpha_pow, &challenges.alpha);
-    }
-
+    // Use the 25 individual alphas we generated earlier (not powers of alpha!)
+    // bb 0.87: Each alpha is independently derived from the transcript
     let sumcheck_challenges = SumcheckChallenges {
         gate_challenges: challenges.gate_challenges.clone(),
         sumcheck_u_challenges: challenges.sumcheck_challenges.clone(),
-        alphas,
+        alphas: challenges.alphas.clone(),
     };
 
     // Run sumcheck verification
@@ -650,7 +668,7 @@ fn compute_pairing_points(
 }
 
 /// Get the x·G2 point from the trusted setup
-/// This is hardcoded because bb 3.0 VK format doesn't contain G2 points
+/// This is hardcoded because bb VK format doesn't contain G2 points
 fn vk_g2() -> crate::types::G2 {
     // This is the x·G2 point from the trusted setup (SRS)
     // Used for the second pairing: e(P1, x·G2)
@@ -855,12 +873,28 @@ fn generate_recursion_separator(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::{VK_SIZE_NEW, VK_SIZE_OLD};
     use crate::proof::Proof as ProofStruct;
     use crate::types::SCALAR_ZERO;
-    use crate::VK_SIZE;
 
-    fn create_test_vk() -> [u8; VK_SIZE] {
-        let mut vk = [0u8; VK_SIZE];
+    /// Create a test VK in the NEW format (1760 bytes, bb v0.84.0+)
+    fn create_test_vk() -> Vec<u8> {
+        let mut vk = vec![0u8; VK_SIZE_NEW];
+        // Header: 4 × 8-byte big-endian u64
+        // circuit_size = 64 (at bytes 0-7)
+        vk[7] = 64;
+        // log2_circuit_size = 6 (at bytes 8-15)
+        vk[15] = 6;
+        // num_public_inputs = 1 (at bytes 16-23)
+        vk[23] = 1;
+        // pub_inputs_offset = 1 (at bytes 24-31)
+        vk[31] = 1;
+        vk
+    }
+
+    /// Create a test VK in the OLD format (1888 bytes, legacy)
+    fn create_test_vk_old() -> Vec<u8> {
+        let mut vk = vec![0u8; VK_SIZE_OLD];
         vk[31] = 6; // log2_circuit_size = 6
         vk[63] = 17; // log2_domain_size = 17
         vk[95] = 1; // num_public_inputs = 1
@@ -944,15 +978,17 @@ mod tests {
         println!("Proof size: {} bytes", proof_bytes.len());
         println!("Public inputs size: {} bytes", pi_bytes.len());
 
-        // Parse VK to get log_n
-        assert_eq!(vk_bytes.len(), crate::VK_SIZE, "VK size mismatch");
+        // Parse VK to get log_n (auto-detects format)
+        assert!(
+            vk_bytes.len() == crate::VK_SIZE || vk_bytes.len() == crate::VK_SIZE_OLD,
+            "VK size {} doesn't match new ({}) or old ({}) format",
+            vk_bytes.len(),
+            crate::VK_SIZE,
+            crate::VK_SIZE_OLD
+        );
         let vk = crate::key::VerificationKey::from_bytes(&vk_bytes).expect("Failed to parse VK");
         println!("log2_circuit_size: {}", vk.log2_circuit_size);
         println!("num_public_inputs: {}", vk.num_public_inputs);
-
-        // Prepare arrays
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
 
         // Parse public inputs (each is 32 bytes)
         let num_pi = pi_bytes.len() / 32;
@@ -968,7 +1004,7 @@ mod tests {
 
         // Run verification (ZK)
         println!("\n--- Running verification (ZK) ---\n");
-        let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+        let result = verify(&vk_bytes, &proof_bytes, &public_inputs, true);
 
         match result {
             Ok(()) => println!("\n✅ VERIFICATION PASSED!"),
@@ -1014,10 +1050,6 @@ mod tests {
         println!("Proof size: {} bytes", proof_bytes.len());
         println!("Public inputs size: {} bytes", pi_bytes.len());
 
-        // Prepare arrays
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
-
         // Parse public inputs
         let num_pi = pi_bytes.len() / 32;
         let mut public_inputs = Vec::new();
@@ -1029,7 +1061,7 @@ mod tests {
 
         // Run verification (non-ZK)
         println!("\n--- Running verification (non-ZK) ---\n");
-        let result = verify(&vk_array, &proof_bytes, &public_inputs, false);
+        let result = verify(&vk_bytes, &proof_bytes, &public_inputs, false);
 
         match result {
             Ok(()) => println!("\n✅ NON-ZK VERIFICATION PASSED!"),
@@ -1092,8 +1124,14 @@ mod tests {
             return;
         };
 
-        // Verify sizes match expected
-        assert_eq!(vk_bytes.len(), crate::VK_SIZE, "VK size mismatch");
+        // Verify sizes match expected (either old or new format)
+        assert!(
+            vk_bytes.len() == crate::VK_SIZE || vk_bytes.len() == crate::VK_SIZE_OLD,
+            "VK size {} doesn't match new ({}) or old ({}) format",
+            vk_bytes.len(),
+            crate::VK_SIZE,
+            crate::VK_SIZE_OLD
+        );
         assert_eq!(pi_bytes.len(), 32, "Expected 1 public input (32 bytes)");
 
         // Parse public inputs
@@ -1107,12 +1145,8 @@ mod tests {
         expected_pi[31] = 9; // Big-endian: 9 in last byte
         assert_eq!(pi, expected_pi, "Public input should be y = 9");
 
-        // Prepare VK array
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
-
-        // Verify - this should pass
-        let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+        // Verify - this should pass (verify accepts &[u8] for VK)
+        let result = verify(&vk_bytes, &proof_bytes, &public_inputs, true);
         assert!(
             result.is_ok(),
             "Valid proof should verify: {:?}",
@@ -1130,10 +1164,6 @@ mod tests {
             println!("⚠️  Test artifacts not found. Skipping test.");
             return;
         };
-
-        // Prepare VK
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
 
         // Prepare public inputs
         let mut pi = [0u8; 32];
@@ -1159,7 +1189,7 @@ mod tests {
             // Flip all bits in one byte
             tampered_proof[*offset] ^= 0xFF;
 
-            let result = verify(&vk_array, &tampered_proof, &public_inputs, true);
+            let result = verify(&vk_bytes, &tampered_proof, &public_inputs, true);
             assert!(
                 result.is_err(),
                 "Tampered proof (at {}: {}) should NOT verify",
@@ -1178,10 +1208,6 @@ mod tests {
             println!("⚠️  Test artifacts not found. Skipping test.");
             return;
         };
-
-        // Prepare VK
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
 
         // Test with wrong public input values
         let wrong_inputs = [
@@ -1202,7 +1228,7 @@ mod tests {
             wrong_pi[24..32].copy_from_slice(&value_bytes);
 
             let public_inputs = vec![wrong_pi];
-            let result = verify(&vk_array, &proof_bytes, &public_inputs, true);
+            let result = verify(&vk_bytes, &proof_bytes, &public_inputs, true);
             assert!(
                 result.is_err(),
                 "Wrong public input ({}) should NOT verify",
@@ -1219,9 +1245,6 @@ mod tests {
             return;
         };
 
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
-
         let mut pi = [0u8; 32];
         pi.copy_from_slice(&pi_bytes[0..32]);
         let public_inputs = vec![pi];
@@ -1231,7 +1254,7 @@ mod tests {
 
         for size in truncation_sizes {
             let truncated = &proof_bytes[..size];
-            let result = verify(&vk_array, truncated, &public_inputs, true);
+            let result = verify(&vk_bytes, truncated, &public_inputs, true);
             assert!(
                 result.is_err(),
                 "Truncated proof (size={}) should NOT verify",
@@ -1243,6 +1266,7 @@ mod tests {
     /// Test 5: Verify proof structure matches theory documentation
     ///
     /// Cross-reference with docs/theory.md Section 12 (Data Formats)
+    /// Updated for bb 0.87 format with fixed-size proofs.
     #[test]
     fn test_proof_structure_matches_theory() {
         let Some((vk_bytes, proof_bytes, _pi_bytes)) = load_test_artifacts() else {
@@ -1250,44 +1274,128 @@ mod tests {
             return;
         };
 
-        // Per theory.md Section 12:
-        // - VK: 1888 bytes (96 header + 28 * 64 commitments)
-        assert_eq!(vk_bytes.len(), 1888, "VK size per theory.md");
+        // VK size depends on format:
+        // - bb 0.87: 1760 bytes (32 header + 27 * 64 commitments)
+        // - bb 0.84: 1888 bytes (96 header + 28 * 64 commitments)
+        assert!(
+            vk_bytes.len() == crate::VK_SIZE || vk_bytes.len() == crate::VK_SIZE_OLD,
+            "VK size {} doesn't match new ({}) or old ({}) format",
+            vk_bytes.len(),
+            crate::VK_SIZE,
+            crate::VK_SIZE_OLD
+        );
 
-        // Parse VK header
-        let log2_circuit = vk_bytes[31] as usize;
-        let log2_domain = vk_bytes[63] as usize;
-        let num_public_inputs = vk_bytes[95] as usize;
+        // Parse VK - use the VK parser to get correct values
+        let vk = crate::key::VerificationKey::from_bytes(&vk_bytes).expect("VK should parse");
+        let log2_circuit = vk.log2_circuit_size as usize;
+        let num_public_inputs = vk.num_public_inputs as usize;
 
-        assert_eq!(log2_circuit, 6, "log2_circuit_size should be 6");
-        assert_eq!(log2_domain, 17, "log2_domain_size should be 17");
-        assert_eq!(num_public_inputs, 1, "num_public_inputs should be 1");
+        // Our test circuit (simple_square) has log_n=12 with bb 0.87
+        assert_eq!(
+            log2_circuit, 12,
+            "log2_circuit_size should be 12 for simple_square"
+        );
+        // bb 0.87: 17 public inputs (1 user + 16 pairing points)
+        assert_eq!(num_public_inputs, 17, "num_public_inputs should be 17");
 
-        // Per theory.md: ZK proof with log_n=6 has 162 Fr elements = 5184 bytes
-        let expected_proof_size = 162 * 32;
+        // bb 0.87: ZK proofs are FIXED SIZE (507 Fr = 16224 bytes)
+        let expected_proof_size = crate::proof::Proof::expected_size_bytes(true);
         assert_eq!(
             proof_bytes.len(),
             expected_proof_size,
-            "Proof size should match theory.md (162 Fr elements for ZK with log_n=6)"
+            "Proof size should match bb 0.87 ZK format (507 Fr elements)"
         );
 
-        // Verify proof structure offsets (per theory.md Section 12)
+        // Verify proof structure offsets for bb 0.87:
         // Pairing Point Object: 16 Fr = 512 bytes at offset 0
-        // Witness Commitments: 8 G1 = 512 bytes starting at offset 512
+        // Witness Commitments: 8 G1 (limbed) = 8 * 128 = 1024 bytes
         let _ppo_start = 0;
         let _ppo_end = 512;
         let _witness_start = 512;
-        let _witness_end = 1024;
+        let _witness_end = 1536; // 512 + 1024
 
         // Just verify the proof parses without error
         let proof = crate::proof::Proof::from_bytes(&proof_bytes, log2_circuit, true);
         assert!(proof.is_ok(), "Proof should parse: {:?}", proof.err());
     }
 
-    /// Test 6: Verify VK hash matches expected value
+    /// Test 6: Verify proof size formula works for different circuit sizes
     ///
-    /// The VK hash is the first element added to the Fiat-Shamir transcript.
-    /// Per docs/theory.md, this must match bb's output.
+    /// Our implementation dynamically sizes proofs based on log_circuit_size (log_n),
+    /// bb 0.87 uses FIXED-SIZE proofs based on CONST_PROOF_SIZE_LOG_N=28.
+    /// All proofs (regardless of actual circuit log_n) have the same size.
+    /// This test validates that our proof parsing handles various circuit sizes.
+    #[test]
+    fn test_variable_circuit_size_support() {
+        use crate::proof::Proof;
+
+        // Test that our parser accepts different log_n values
+        // In bb 0.87, proof size is FIXED based on CONST_PROOF_SIZE_LOG_N=28
+        let test_cases = vec![
+            (6, true),   // Small circuit
+            (10, true),  // Medium circuit
+            (12, true),  // Our test circuit
+            (15, true),  // Larger circuit
+            (20, true),  // Large circuit
+            (6, false),  // Non-ZK variant
+            (20, false), // Non-ZK larger
+        ];
+
+        // All ZK proofs should have the same size in bb 0.87
+        let expected_zk_size = Proof::expected_size_bytes(true);
+        let expected_non_zk_size = Proof::expected_size_bytes(false);
+
+        for (log_n, is_zk) in test_cases.iter() {
+            let size = Proof::expected_size(*log_n, *is_zk);
+            let expected = if *is_zk {
+                expected_zk_size
+            } else {
+                expected_non_zk_size
+            };
+
+            // All proofs of the same type should have the same size (FIXED)
+            assert_eq!(
+                size * 32,
+                expected,
+                "Proof size should be fixed: log_n={} is_zk={} size={}",
+                log_n,
+                is_zk,
+                size * 32
+            );
+
+            // Verify we can create a dummy proof of this size
+            let bytes = vec![0u8; expected];
+            let result = Proof::from_bytes(&bytes, *log_n, *is_zk);
+            assert!(
+                result.is_ok(),
+                "Should parse proof with log_n={}, is_zk={}: {:?}",
+                log_n,
+                is_zk,
+                result.err()
+            );
+        }
+
+        // Document the size range
+        let min_size = Proof::expected_size(1, false) * 32;
+        let max_size = Proof::expected_size(28, true) * 32;
+        println!(
+            "Supported proof size range: {} - {} bytes",
+            min_size, max_size
+        );
+        println!(
+            "  log_n=6 (our test):  {} bytes",
+            Proof::expected_size(6, true) * 32
+        );
+        println!(
+            "  log_n=28 (maximum):  {} bytes",
+            Proof::expected_size(28, true) * 32
+        );
+    }
+
+    /// Test 7: Verify VK hash matches expected value
+    ///
+    /// Note: In bb 0.87, VK hash is NOT used in the transcript initialization.
+    /// This test just verifies VK hash computation is deterministic.
     #[test]
     fn test_vk_hash_computation() {
         let Some((vk_bytes, _proof_bytes, _pi_bytes)) = load_test_artifacts() else {
@@ -1295,24 +1403,17 @@ mod tests {
             return;
         };
 
-        let mut vk_array = [0u8; crate::VK_SIZE];
-        vk_array.copy_from_slice(&vk_bytes);
-
-        let vk = crate::key::VerificationKey::from_bytes(&vk_array).unwrap();
+        let vk = crate::key::VerificationKey::from_bytes(&vk_bytes).unwrap();
         let vk_hash = compute_vk_hash(&vk);
 
-        // Expected VK hash from bb verify output (documented in docs/theory.md)
-        let expected_hash =
-            hex_literal::hex!("093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75");
+        // Verify VK hash is non-zero and deterministic
+        assert_ne!(vk_hash, [0u8; 32], "VK hash should not be zero");
 
-        assert_eq!(
-            vk_hash,
-            expected_hash,
-            "VK hash mismatch - transcript will be wrong!\n\
-             Computed: 0x{}\n\
-             Expected: 0x{}",
-            hex::encode(vk_hash),
-            hex::encode(expected_hash)
-        );
+        // Compute again to verify determinism
+        let vk_hash2 = compute_vk_hash(&vk);
+        assert_eq!(vk_hash, vk_hash2, "VK hash should be deterministic");
+
+        // Log the hash for debugging
+        println!("VK hash: 0x{}", hex::encode(vk_hash));
     }
 }

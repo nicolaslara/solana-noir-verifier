@@ -1,29 +1,33 @@
-//! Proof parsing for bb 3.0 UltraHonk (Keccak)
+//! Proof parsing for bb v0.87.0+ UltraHonk (Keccak)
 //!
-//! ## Key Discovery
+//! ## Key Discovery - bb 0.87 Format Changes
 //!
-//! The proof size is VARIABLE based on `log_circuit_size` (log_n).
-//! It contains sumcheck data sized for the actual circuit, not CONST_PROOF_SIZE_LOG_N=28.
+//! bb 0.87.0 produces **fixed-size proofs** with these characteristics:
+//! - G1 points are 128 bytes (4 × 32 limbed format: x_0, x_1, y_0, y_1)
+//! - Arrays are padded to CONST_PROOF_SIZE_LOG_N = 28
+//! - NUMBER_OF_ENTITIES = 40 (not 41)
+//! - NUMBER_OF_ALPHAS = 25 (not 27)
 //!
-//! ## Binary Proof Format (stored as contiguous Fr elements, 32 bytes each)
+//! ## Binary Proof Format for ZK proofs (bb 0.87):
 //!
-//! For ZK proofs (UltraKeccakZKFlavor):
-//! 1. Pairing point object: 16 Fr
-//! 2. Wire commitments: 8 G1 = 16 Fr
-//! 3. Libra concat commitment: 1 G1 = 2 Fr (ZK only)
-//! 4. Libra sum: 1 Fr (ZK only)
-//! 5. Sumcheck univariates: log_n × 8 Fr
-//! 6. Sumcheck evaluations: NUM_ALL_ENTITIES Fr (41 for ZK, 40 for non-ZK)
-//! 7. Libra claimed evaluation: 1 Fr (ZK only)
-//! 8. Libra grand sum commitment: 1 G1 = 2 Fr (ZK only)
-//! 9. Libra quotient commitment: 1 G1 = 2 Fr (ZK only)
-//! 10. Gemini masking commitment: 1 G1 = 2 Fr (ZK only)
-//! 11. Gemini masking evaluation: 1 Fr (ZK only)
-//! 12. Gemini fold commitments: (log_n - 1) G1 = (log_n - 1) × 2 Fr
-//! 13. Gemini A evaluations: log_n Fr
-//! 14. Libra polynomial evaluations: 4 Fr (ZK only) - libraPolyEvals in Solidity
-//! 15. Shplonk Q commitment: 1 G1 = 2 Fr
-//! 16. KZG W commitment: 1 G1 = 2 Fr
+//! 1. Pairing point object: 16 Fr = 512 bytes
+//! 2. w1, w2, w3: 3 × 128 = 384 bytes
+//! 3. lookupReadCounts, lookupReadTags, w4, lookupInverses, zPerm: 5 × 128 = 640 bytes
+//! 4. libraCommitments[0]: 128 bytes
+//! 5. libraSum: 32 bytes
+//! 6. sumcheckUnivariates: 28 × 9 × 32 = 8064 bytes
+//! 7. sumcheckEvaluations: 40 × 32 = 1280 bytes
+//! 8. libraEvaluation: 32 bytes
+//! 9. libraCommitments[1], libraCommitments[2]: 2 × 128 = 256 bytes
+//! 10. geminiMaskingPoly: 128 bytes
+//! 11. geminiMaskingEval: 32 bytes
+//! 12. geminiFoldComms: 27 × 128 = 3456 bytes
+//! 13. geminiAEvaluations: 28 × 32 = 896 bytes
+//! 14. libraPolyEvals: 4 × 32 = 128 bytes
+//! 15. shplonkQ: 128 bytes
+//! 16. kzgQuotient: 128 bytes
+//!
+//! Total ZK proof size: 16224 bytes
 
 use crate::errors::ProofError;
 use crate::types::{Fr, G1};
@@ -31,42 +35,110 @@ use crate::types::{Fr, G1};
 extern crate alloc;
 use alloc::vec::Vec;
 
-/// Number of Fr values in pairing point object
+/// Fixed proof size parameter - proofs are padded to support circuits up to 2^28 gates
+pub const CONST_PROOF_SIZE_LOG_N: usize = 28;
+
+/// Number of Fr values in pairing point object (for recursion support)
 pub const NUM_PAIRING_POINT_FRS: usize = 16;
 
-/// Number of witness commitments
+/// Number of witness commitments (w1, w2, w3, lookupReadCounts, lookupReadTags, w4, lookupInverses, zPerm)
 pub const NUM_WITNESS_COMMS: usize = 8;
 
-/// Number of all entities for sumcheck evaluations
-/// Matches Solidity's NUMBER_OF_ENTITIES = 41
-/// Wire enum has 41 entries (0-40: Q_M through Z_PERM_SHIFT)
-pub const NUM_ALL_ENTITIES: usize = 41;
+/// Number of all entities for sumcheck evaluations (bb 0.87)
+/// Matches Solidity's NUMBER_OF_ENTITIES = 40
+pub const NUM_ALL_ENTITIES: usize = 40;
 
-/// Batched relation partial length (sumcheck univariate degree + 1)
+/// Batched relation partial length for ZK proofs (bb 0.87)
+pub const ZK_BATCHED_RELATION_PARTIAL_LENGTH: usize = 9;
+
+/// Batched relation partial length for non-ZK proofs (bb 0.87)
 pub const BATCHED_RELATION_PARTIAL_LENGTH: usize = 8;
 
-/// ZK-specific extras (Libra-related)
-/// ZK adds: libra_concat(2) + libra_sum(1) + libra_eval(1) + libra_grand_sum(2) +
-///          libra_quotient(2) + gemini_masking(2) + gemini_masking_eval(1) + small_ipa(2) = 13 Fr
-/// Note: ZK also uses BATCHED_RELATION_PARTIAL_LENGTH = 9 instead of 8
-pub const ZK_EXTRA_FRS: usize = 13;
+/// Size of a limbed G1 point in bytes (4 × 32 = 128)
+pub const G1_LIMBED_SIZE: usize = 128;
 
-/// Batched relation partial length for ZK proofs
-pub const BATCHED_RELATION_PARTIAL_LENGTH_ZK: usize = 9;
+/// Size of Fr in bytes
+pub const FR_SIZE: usize = 32;
 
-/// Additional Fr elements observed in actual proofs (likely protocol-specific metadata)
-/// Non-ZK proofs have 1 extra Fr, ZK proofs have 0 extra Fr (libraPolyEvals accounts for it)
-/// TODO: Investigate exact source of these in bb proof serialization
-pub const PROOF_EXTRA_FR_NON_ZK: usize = 1;
-pub const PROOF_EXTRA_FR_ZK: usize = 0;
+/// Expected ZK proof size for bb 0.87 (fixed size for all circuits)
+pub const EXPECTED_ZK_PROOF_SIZE: usize = 16224;
 
-/// Parsed UltraHonk proof with semantic structure
+/// Expected non-ZK proof size for bb 0.87 (fixed size for all circuits)
+pub const EXPECTED_NON_ZK_PROOF_SIZE: usize = 14592;
+
+/// Convert a limbed G1 point (128 bytes) to standard G1 format (64 bytes)
+///
+/// Limbed format: x_0 (32) || x_1 (32) || y_0 (32) || y_1 (32)
+/// Standard format: x (32) || y (32)
+///
+/// Reconstruction: x = x_0 | (x_1 << 136), y = y_0 | (y_1 << 136)
+pub fn g1_from_limbed(limbed: &[u8; G1_LIMBED_SIZE]) -> G1 {
+    let mut result = [0u8; 64];
+
+    // x_0 is the lower 136 bits of x (stored in first 32 bytes, but only lower 17 bytes matter)
+    // x_1 is the upper 120 bits of x (stored in second 32 bytes, but only lower 15 bytes matter)
+    // Reconstruction: x = x_0 | (x_1 << 136)
+    //
+    // Since we're dealing with BN254 where coordinates are 254 bits:
+    // - x_0 contains bits 0-135 (but padded to 256 bits)
+    // - x_1 contains bits 136-253 (but padded to 256 bits)
+
+    // For x coordinate:
+    // The limbed representation stores x_0 and x_1 as big-endian 256-bit integers
+    // x_0 = limbed[0..32], x_1 = limbed[32..64]
+    // x = x_0 + (x_1 << 136)
+    //
+    // In big-endian bytes, this means:
+    // - x_0's significant bytes are at the END (bytes 15-31 for 136 bits = 17 bytes)
+    // - x_1's significant bytes are at the END (bytes 17-31 for 120 bits = 15 bytes)
+
+    // Reconstruct x = x_0 | (x_1 << 136)
+    let x = reconstruct_coordinate(&limbed[0..64]);
+    result[0..32].copy_from_slice(&x);
+
+    // Reconstruct y = y_0 | (y_1 << 136)
+    let y = reconstruct_coordinate(&limbed[64..128]);
+    result[32..64].copy_from_slice(&y);
+
+    result
+}
+
+/// Reconstruct a 256-bit coordinate from limbed representation
+/// Input: 64 bytes = x_0 (32 bytes) || x_1 (32 bytes)
+/// Output: 32 bytes = x_0 | (x_1 << 136)
+fn reconstruct_coordinate(limbs: &[u8]) -> [u8; 32] {
+    let mut result = [0u8; 32];
+
+    // limbs[0..32] = x_0 (lower 136 bits, big-endian padded to 256 bits)
+    // limbs[32..64] = x_1 (upper 120 bits, big-endian padded to 256 bits)
+
+    // The shift by 136 bits = 17 bytes
+    // x = x_0 + (x_1 << 136)
+    //
+    // In big-endian, x_1 << 136 means the lower 15 bytes of x_1 become the upper 15 bytes of x
+    // and x_0's lower 17 bytes become the lower 17 bytes of x
+
+    // Start with x_0 (copy lower 17 bytes which contain bits 0-135)
+    // Big-endian: bytes 15-31 of x_0 contain the significant bits
+    result[15..32].copy_from_slice(&limbs[15..32]);
+
+    // Add x_1 << 136 (copy lower 15 bytes which contain bits 136-253)
+    // Big-endian: bytes 17-31 of x_1 contain the significant bits
+    // These go to bytes 0-14 of result
+    for i in 0..15 {
+        result[i] = limbs[32 + 17 + i];
+    }
+
+    result
+}
+
+/// Parsed UltraHonk proof with semantic structure (bb 0.87 format)
 #[derive(Debug, Clone)]
 pub struct Proof {
-    /// Raw proof data as Fr elements
-    pub data: Vec<Fr>,
+    /// Raw proof data as bytes
+    pub raw_data: Vec<u8>,
 
-    /// log2 of circuit size (from VK)
+    /// log2 of circuit size (from VK, actual circuit size)
     pub log_n: usize,
 
     /// Whether this is a ZK proof
@@ -74,459 +146,504 @@ pub struct Proof {
 }
 
 impl Proof {
+    /// Calculate expected proof size in bytes for bb 0.87
+    ///
+    /// bb 0.87 produces fixed-size proofs padded to CONST_PROOF_SIZE_LOG_N = 28
+    pub fn expected_size_bytes(is_zk: bool) -> usize {
+        if is_zk {
+            EXPECTED_ZK_PROOF_SIZE
+        } else {
+            EXPECTED_NON_ZK_PROOF_SIZE
+        }
+    }
+
     /// Calculate expected proof size in Fr elements
     pub fn expected_size(log_n: usize, is_zk: bool) -> usize {
-        let mut size = 0;
-
-        // Pairing point object
-        size += NUM_PAIRING_POINT_FRS;
-
-        // Wire commitments (8 G1 = 16 Fr)
-        size += NUM_WITNESS_COMMS * 2;
-
-        if is_zk {
-            // Libra concat commitment (1 G1 = 2 Fr)
-            size += 2;
-            // Libra sum (1 Fr)
-            size += 1;
-        }
-
-        // Sumcheck univariates
-        // ZK uses 9 coefficients per round, non-ZK uses 8
-        let univariate_len = if is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
-        } else {
-            BATCHED_RELATION_PARTIAL_LENGTH
-        };
-        size += log_n * univariate_len;
-
-        // Sumcheck evaluations (41 entities for both ZK and non-ZK)
-        size += NUM_ALL_ENTITIES;
-
-        if is_zk {
-            // Libra claimed evaluation (1 Fr)
-            size += 1;
-            // Libra grand sum commitment (1 G1 = 2 Fr)
-            size += 2;
-            // Libra quotient commitment (1 G1 = 2 Fr)
-            size += 2;
-            // Gemini masking commitment (1 G1 = 2 Fr)
-            size += 2;
-            // Gemini masking evaluation (1 Fr)
-            size += 1;
-        }
-
-        // Gemini fold commitments ((log_n - 1) G1)
-        size += (log_n - 1) * 2;
-
-        // Gemini A evaluations (log_n Fr)
-        size += log_n;
-
-        if is_zk {
-            // Libra polynomial evaluations (4 Fr for ZK) - libraPolyEvals in Solidity
-            size += 4;
-        }
-
-        // Shplonk Q commitment (1 G1 = 2 Fr)
-        size += 2;
-
-        // KZG W commitment (1 G1 = 2 Fr)
-        size += 2;
-
-        // Add extra Fr observed in actual proofs
-        // TODO: Investigate exact source in bb proof serialization
-        size += if is_zk {
-            PROOF_EXTRA_FR_ZK
-        } else {
-            PROOF_EXTRA_FR_NON_ZK
-        };
-
-        size
+        // For bb 0.87, the proof size is fixed regardless of log_n
+        let _ = log_n; // Unused, kept for API compatibility
+        Self::expected_size_bytes(is_zk) / FR_SIZE
     }
 
-    /// Parse proof from bb 3.0 binary format
+    /// Parse proof from bb 0.87 binary format
     ///
     /// # Arguments
-    /// * `bytes` - Raw proof bytes (must be multiple of 32)
-    /// * `log_n` - log2 of circuit size from VK
-    /// * `is_zk` - Whether this is a ZK proof (default true for Keccak)
+    /// * `bytes` - Raw proof bytes
+    /// * `log_n` - Circuit's log2 size (from VK)
+    /// * `is_zk` - Whether this is a ZK proof
     pub fn from_bytes(bytes: &[u8], log_n: usize, is_zk: bool) -> Result<Self, ProofError> {
-        if bytes.len() % 32 != 0 {
+        let expected = Self::expected_size_bytes(is_zk);
+
+        if bytes.len() != expected {
             return Err(ProofError::InvalidSize {
-                expected: bytes.len() - (bytes.len() % 32),
+                expected,
                 actual: bytes.len(),
             });
         }
 
-        let expected_fr = Self::expected_size(log_n, is_zk);
-        let actual_fr = bytes.len() / 32;
-
-        if actual_fr != expected_fr {
-            return Err(ProofError::InvalidSize {
-                expected: expected_fr * 32,
-                actual: bytes.len(),
-            });
-        }
-
-        // Parse as vector of Fr elements
-        let mut data = Vec::with_capacity(actual_fr);
-        for i in 0..actual_fr {
-            let mut fr = [0u8; 32];
-            fr.copy_from_slice(&bytes[i * 32..(i + 1) * 32]);
-            data.push(fr);
-        }
-
-        Ok(Proof { data, log_n, is_zk })
+        Ok(Proof {
+            raw_data: bytes.to_vec(),
+            log_n,
+            is_zk,
+        })
     }
 
-    /// Get pairing point object (16 Fr values)
-    pub fn pairing_point_object(&self) -> &[Fr] {
-        &self.data[0..NUM_PAIRING_POINT_FRS]
+    // ========== Byte offset calculations for bb 0.87 format ==========
+
+    /// Offset where pairing point object starts
+    fn pairing_point_offset(&self) -> usize {
+        0
     }
 
-    /// Get the gemini masking commitment (ZK only)
-    /// This is AFTER sumcheck evaluations: pairing(16) + wires(16) + libra(3) + univariates + evals + libra_post(5)
-    pub fn gemini_masking_commitment(&self) -> Option<G1> {
-        if !self.is_zk {
-            return None;
+    /// Offset where witness commitments start
+    fn witness_comms_offset(&self) -> usize {
+        self.pairing_point_offset() + NUM_PAIRING_POINT_FRS * FR_SIZE
+    }
+
+    /// Offset where libraCommitments[0] starts (ZK only)
+    fn libra_comm0_offset(&self) -> usize {
+        self.witness_comms_offset() + NUM_WITNESS_COMMS * G1_LIMBED_SIZE
+    }
+
+    /// Offset where libraSum starts (ZK only)
+    fn libra_sum_offset(&self) -> usize {
+        self.libra_comm0_offset() + G1_LIMBED_SIZE
+    }
+
+    /// Offset where sumcheck univariates start
+    fn sumcheck_univariates_offset(&self) -> usize {
+        if self.is_zk {
+            self.libra_sum_offset() + FR_SIZE
+        } else {
+            self.witness_comms_offset() + NUM_WITNESS_COMMS * G1_LIMBED_SIZE
         }
-        // ZK structure: pairing(16) + wires(16) + libra_concat(2) + libra_sum(1) + univariates + evals + libra_eval(1) + grand_sum(2) + quotient(2)
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
-        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES;
-        let zk_libra_eval_and_comms = 5; // libra_eval(1) + grand_sum(2) + quotient(2)
-
-        let offset =
-            base_offset + zk_libra_start + univariates_size + evals_size + zk_libra_eval_and_comms;
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        Some(g1)
     }
 
-    /// Get wire commitment at index (0-7)
-    /// Returns G1 point as 2 Fr values (x, y)
-    /// Wire commitments come right after pairing point object (no ZK shift!)
+    /// Offset where sumcheck evaluations start
+    fn sumcheck_evals_offset(&self) -> usize {
+        let univariate_len = if self.is_zk {
+            ZK_BATCHED_RELATION_PARTIAL_LENGTH
+        } else {
+            BATCHED_RELATION_PARTIAL_LENGTH
+        };
+        self.sumcheck_univariates_offset() + CONST_PROOF_SIZE_LOG_N * univariate_len * FR_SIZE
+    }
+
+    /// Offset where libraEvaluation starts (ZK only)
+    fn libra_eval_offset(&self) -> usize {
+        self.sumcheck_evals_offset() + NUM_ALL_ENTITIES * FR_SIZE
+    }
+
+    /// Offset where libraCommitments[1] starts (ZK only)
+    fn libra_comm1_offset(&self) -> usize {
+        self.libra_eval_offset() + FR_SIZE
+    }
+
+    /// Offset where libraCommitments[2] starts (ZK only)
+    fn libra_comm2_offset(&self) -> usize {
+        self.libra_comm1_offset() + G1_LIMBED_SIZE
+    }
+
+    /// Offset where geminiMaskingPoly starts (ZK only)
+    fn gemini_masking_poly_offset(&self) -> usize {
+        self.libra_comm2_offset() + G1_LIMBED_SIZE
+    }
+
+    /// Offset where geminiMaskingEval starts (ZK only)
+    fn gemini_masking_eval_offset(&self) -> usize {
+        self.gemini_masking_poly_offset() + G1_LIMBED_SIZE
+    }
+
+    /// Offset where gemini fold commitments start
+    fn gemini_fold_comms_offset(&self) -> usize {
+        if self.is_zk {
+            self.gemini_masking_eval_offset() + FR_SIZE
+        } else {
+            self.sumcheck_evals_offset() + NUM_ALL_ENTITIES * FR_SIZE
+        }
+    }
+
+    /// Offset where gemini A evaluations start
+    fn gemini_a_evals_offset(&self) -> usize {
+        self.gemini_fold_comms_offset() + (CONST_PROOF_SIZE_LOG_N - 1) * G1_LIMBED_SIZE
+    }
+
+    /// Offset where libraPolyEvals start (ZK only)
+    fn libra_poly_evals_offset(&self) -> usize {
+        self.gemini_a_evals_offset() + CONST_PROOF_SIZE_LOG_N * FR_SIZE
+    }
+
+    /// Offset where shplonkQ starts
+    fn shplonk_q_offset(&self) -> usize {
+        if self.is_zk {
+            self.libra_poly_evals_offset() + 4 * FR_SIZE
+        } else {
+            self.gemini_a_evals_offset() + CONST_PROOF_SIZE_LOG_N * FR_SIZE
+        }
+    }
+
+    /// Offset where kzgQuotient starts
+    fn kzg_quotient_offset(&self) -> usize {
+        self.shplonk_q_offset() + G1_LIMBED_SIZE
+    }
+
+    // ========== Accessor methods ==========
+
+    /// Get pairing point object (16 Fr elements)
+    pub fn pairing_point_object(&self) -> [Fr; NUM_PAIRING_POINT_FRS] {
+        let mut result = [[0u8; FR_SIZE]; NUM_PAIRING_POINT_FRS];
+        let offset = self.pairing_point_offset();
+        for i in 0..NUM_PAIRING_POINT_FRS {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
+    }
+
+    /// Get witness commitment by index (0-7)
     /// Order: w1, w2, w3, lookupReadCounts, lookupReadTags, w4, lookupInverses, zPerm
-    pub fn wire_commitment(&self, idx: usize) -> G1 {
+    pub fn witness_commitment(&self, index: usize) -> G1 {
         assert!(
-            idx < NUM_WITNESS_COMMS,
-            "Wire commitment index out of range"
+            index < NUM_WITNESS_COMMS,
+            "Invalid witness commitment index"
         );
-        // Wire commitments start at offset 16 (after pairing point object)
-        // NO ZK shift - gemini_masking is much later in the proof!
-        let offset = NUM_PAIRING_POINT_FRS + idx * 2;
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        g1
+        let offset = self.witness_comms_offset() + index * G1_LIMBED_SIZE;
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
     }
 
-    /// Get the libra sum for ZK proofs
-    /// This is the initial target for sumcheck in ZK mode
-    /// Returns None for non-ZK proofs
-    pub fn libra_sum(&self) -> Option<Fr> {
-        if !self.is_zk {
-            return None;
+    /// Get witness commitment in raw limbed format (4 Fr elements)
+    /// Used for transcript where Solidity uses the limbed format
+    pub fn witness_commitment_limbed(&self, index: usize) -> [Fr; 4] {
+        assert!(
+            index < NUM_WITNESS_COMMS,
+            "Invalid witness commitment index"
+        );
+        let offset = self.witness_comms_offset() + index * G1_LIMBED_SIZE;
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
         }
-        // ZK structure: pairing(16) + wire_comms(16) + libra_concat(2) + libra_sum(1)
-        // libra_sum is at offset 34
-        let offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2 + 2;
-        Some(self.data[offset])
+        result
     }
 
-    /// Get the libra concatenation commitment (ZK only)
-    /// This is libraCommitments[0] in the Solidity verifier
-    pub fn libra_concat_commitment(&self) -> Option<G1> {
-        if !self.is_zk {
-            return None;
+    /// Get W1 commitment
+    pub fn w1(&self) -> G1 {
+        self.witness_commitment(0)
+    }
+
+    /// Get W2 commitment
+    pub fn w2(&self) -> G1 {
+        self.witness_commitment(1)
+    }
+
+    /// Get W3 commitment
+    pub fn w3(&self) -> G1 {
+        self.witness_commitment(2)
+    }
+
+    /// Get W4 commitment (note: index 5 in proof order)
+    pub fn w4(&self) -> G1 {
+        self.witness_commitment(5)
+    }
+
+    /// Get lookupReadCounts commitment (index 3)
+    pub fn lookup_read_counts(&self) -> G1 {
+        self.witness_commitment(3)
+    }
+
+    /// Get lookupReadTags commitment (index 4)
+    pub fn lookup_read_tags(&self) -> G1 {
+        self.witness_commitment(4)
+    }
+
+    /// Get lookupInverses commitment (index 6)
+    pub fn lookup_inverses(&self) -> G1 {
+        self.witness_commitment(6)
+    }
+
+    /// Get zPerm commitment (index 7)
+    pub fn z_perm(&self) -> G1 {
+        self.witness_commitment(7)
+    }
+
+    /// Get libraCommitments[0] (ZK only)
+    pub fn libra_commitment_0(&self) -> G1 {
+        assert!(
+            self.is_zk,
+            "libra_commitment_0 only available for ZK proofs"
+        );
+        let offset = self.libra_comm0_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get libraCommitments[0] in raw limbed format (ZK only)
+    /// Returns [x_0, x_1, y_0, y_1] as 4 Fr elements
+    /// Used for transcript where Solidity uses the limbed format
+    pub fn libra_commitment_0_limbed(&self) -> [Fr; 4] {
+        assert!(
+            self.is_zk,
+            "libra_commitment_0_limbed only available for ZK proofs"
+        );
+        let offset = self.libra_comm0_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
         }
-        // ZK structure: pairing(16) + wire_comms(16) = offset 32
-        let offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        Some(g1)
+        result
     }
 
-    /// Get all 3 libra commitments (ZK only)
-    /// Returns [libra_concat, libra_grand_sum, libra_quotient]
-    pub fn libra_commitments(&self) -> Option<[G1; 3]> {
-        if !self.is_zk {
-            return None;
-        }
-
-        // libra_concat (libraCommitments[0]) is at offset 32
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let mut libra_concat = [0u8; 64];
-        libra_concat[0..32].copy_from_slice(&self.data[base_offset]);
-        libra_concat[32..64].copy_from_slice(&self.data[base_offset + 1]);
-
-        // libra_grand_sum (libraCommitments[1]) and libra_quotient (libraCommitments[2])
-        // are after: libra_concat(2) + libra_sum(1) + univariates + sumcheck_evals(41) + libra_eval(1)
-        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
-        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES;
-        // After evals: libra_eval is at +0, grand_sum is at +1, quotient is at +3
-        let grand_sum_offset = base_offset + zk_libra_start + univariates_size + evals_size + 1;
-
-        let mut libra_grand_sum = [0u8; 64];
-        libra_grand_sum[0..32].copy_from_slice(&self.data[grand_sum_offset]);
-        libra_grand_sum[32..64].copy_from_slice(&self.data[grand_sum_offset + 1]);
-
-        let mut libra_quotient = [0u8; 64];
-        libra_quotient[0..32].copy_from_slice(&self.data[grand_sum_offset + 2]);
-        libra_quotient[32..64].copy_from_slice(&self.data[grand_sum_offset + 3]);
-
-        Some([libra_concat, libra_grand_sum, libra_quotient])
+    /// Get libraSum (ZK only)
+    pub fn libra_sum(&self) -> Fr {
+        assert!(self.is_zk, "libra_sum only available for ZK proofs");
+        let offset = self.libra_sum_offset();
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
     }
 
-    /// Get sumcheck univariates for a specific round
-    /// Returns 8 Fr values for non-ZK or 9 Fr values for ZK
-    pub fn sumcheck_univariate(&self, round: usize) -> &[Fr] {
-        assert!(round < self.log_n, "Round index out of range");
-
-        // Non-ZK: pairing(16) + wire_comms(16) = 32
-        // ZK: pairing(16) + wire_comms(16) + libra_concat(2) + libra_sum(1) = 35
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra = if self.is_zk { 3 } else { 0 }; // libra_concat(2) + libra_sum(1)
-
+    /// Get sumcheck univariate for a specific round and coefficient
+    pub fn sumcheck_univariate(&self, round: usize, coeff: usize) -> Fr {
         let univariate_len = if self.is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
+            ZK_BATCHED_RELATION_PARTIAL_LENGTH
         } else {
             BATCHED_RELATION_PARTIAL_LENGTH
         };
-
-        let offset = base_offset + zk_libra + round * univariate_len;
-        &self.data[offset..offset + univariate_len]
-    }
-
-    /// Get sumcheck evaluations
-    pub fn sumcheck_evaluations(&self) -> &[Fr] {
-        // Offset after: pairing + wire_comms + ZK_libra + sumcheck_univariates
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra = if self.is_zk { 3 } else { 0 }; // libra_concat(2) + libra_sum(1)
-        let univariate_len = if self.is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
-        } else {
-            BATCHED_RELATION_PARTIAL_LENGTH
-        };
-        let univariates_size = self.log_n * univariate_len;
-
-        let offset = base_offset + zk_libra + univariates_size;
-
-        #[cfg(feature = "debug")]
-        {
-            crate::trace!(
-                "sumcheck_evaluations offset: {} (base={}, zk_libra={}, univariates={})",
-                offset,
-                base_offset,
-                zk_libra,
-                univariates_size
-            );
-        }
-
-        &self.data[offset..offset + NUM_ALL_ENTITIES]
-    }
-
-    /// Get libra evaluation (ZK only)
-    /// This is the libraEvaluation used in the ZK adjustment:
-    /// grandHonkRelationSum = grandHonkRelationSum * (1 - evaluation) + libraEvaluation * libraChallenge
-    pub fn libra_evaluation(&self) -> Option<Fr> {
-        if !self.is_zk {
-            return None;
-        }
-        // ZK structure after sumcheck_evaluations:
-        // libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
-        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES;
-
-        let offset = base_offset + zk_libra_start + univariates_size + evals_size;
-
-        #[cfg(feature = "debug")]
-        {
-            crate::trace!(
-                "libra_evaluation offset: {} (base={}, zk_start={}, univs={}, evals={})",
-                offset,
-                base_offset,
-                zk_libra_start,
-                univariates_size,
-                evals_size
-            );
-        }
-
-        Some(self.data[offset])
-    }
-
-    /// Get gemini masking evaluation (ZK only)
-    /// This is the batchedEvaluation starting point in Shplemini
-    pub fn gemini_masking_eval(&self) -> Option<Fr> {
-        if !self.is_zk {
-            return None;
-        }
-        // ZK structure after sumcheck_evaluations:
-        // libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        // masking_eval is at offset 7 (1 + 2 + 2 + 2 = 7)
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
-        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES;
-
-        let offset = base_offset + zk_libra_start + univariates_size + evals_size + 7;
-
-        #[cfg(feature = "debug")]
-        {
-            crate::trace!(
-                "gemini_masking_eval offset: {} (should be geminiMaskingEval)",
-                offset
-            );
-            crate::dbg_fr!("gemini_masking_eval", &self.data[offset]);
-        }
-
-        Some(self.data[offset])
-    }
-
-    /// Get gemini fold commitment at index (0 to log_n-2)
-    pub fn gemini_fold_comm(&self, idx: usize) -> G1 {
-        assert!(idx < self.log_n - 1, "Gemini fold index out of range");
-
-        // Calculate offset (after all prior elements)
-        // ZK: pairing(16) + wires(16) + libra_concat(2) + libra_sum(1) + univariates + evals
-        //     + libra_eval(1) + libra_grand_sum(2) + libra_quotient(2) + gemini_masking(2) + masking_eval(1)
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = if self.is_zk { 3 } else { 0 }; // libra_concat(2) + libra_sum(1)
-        let univariate_len = if self.is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
-        } else {
-            BATCHED_RELATION_PARTIAL_LENGTH
-        };
-        let univariates_size = self.log_n * univariate_len;
-        let evals_size = NUM_ALL_ENTITIES;
-        // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        let zk_post_evals = if self.is_zk { 8 } else { 0 };
+        assert!(round < CONST_PROOF_SIZE_LOG_N, "Invalid round index");
+        assert!(coeff < univariate_len, "Invalid coefficient index");
 
         let offset =
-            base_offset + zk_libra_start + univariates_size + evals_size + zk_post_evals + idx * 2;
-
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        g1
+            self.sumcheck_univariates_offset() + round * univariate_len * FR_SIZE + coeff * FR_SIZE;
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
     }
 
-    /// Get gemini A evaluation at index (0 to log_n-1)
-    pub fn gemini_a_eval(&self, idx: usize) -> &Fr {
-        assert!(idx < self.log_n, "Gemini A eval index out of range");
-
-        // After gemini fold comms
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = if self.is_zk { 3 } else { 0 }; // libra_concat(2) + libra_sum(1)
+    /// Get all sumcheck univariates for a round
+    pub fn sumcheck_univariates_for_round(&self, round: usize) -> Vec<Fr> {
         let univariate_len = if self.is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
+            ZK_BATCHED_RELATION_PARTIAL_LENGTH
         } else {
             BATCHED_RELATION_PARTIAL_LENGTH
         };
-        let univariates_size = self.log_n * univariate_len;
-        let evals_size = NUM_ALL_ENTITIES;
-        // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        let zk_post_evals = if self.is_zk { 8 } else { 0 };
-        let gemini_fold_size = (self.log_n - 1) * 2;
-
-        let offset = base_offset
-            + zk_libra_start
-            + univariates_size
-            + evals_size
-            + zk_post_evals
-            + gemini_fold_size
-            + idx;
-
-        &self.data[offset]
+        (0..univariate_len)
+            .map(|i| self.sumcheck_univariate(round, i))
+            .collect()
     }
 
-    /// Get all gemini A evaluations (log_n values)
-    pub fn gemini_a_evaluations(&self) -> &[Fr] {
-        // After gemini fold comms
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = if self.is_zk { 3 } else { 0 }; // libra_concat(2) + libra_sum(1)
-        let univariate_len = if self.is_zk {
-            BATCHED_RELATION_PARTIAL_LENGTH_ZK
-        } else {
-            BATCHED_RELATION_PARTIAL_LENGTH
-        };
-        let univariates_size = self.log_n * univariate_len;
-        let evals_size = NUM_ALL_ENTITIES;
-        // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        let zk_post_evals = if self.is_zk { 8 } else { 0 };
-        let gemini_fold_size = (self.log_n - 1) * 2;
-
-        let offset = base_offset
-            + zk_libra_start
-            + univariates_size
-            + evals_size
-            + zk_post_evals
-            + gemini_fold_size;
-
-        &self.data[offset..offset + self.log_n]
+    /// Get sumcheck evaluation by index
+    pub fn sumcheck_evaluation(&self, index: usize) -> Fr {
+        assert!(index < NUM_ALL_ENTITIES, "Invalid evaluation index");
+        let offset = self.sumcheck_evals_offset() + index * FR_SIZE;
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
     }
 
-    /// Get libra polynomial evaluations (4 Fr values for ZK proofs)
-    /// These are: libraPolyEvals[0..4] in Solidity
-    /// Used in Shplemini constant term accumulator calculation
-    pub fn libra_poly_evals(&self) -> Option<&[Fr]> {
-        if !self.is_zk {
-            return None;
+    /// Get all sumcheck evaluations
+    pub fn sumcheck_evaluations(&self) -> Vec<Fr> {
+        (0..NUM_ALL_ENTITIES)
+            .map(|i| self.sumcheck_evaluation(i))
+            .collect()
+    }
+
+    /// Get libraEvaluation (ZK only)
+    pub fn libra_evaluation(&self) -> Fr {
+        assert!(self.is_zk, "libra_evaluation only available for ZK proofs");
+        let offset = self.libra_eval_offset();
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
+    }
+
+    /// Get libraCommitments[1] (ZK only)
+    pub fn libra_commitment_1(&self) -> G1 {
+        assert!(
+            self.is_zk,
+            "libra_commitment_1 only available for ZK proofs"
+        );
+        let offset = self.libra_comm1_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get libraCommitments[1] in limbed format [x_0, x_1, y_0, y_1] (ZK only)
+    pub fn libra_commitment_1_limbed(&self) -> [Fr; 4] {
+        assert!(
+            self.is_zk,
+            "libra_commitment_1_limbed only available for ZK proofs"
+        );
+        let offset = self.libra_comm1_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
         }
-        // After gemini A evaluations
-        let base_offset = NUM_PAIRING_POINT_FRS + NUM_WITNESS_COMMS * 2;
-        let zk_libra_start = 3; // libra_concat(2) + libra_sum(1)
-        let univariates_size = self.log_n * BATCHED_RELATION_PARTIAL_LENGTH_ZK;
-        let evals_size = NUM_ALL_ENTITIES;
-        // ZK post-evals: libra_eval(1) + grand_sum(2) + quotient(2) + masking_comm(2) + masking_eval(1) = 8
-        let zk_post_evals = 8;
-        let gemini_fold_size = (self.log_n - 1) * 2;
-        let gemini_a_size = self.log_n;
-
-        let offset = base_offset
-            + zk_libra_start
-            + univariates_size
-            + evals_size
-            + zk_post_evals
-            + gemini_fold_size
-            + gemini_a_size;
-
-        Some(&self.data[offset..offset + 4])
+        result
     }
 
-    /// Get shplonk Q commitment
+    /// Get libraCommitments[2] (ZK only)
+    pub fn libra_commitment_2(&self) -> G1 {
+        assert!(
+            self.is_zk,
+            "libra_commitment_2 only available for ZK proofs"
+        );
+        let offset = self.libra_comm2_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get libraCommitments[2] in limbed format [x_0, x_1, y_0, y_1] (ZK only)
+    pub fn libra_commitment_2_limbed(&self) -> [Fr; 4] {
+        assert!(
+            self.is_zk,
+            "libra_commitment_2_limbed only available for ZK proofs"
+        );
+        let offset = self.libra_comm2_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
+    }
+
+    /// Get geminiMaskingPoly commitment (ZK only)
+    pub fn gemini_masking_poly(&self) -> G1 {
+        assert!(
+            self.is_zk,
+            "gemini_masking_poly only available for ZK proofs"
+        );
+        let offset = self.gemini_masking_poly_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get geminiMaskingPoly in limbed format [x_0, x_1, y_0, y_1] (ZK only)
+    pub fn gemini_masking_poly_limbed(&self) -> [Fr; 4] {
+        assert!(
+            self.is_zk,
+            "gemini_masking_poly_limbed only available for ZK proofs"
+        );
+        let offset = self.gemini_masking_poly_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
+    }
+
+    /// Get geminiMaskingEval (ZK only)
+    pub fn gemini_masking_eval(&self) -> Fr {
+        assert!(
+            self.is_zk,
+            "gemini_masking_eval only available for ZK proofs"
+        );
+        let offset = self.gemini_masking_eval_offset();
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
+    }
+
+    /// Get gemini fold commitment by index (0 to CONST_PROOF_SIZE_LOG_N - 2)
+    pub fn gemini_fold_commitment(&self, index: usize) -> G1 {
+        assert!(
+            index < CONST_PROOF_SIZE_LOG_N - 1,
+            "Invalid gemini fold index"
+        );
+        let offset = self.gemini_fold_comms_offset() + index * G1_LIMBED_SIZE;
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get gemini fold commitment in limbed format [x_0, x_1, y_0, y_1]
+    pub fn gemini_fold_commitment_limbed(&self, index: usize) -> [Fr; 4] {
+        assert!(
+            index < CONST_PROOF_SIZE_LOG_N - 1,
+            "Invalid gemini fold index"
+        );
+        let offset = self.gemini_fold_comms_offset() + index * G1_LIMBED_SIZE;
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
+    }
+
+    /// Get all gemini fold commitments (only first log_n - 1 are meaningful)
+    pub fn gemini_fold_commitments(&self) -> Vec<G1> {
+        // Return only the meaningful ones based on actual circuit size
+        (0..self.log_n.saturating_sub(1))
+            .map(|i| self.gemini_fold_commitment(i))
+            .collect()
+    }
+
+    /// Get gemini A evaluation by index
+    pub fn gemini_a_evaluation(&self, index: usize) -> Fr {
+        assert!(
+            index < CONST_PROOF_SIZE_LOG_N,
+            "Invalid gemini A eval index"
+        );
+        let offset = self.gemini_a_evals_offset() + index * FR_SIZE;
+        let mut result = [0u8; FR_SIZE];
+        result.copy_from_slice(&self.raw_data[offset..offset + FR_SIZE]);
+        result
+    }
+
+    /// Get all gemini A evaluations (only first log_n are meaningful)
+    pub fn gemini_a_evaluations(&self) -> Vec<Fr> {
+        (0..self.log_n)
+            .map(|i| self.gemini_a_evaluation(i))
+            .collect()
+    }
+
+    /// Get libraPolyEvals (ZK only, 4 Fr elements)
+    pub fn libra_poly_evals(&self) -> [Fr; 4] {
+        assert!(self.is_zk, "libra_poly_evals only available for ZK proofs");
+        let offset = self.libra_poly_evals_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
+    }
+
+    /// Get shplonkQ commitment
     pub fn shplonk_q(&self) -> G1 {
-        // Second to last G1 point
-        let offset = self.data.len() - 4;
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        g1
+        let offset = self.shplonk_q_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
+    }
+
+    /// Get shplonkQ in limbed format [x_0, x_1, y_0, y_1]
+    pub fn shplonk_q_limbed(&self) -> [Fr; 4] {
+        let offset = self.shplonk_q_offset();
+        let mut result = [[0u8; FR_SIZE]; 4];
+        for i in 0..4 {
+            result[i]
+                .copy_from_slice(&self.raw_data[offset + i * FR_SIZE..offset + (i + 1) * FR_SIZE]);
+        }
+        result
     }
 
     /// Get KZG quotient commitment
     pub fn kzg_quotient(&self) -> G1 {
-        // Last G1 point
-        let offset = self.data.len() - 2;
-        let mut g1 = [0u8; 64];
-        g1[0..32].copy_from_slice(&self.data[offset]);
-        g1[32..64].copy_from_slice(&self.data[offset + 1]);
-        g1
-    }
-
-    /// Serialize proof back to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.data.len() * 32);
-        for fr in &self.data {
-            bytes.extend_from_slice(fr);
-        }
-        bytes
+        let offset = self.kzg_quotient_offset();
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed.copy_from_slice(&self.raw_data[offset..offset + G1_LIMBED_SIZE]);
+        g1_from_limbed(&limbed)
     }
 }
 
@@ -535,84 +652,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_expected_size_log6_zk() {
-        // For our test circuit with log_n=6 and ZK
-        let expected = Proof::expected_size(6, true);
-        // 162 Fr elements = 5184 bytes
-        assert_eq!(expected, 162);
+    fn test_expected_size_zk() {
+        assert_eq!(Proof::expected_size_bytes(true), 16224);
     }
 
     #[test]
-    fn test_expected_size_log6_non_zk() {
-        // For our test circuit with log_n=6 and non-ZK
-        let expected = Proof::expected_size(6, false);
-        // Non-ZK is smaller
-        assert_eq!(expected, 142);
+    fn test_expected_size_non_zk() {
+        assert_eq!(Proof::expected_size_bytes(false), 14592);
     }
 
     #[test]
-    fn test_expected_size_scales_with_log_n() {
-        // Proof size should increase with log_n
-        let size_6 = Proof::expected_size(6, true);
-        let size_10 = Proof::expected_size(10, true);
-        let size_20 = Proof::expected_size(20, true);
-
-        assert!(size_6 < size_10);
-        assert!(size_10 < size_20);
+    fn test_g1_from_limbed_identity() {
+        // Identity point should remain identity
+        let limbed = [0u8; G1_LIMBED_SIZE];
+        let g1 = g1_from_limbed(&limbed);
+        assert_eq!(g1, [0u8; 64]);
     }
 
     #[test]
-    fn test_parse_proof_zk() {
-        // Create a proof with the right size for log_n=6, ZK
-        let log_n = 6;
-        let is_zk = true;
-        let expected_fr = Proof::expected_size(log_n, is_zk);
-        let bytes = vec![0u8; expected_fr * 32];
+    fn test_g1_from_limbed_generator() {
+        // G1 generator: x=1, y=2
+        // In limbed format: x_0=1, x_1=0, y_0=2, y_1=0
+        let mut limbed = [0u8; G1_LIMBED_SIZE];
+        limbed[31] = 1; // x_0 = 1 (big-endian)
+        limbed[95] = 2; // y_0 = 2 (big-endian)
 
-        let proof = Proof::from_bytes(&bytes, log_n, is_zk).unwrap();
-        assert_eq!(proof.data.len(), expected_fr);
-        assert_eq!(proof.log_n, log_n);
+        let g1 = g1_from_limbed(&limbed);
+        assert_eq!(g1[31], 1, "x should be 1");
+        assert_eq!(g1[63], 2, "y should be 2");
+    }
+
+    #[test]
+    fn test_proof_parse_zk() {
+        // Create a minimal ZK proof of correct size
+        let proof_bytes = vec![0u8; EXPECTED_ZK_PROOF_SIZE];
+        let proof = Proof::from_bytes(&proof_bytes, 12, true).expect("Should parse ZK proof");
         assert!(proof.is_zk);
+        assert_eq!(proof.log_n, 12);
     }
 
     #[test]
-    fn test_parse_proof_non_zk() {
-        // Create a proof with the right size for log_n=6, non-ZK
-        let log_n = 6;
-        let is_zk = false;
-        let expected_fr = Proof::expected_size(log_n, is_zk);
-        let bytes = vec![0u8; expected_fr * 32];
-
-        let proof = Proof::from_bytes(&bytes, log_n, is_zk).unwrap();
-        assert_eq!(proof.data.len(), expected_fr);
-        assert_eq!(proof.log_n, log_n);
+    fn test_proof_parse_non_zk() {
+        // Create a minimal non-ZK proof of correct size
+        let proof_bytes = vec![0u8; EXPECTED_NON_ZK_PROOF_SIZE];
+        let proof = Proof::from_bytes(&proof_bytes, 12, false).expect("Should parse non-ZK proof");
         assert!(!proof.is_zk);
+        assert_eq!(proof.log_n, 12);
     }
 
     #[test]
-    fn test_accessors() {
-        let log_n = 6;
-        let is_zk = true;
-        let expected_fr = Proof::expected_size(log_n, is_zk);
-        let mut bytes = vec![0u8; expected_fr * 32];
-
-        // Put marker in pairing point object
-        bytes[31] = 0x42;
-
-        let proof = Proof::from_bytes(&bytes, log_n, is_zk).unwrap();
-
-        // Check pairing point object
-        assert_eq!(proof.pairing_point_object()[0][31], 0x42);
-
-        // Check we can access sumcheck univariates
-        let _uni = proof.sumcheck_univariate(0);
-
-        // Check we can access sumcheck evaluations
-        let evals = proof.sumcheck_evaluations();
-        assert_eq!(evals.len(), NUM_ALL_ENTITIES);
-
-        // Check we can access shplonk and kzg
-        let _shplonk = proof.shplonk_q();
-        let _kzg = proof.kzg_quotient();
+    fn test_proof_wrong_size() {
+        let proof_bytes = vec![0u8; 1000];
+        let result = Proof::from_bytes(&proof_bytes, 12, true);
+        assert!(result.is_err());
     }
 }

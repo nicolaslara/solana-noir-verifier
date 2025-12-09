@@ -17,7 +17,7 @@
 extern crate alloc;
 use alloc::vec;
 
-use crate::field::{fr_add, fr_from_u64, fr_mul, fr_neg, fr_sub};
+use crate::field::{fr_add, fr_from_hex, fr_from_u64, fr_mul, fr_neg, fr_sub};
 use crate::types::{Fr, SCALAR_ONE, SCALAR_ZERO};
 
 /// Relation parameters for constraint evaluation
@@ -32,16 +32,20 @@ pub struct RelationParameters {
 }
 
 /// Number of subrelations in UltraHonk
-/// Matches Solidity's NUMBER_OF_SUBRELATIONS = 28
-pub const NUM_SUBRELATIONS: usize = 28;
+/// Matches Solidity's NUMBER_OF_SUBRELATIONS = 26 (bb 0.87)
+pub const NUM_SUBRELATIONS: usize = 26;
+
+/// Number of alpha challenges = NUMBER_OF_SUBRELATIONS - 1 = 25 (bb 0.87)
+pub const NUMBER_OF_ALPHAS: usize = NUM_SUBRELATIONS - 1;
 
 /// Wire indices for sumcheck evaluations
 /// These map to the evaluation values in the proof
 /// MUST match Solidity verifier's WIRE enum exactly!
+/// bb 0.87: 40 entities total (indices 0-39)
 #[repr(usize)]
 #[derive(Clone, Copy)]
 pub enum Wire {
-    // Selector polynomials (0-13)
+    // Selector polynomials (0-12)
     Qm = 0,
     Qc = 1,
     Ql = 2,
@@ -52,42 +56,41 @@ pub enum Wire {
     QArith = 7,
     QRange = 8,
     QElliptic = 9,
-    QMemory = 10,            // Q_MEMORY in Solidity (was QAux)
-    QNnf = 11,               // Q_NNF in Solidity (was MISSING!)
-    QPoseidon2External = 12, // Q_POSEIDON2_EXTERNAL in Solidity
-    QPoseidon2Internal = 13, // Q_POSEIDON2_INTERNAL in Solidity
-    // Permutation polynomials (14-21)
-    Sigma1 = 14,
-    Sigma2 = 15,
-    Sigma3 = 16,
-    Sigma4 = 17,
-    Id1 = 18,
-    Id2 = 19,
-    Id3 = 20,
-    Id4 = 21,
-    // Lookup table polynomials (22-25)
-    Table1 = 22,
-    Table2 = 23,
-    Table3 = 24,
-    Table4 = 25,
-    // Lagrange polynomials (26-27)
-    LagrangeFirst = 26,
-    LagrangeLast = 27,
-    // Wire polynomials (28-35)
-    Wl = 28,
-    Wr = 29,
-    Wo = 30,
-    W4 = 31,
-    ZPerm = 32,
-    LookupInverses = 33,
-    LookupReadCounts = 34,
-    LookupReadTags = 35,
-    // Shifted wire polynomials (36-40)
-    WlShift = 36,
-    WrShift = 37,
-    WoShift = 38,
-    W4Shift = 39,
-    ZPermShift = 40,
+    QAux = 10,               // Q_AUX in bb 0.87 (was Q_MEMORY/Q_NNF in older versions)
+    QPoseidon2External = 11, // Q_POSEIDON2_EXTERNAL in Solidity
+    QPoseidon2Internal = 12, // Q_POSEIDON2_INTERNAL in Solidity
+    // Permutation polynomials (13-20)
+    Sigma1 = 13,
+    Sigma2 = 14,
+    Sigma3 = 15,
+    Sigma4 = 16,
+    Id1 = 17,
+    Id2 = 18,
+    Id3 = 19,
+    Id4 = 20,
+    // Lookup table polynomials (21-24)
+    Table1 = 21,
+    Table2 = 22,
+    Table3 = 23,
+    Table4 = 24,
+    // Lagrange polynomials (25-26)
+    LagrangeFirst = 25,
+    LagrangeLast = 26,
+    // Wire polynomials (27-34)
+    Wl = 27,
+    Wr = 28,
+    Wo = 29,
+    W4 = 30,
+    ZPerm = 31,
+    LookupInverses = 32,
+    LookupReadCounts = 33,
+    LookupReadTags = 34,
+    // Shifted wire polynomials (35-39)
+    WlShift = 35,
+    WrShift = 36,
+    WoShift = 37,
+    W4Shift = 38,
+    ZPermShift = 39,
 }
 
 /// Get wire evaluation from the evaluations array
@@ -378,16 +381,11 @@ fn accumulate_lookup(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
         crate::dbg_fr!("out[5] = lhs - rhs", &out[5]);
     }
 
-    // Subrelation 6: read_tag_boolean = read_tag * read_tag - read_tag
-    // Ensures read_tag is boolean (0 or 1)
-    let read_tag_boolean = fr_sub(
-        &fr_mul(&lookup_read_tags, &lookup_read_tags),
-        &lookup_read_tags,
-    );
-    out[6] = fr_mul(&read_tag_boolean, d);
+    // NOTE: bb 0.87 removed the read_tag_boolean subrelation (was index 6)
+    // Lookup now only has 2 subrelations (indices 4-5)
 }
 
-/// Accumulate range/delta-range subrelations (indices 7-10)
+/// Accumulate range/delta-range subrelations (indices 6-9 in bb 0.87)
 fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -419,7 +417,7 @@ fn accumulate_range(evals: &[Fr], out: &mut [Fr], d: &Fr) {
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_one));
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_two));
         acc = fr_mul(&acc, &fr_add(&deltas[i], &neg_three));
-        out[7 + i] = fr_mul(&fr_mul(&acc, &q_range), d);
+        out[6 + i] = fr_mul(&fr_mul(&acc, &q_range), d);
     }
 }
 
@@ -484,23 +482,23 @@ fn accumulate_elliptic(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     );
 
     // Combine with selectors
-    // Solidity uses indices 11 and 12
+    // bb 0.87 uses indices 10 and 11
     let add_factor = fr_mul(&fr_mul(&fr_sub(&SCALAR_ONE, &q_double), &q_elliptic), d);
     let double_factor = fr_mul(&fr_mul(&q_double, &q_elliptic), d);
 
-    out[11] = fr_add(
+    out[10] = fr_add(
         &fr_mul(&x_add_id, &add_factor),
         &fr_mul(&x_double_id, &double_factor),
     );
-    out[12] = fr_add(
+    out[11] = fr_add(
         &fr_mul(&y_add_id, &add_factor),
         &fr_mul(&y_double_id, &double_factor),
     );
 }
 
-/// Accumulate memory/auxiliary subrelations (indices 13-18)
-/// Full implementation from Solidity verifier
-fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
+/// Accumulate memory/auxiliary subrelations (indices 12-17 in bb 0.87)
+/// Full implementation from Solidity verifier including non-native field and limb accumulator
+fn accumulate_aux(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
     let w_o = wire(evals, Wire::Wo);
@@ -516,8 +514,80 @@ fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
     let q_o = wire(evals, Wire::Qo);
     let q_m = wire(evals, Wire::Qm);
     let q_4 = wire(evals, Wire::Q4);
-    let q_memory = wire(evals, Wire::QMemory);
+    let q_arith = wire(evals, Wire::QArith);
+    let q_aux = wire(evals, Wire::QAux);
 
+    // Constants for limb arithmetic
+    // LIMB_SIZE = 2^68
+    let limb_size = fr_from_hex("0x100000000000000000");
+    // SUBLIMB_SHIFT = 2^14
+    let sublimb_shift = fr_from_hex("0x4000");
+
+    // =========== NON-NATIVE FIELD IDENTITY ===========
+    // limb_subproduct = w_l * w_r_shift + w_l_shift * w_r
+    let limb_subproduct_1 = fr_add(&fr_mul(&w_l, &w_r_shift), &fr_mul(&w_l_shift, &w_r));
+
+    // non_native_field_gate_2 = ((w_l * w_4 + w_r * w_o - w_o_shift) * LIMB_SIZE - w_4_shift + limb_subproduct) * q_4
+    let mut nnf_gate_2 = fr_add(&fr_mul(&w_l, &w_4), &fr_mul(&w_r, &w_o));
+    nnf_gate_2 = fr_sub(&nnf_gate_2, &w_o_shift);
+    nnf_gate_2 = fr_mul(&nnf_gate_2, &limb_size);
+    nnf_gate_2 = fr_sub(&nnf_gate_2, &w_4_shift);
+    nnf_gate_2 = fr_add(&nnf_gate_2, &limb_subproduct_1);
+    nnf_gate_2 = fr_mul(&nnf_gate_2, &q_4);
+
+    // limb_subproduct updated = limb_subproduct * LIMB_SIZE + w_l_shift * w_r_shift
+    let limb_subproduct_2 = fr_add(
+        &fr_mul(&limb_subproduct_1, &limb_size),
+        &fr_mul(&w_l_shift, &w_r_shift),
+    );
+
+    // non_native_field_gate_1 = (limb_subproduct - (w_o + w_4)) * q_o
+    let nnf_gate_1 = fr_mul(&fr_sub(&limb_subproduct_2, &fr_add(&w_o, &w_4)), &q_o);
+
+    // non_native_field_gate_3 = (limb_subproduct + w_4 - (w_o_shift + w_4_shift)) * q_m
+    let nnf_gate_3 = fr_mul(
+        &fr_sub(
+            &fr_add(&limb_subproduct_2, &w_4),
+            &fr_add(&w_o_shift, &w_4_shift),
+        ),
+        &q_m,
+    );
+
+    // non_native_field_identity = (gate_1 + gate_2 + gate_3) * q_r
+    let non_native_field_identity = fr_mul(
+        &fr_add(&fr_add(&nnf_gate_1, &nnf_gate_2), &nnf_gate_3),
+        &q_r,
+    );
+
+    // =========== LIMB ACCUMULATOR IDENTITY ===========
+    // limb_accumulator_1 = ((((w_r_shift * 2^14 + w_l_shift) * 2^14 + w_o) * 2^14 + w_r) * 2^14 + w_l - w_4) * q_4
+    let mut limb_acc_1 = fr_mul(&w_r_shift, &sublimb_shift);
+    limb_acc_1 = fr_add(&limb_acc_1, &w_l_shift);
+    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
+    limb_acc_1 = fr_add(&limb_acc_1, &w_o);
+    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
+    limb_acc_1 = fr_add(&limb_acc_1, &w_r);
+    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
+    limb_acc_1 = fr_add(&limb_acc_1, &w_l);
+    limb_acc_1 = fr_sub(&limb_acc_1, &w_4);
+    limb_acc_1 = fr_mul(&limb_acc_1, &q_4);
+
+    // limb_accumulator_2 = ((((w_o_shift * 2^14 + w_r_shift) * 2^14 + w_l_shift) * 2^14 + w_4) * 2^14 + w_o - w_4_shift) * q_m
+    let mut limb_acc_2 = fr_mul(&w_o_shift, &sublimb_shift);
+    limb_acc_2 = fr_add(&limb_acc_2, &w_r_shift);
+    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
+    limb_acc_2 = fr_add(&limb_acc_2, &w_l_shift);
+    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
+    limb_acc_2 = fr_add(&limb_acc_2, &w_4);
+    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
+    limb_acc_2 = fr_add(&limb_acc_2, &w_o);
+    limb_acc_2 = fr_sub(&limb_acc_2, &w_4_shift);
+    limb_acc_2 = fr_mul(&limb_acc_2, &q_m);
+
+    // limb_accumulator_identity = (limb_acc_1 + limb_acc_2) * q_o
+    let limb_accumulator_identity = fr_mul(&fr_add(&limb_acc_1, &limb_acc_2), &q_o);
+
+    // =========== MEMORY IDENTITY ===========
     // Memory record check: w_o * eta_three + w_r * eta_two + w_l * eta + q_c - w_4
     let mut memory_record_check = fr_mul(&w_o, &rp.eta_three);
     memory_record_check = fr_add(&memory_record_check, &fr_mul(&w_r, &rp.eta_two));
@@ -537,14 +607,14 @@ fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
     let neg_index_plus_one = fr_add(&fr_neg(&index_delta), &SCALAR_ONE);
     let adjacent_values_match = fr_mul(&neg_index_plus_one, &record_delta);
 
-    // q_l * q_r * q_memory * domainSep (ROM selector)
-    let rom_selector = fr_mul(&fr_mul(&q_l, &q_r), &fr_mul(&q_memory, d));
+    // ROM selector: q_l * q_r * q_aux * domainSep
+    let rom_selector = fr_mul(&fr_mul(&q_l, &q_r), &fr_mul(&q_aux, d));
 
-    // Subrel[14]: adjacent_values_match * rom_selector
-    out[14] = fr_mul(&adjacent_values_match, &rom_selector);
+    // Subrel[13]: adjacent_values_match * rom_selector
+    out[13] = fr_mul(&adjacent_values_match, &rom_selector);
 
-    // Subrel[15]: index_is_monotonic * rom_selector
-    out[15] = fr_mul(&index_is_monotonic, &rom_selector);
+    // Subrel[14]: index_is_monotonic * rom_selector
+    out[14] = fr_mul(&index_is_monotonic, &rom_selector);
 
     // ROM consistency check identity = memory_record_check * (q_l * q_r)
     let rom_consistency = fr_mul(&memory_record_check, &fr_mul(&q_l, &q_r));
@@ -577,20 +647,20 @@ fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
         &fr_sub(&next_gate_access_type, &SCALAR_ONE),
     );
 
-    // RAM selector: q_o * q_memory * domainSep
-    let ram_selector = fr_mul(&q_o, &fr_mul(&q_memory, d));
+    // RAM selector: q_arith * q_aux * domainSep (NOT q_o!)
+    let ram_selector = fr_mul(&q_arith, &fr_mul(&q_aux, d));
 
-    // Subrel[16]: ram_adjacent * ram_selector
-    out[16] = fr_mul(&ram_adjacent, &ram_selector);
+    // Subrel[15]: ram_adjacent * ram_selector
+    out[15] = fr_mul(&ram_adjacent, &ram_selector);
 
-    // Subrel[17]: index_is_monotonic * ram_selector
-    out[17] = fr_mul(&index_is_monotonic, &ram_selector);
+    // Subrel[16]: index_is_monotonic * ram_selector
+    out[16] = fr_mul(&index_is_monotonic, &ram_selector);
 
-    // Subrel[18]: next_gate_access_boolean * ram_selector
-    out[18] = fr_mul(&next_gate_access_boolean, &ram_selector);
+    // Subrel[17]: next_gate_access_boolean * ram_selector
+    out[17] = fr_mul(&next_gate_access_boolean, &ram_selector);
 
-    // RAM consistency check identity = access_check * q_o
-    let ram_consistency = fr_mul(&access_check, &q_o);
+    // RAM consistency check identity = access_check * q_arith
+    let ram_consistency = fr_mul(&access_check, &q_arith);
 
     // Timestamp delta = w_r_shift - w_r
     let timestamp_delta = fr_sub(&w_r_shift, &w_r);
@@ -598,10 +668,7 @@ fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
     // RAM timestamp check identity = (-index_delta + 1) * timestamp_delta - w_o
     let ram_timestamp_check = fr_sub(&fr_mul(&neg_index_plus_one, &timestamp_delta), &w_o);
 
-    // memory_identity = rom_consistency
-    //   + ram_timestamp_check * (q_4 * q_l)
-    //   + memory_record_check * (q_m * q_l)
-    //   + ram_consistency
+    // memory_identity = rom_consistency + ram_timestamp_check * (q_4 * q_l) + memory_record_check * (q_m * q_l) + ram_consistency
     let mut memory_identity = rom_consistency;
     memory_identity = fr_add(
         &memory_identity,
@@ -613,97 +680,19 @@ fn accumulate_memory(evals: &[Fr], rp: &RelationParameters, out: &mut [Fr], d: &
     );
     memory_identity = fr_add(&memory_identity, &ram_consistency);
 
-    // Subrel[13]: memory_identity * (q_memory * domainSep)
-    out[13] = fr_mul(&memory_identity, &fr_mul(&q_memory, d));
-}
-
-/// Accumulate NNF (non-native field) subrelation (index 19)
-/// Full implementation from Solidity verifier
-fn accumulate_nnf(evals: &[Fr], out: &mut [Fr], d: &Fr) {
-    let w_l = wire(evals, Wire::Wl);
-    let w_r = wire(evals, Wire::Wr);
-    let w_o = wire(evals, Wire::Wo);
-    let w_4 = wire(evals, Wire::W4);
-    let w_l_shift = wire(evals, Wire::WlShift);
-    let w_r_shift = wire(evals, Wire::WrShift);
-    let w_o_shift = wire(evals, Wire::WoShift);
-    let w_4_shift = wire(evals, Wire::W4Shift);
-
-    let q_m = wire(evals, Wire::Qm);
-    let q_r = wire(evals, Wire::Qr);
-    let q_o = wire(evals, Wire::Qo);
-    let q_4 = wire(evals, Wire::Q4);
-    let q_nnf = wire(evals, Wire::QNnf);
-
-    // Constants
-    // LIMB_SIZE = 2^68
-    let limb_size = crate::field::fr_from_hex(
-        "0000000000000000000000000000000000000000000000100000000000000000",
+    // =========== AUXILIARY IDENTITY (evals[12]) ===========
+    // auxiliary_identity = memory_identity + non_native_field_identity + limb_accumulator_identity
+    // then multiply by (q_aux * domainSep)
+    let auxiliary_identity = fr_add(
+        &fr_add(&memory_identity, &non_native_field_identity),
+        &limb_accumulator_identity,
     );
-    // SUBLIMB_SHIFT = 2^14 = 16384
-    let sublimb_shift = fr_from_u64(1u64 << 14);
-
-    // limb_subproduct = w_l * w_r_shift + w_l_shift * w_r
-    let mut limb_subproduct = fr_add(&fr_mul(&w_l, &w_r_shift), &fr_mul(&w_l_shift, &w_r));
-
-    // non_native_field_gate_2 = (w_l * w_4 + w_r * w_o - w_o_shift) * LIMB_SIZE - w_4_shift + limb_subproduct
-    let mut nnf_gate_2 = fr_add(&fr_mul(&w_l, &w_4), &fr_mul(&w_r, &w_o));
-    nnf_gate_2 = fr_sub(&nnf_gate_2, &w_o_shift);
-    nnf_gate_2 = fr_mul(&nnf_gate_2, &limb_size);
-    nnf_gate_2 = fr_sub(&nnf_gate_2, &w_4_shift);
-    nnf_gate_2 = fr_add(&nnf_gate_2, &limb_subproduct);
-    nnf_gate_2 = fr_mul(&nnf_gate_2, &q_4);
-
-    // limb_subproduct = limb_subproduct * LIMB_SIZE + (w_l_shift * w_r_shift)
-    limb_subproduct = fr_mul(&limb_subproduct, &limb_size);
-    limb_subproduct = fr_add(&limb_subproduct, &fr_mul(&w_l_shift, &w_r_shift));
-
-    // non_native_field_gate_1 = (limb_subproduct - (w_o + w_4)) * q_o
-    let nnf_gate_1 = fr_sub(&limb_subproduct, &fr_add(&w_o, &w_4));
-    let nnf_gate_1 = fr_mul(&nnf_gate_1, &q_o);
-
-    // non_native_field_gate_3 = (limb_subproduct + w_4 - (w_o_shift + w_4_shift)) * q_m
-    let nnf_gate_3 = fr_add(&limb_subproduct, &w_4);
-    let nnf_gate_3 = fr_sub(&nnf_gate_3, &fr_add(&w_o_shift, &w_4_shift));
-    let nnf_gate_3 = fr_mul(&nnf_gate_3, &q_m);
-
-    // non_native_field_identity = (nnf_gate_1 + nnf_gate_2 + nnf_gate_3) * q_r
-    let nnf_identity = fr_add(&fr_add(&nnf_gate_1, &nnf_gate_2), &nnf_gate_3);
-    let nnf_identity = fr_mul(&nnf_identity, &q_r);
-
-    // limb_accumulator_1: ((((w_r_shift * 2^14 + w_l_shift) * 2^14 + w_o) * 2^14 + w_r) * 2^14 + w_l - w_4) * q_4
-    let mut limb_acc_1 = fr_mul(&w_r_shift, &sublimb_shift);
-    limb_acc_1 = fr_add(&limb_acc_1, &w_l_shift);
-    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
-    limb_acc_1 = fr_add(&limb_acc_1, &w_o);
-    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
-    limb_acc_1 = fr_add(&limb_acc_1, &w_r);
-    limb_acc_1 = fr_mul(&limb_acc_1, &sublimb_shift);
-    limb_acc_1 = fr_add(&limb_acc_1, &w_l);
-    limb_acc_1 = fr_sub(&limb_acc_1, &w_4);
-    limb_acc_1 = fr_mul(&limb_acc_1, &q_4);
-
-    // limb_accumulator_2: ((((w_o_shift * 2^14 + w_r_shift) * 2^14 + w_l_shift) * 2^14 + w_4) * 2^14 + w_o - w_4_shift) * q_m
-    let mut limb_acc_2 = fr_mul(&w_o_shift, &sublimb_shift);
-    limb_acc_2 = fr_add(&limb_acc_2, &w_r_shift);
-    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
-    limb_acc_2 = fr_add(&limb_acc_2, &w_l_shift);
-    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
-    limb_acc_2 = fr_add(&limb_acc_2, &w_4);
-    limb_acc_2 = fr_mul(&limb_acc_2, &sublimb_shift);
-    limb_acc_2 = fr_add(&limb_acc_2, &w_o);
-    limb_acc_2 = fr_sub(&limb_acc_2, &w_4_shift);
-    limb_acc_2 = fr_mul(&limb_acc_2, &q_m);
-
-    // limb_accumulator_identity = (limb_acc_1 + limb_acc_2) * q_o
-    let limb_acc_identity = fr_mul(&fr_add(&limb_acc_1, &limb_acc_2), &q_o);
-
-    // nnf_identity = (nnf_identity + limb_acc_identity) * (q_nnf * domainSep)
-    let nnf_full = fr_add(&nnf_identity, &limb_acc_identity);
-    out[19] = fr_mul(&nnf_full, &fr_mul(&q_nnf, d));
+    out[12] = fr_mul(&auxiliary_identity, &fr_mul(&q_aux, d));
 }
 
-/// Accumulate Poseidon External subrelations (indices 20-23)
+// NOTE: accumulate_nnf removed in bb 0.87 (Q_NNF no longer exists)
+
+/// Accumulate Poseidon External subrelations (indices 19-22 in bb 0.87)
 fn accumulate_poseidon_external(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -750,14 +739,14 @@ fn accumulate_poseidon_external(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let v1 = fr_add(&t3, &v2);
     let v3 = fr_add(&t2, &v4);
 
-    // External subrelations (indices 20-23)
-    out[20] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_ext), d);
-    out[21] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_ext), d);
-    out[22] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_ext), d);
-    out[23] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_ext), d);
+    // External subrelations (indices 18-21 in bb 0.87)
+    out[18] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_ext), d);
+    out[19] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_ext), d);
+    out[20] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_ext), d);
+    out[21] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_ext), d);
 }
 
-/// Accumulate Poseidon Internal subrelations (indices 24-27)
+/// Accumulate Poseidon Internal subrelations (indices 22-25 in bb 0.87)
 fn accumulate_poseidon_internal(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let w_l = wire(evals, Wire::Wl);
     let w_r = wire(evals, Wire::Wr);
@@ -810,11 +799,11 @@ fn accumulate_poseidon_internal(evals: &[Fr], out: &mut [Fr], d: &Fr) {
     let v3 = fr_add(&fr_mul(&u3, &diag2), &u_sum);
     let v4 = fr_add(&fr_mul(&u4, &diag3), &u_sum);
 
-    // Internal subrelations (indices 24-27)
-    out[24] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_int), d);
-    out[25] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_int), d);
-    out[26] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_int), d);
-    out[27] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_int), d);
+    // Internal subrelations (indices 22-25 in bb 0.87)
+    out[22] = fr_mul(&fr_mul(&fr_sub(&v1, &w_l_shift), &q_pos_int), d);
+    out[23] = fr_mul(&fr_mul(&fr_sub(&v2, &w_r_shift), &q_pos_int), d);
+    out[24] = fr_mul(&fr_mul(&fr_sub(&v3, &w_o_shift), &q_pos_int), d);
+    out[25] = fr_mul(&fr_mul(&fr_sub(&v4, &w_4_shift), &q_pos_int), d);
 }
 
 /// Compute x^5 for Poseidon S-box
@@ -835,13 +824,29 @@ fn batch_subrelations(evals: &[Fr], alphas: &[Fr]) -> Fr {
             evals.len(),
             alphas.len()
         );
-        crate::trace!("Expected: 28 subrels, 27 alphas");
+        crate::trace!("Expected: 26 subrels, 25 alphas (bb 0.87)");
+        // Verify first term computation
+        let first_two = fr_add(&evals[0], &fr_mul(&evals[1], &alphas[0]));
+        crate::dbg_fr!("verify: evals[0] + evals[1]*alpha[0]", &first_two);
     }
 
     let mut acc = evals[0];
     for (i, alpha) in alphas.iter().enumerate() {
+        if i >= evals.len() - 1 {
+            break; // Prevent index out of bounds
+        }
         let term = fr_mul(&evals[i + 1], alpha);
+        #[cfg(feature = "debug")]
+        if i < 3 {
+            crate::dbg_fr!(&format!("evals[{}]", i + 1), &evals[i + 1]);
+            crate::dbg_fr!(&format!("alphas[{}]", i), alpha);
+            crate::dbg_fr!(&format!("term[{}]", i), &term);
+        }
         acc = fr_add(&acc, &term);
+        #[cfg(feature = "debug")]
+        if i < 3 {
+            crate::dbg_fr!(&format!("batch after term {}", i + 1), &acc);
+        }
     }
 
     #[cfg(feature = "debug")]
@@ -880,8 +885,8 @@ pub fn accumulate_relation_evaluations(
     accumulate_lookup(evals, rp, &mut out, pow_partial);
     accumulate_range(evals, &mut out, pow_partial);
     accumulate_elliptic(evals, &mut out, pow_partial);
-    accumulate_memory(evals, rp, &mut out, pow_partial);
-    accumulate_nnf(evals, &mut out, pow_partial);
+    accumulate_aux(evals, rp, &mut out, pow_partial);
+    // Note: bb 0.87 removed accumulate_nnf (Q_NNF)
     accumulate_poseidon_external(evals, &mut out, pow_partial);
     accumulate_poseidon_internal(evals, &mut out, pow_partial);
 
@@ -911,9 +916,10 @@ mod tests {
 
     #[test]
     fn test_wire_index() {
-        // Wire enum indices match Solidity verifier's WIRE enum
+        // Wire enum indices match Solidity verifier's WIRE enum (bb 0.87)
         assert_eq!(Wire::Qm as usize, 0);
-        assert_eq!(Wire::Wl as usize, 28); // Updated: was 27, now 28 after adding QNnf
-        assert_eq!(Wire::ZPermShift as usize, 40); // Updated: was 39, now 40
+        assert_eq!(Wire::QAux as usize, 10);
+        assert_eq!(Wire::Wl as usize, 27);
+        assert_eq!(Wire::ZPermShift as usize, 39);
     }
 }

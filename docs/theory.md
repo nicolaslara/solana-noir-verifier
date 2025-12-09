@@ -270,6 +270,38 @@ From our VK (first 96 bytes = 3 headers):
 [64..96]:  num_public_inputs = 1   → just y = 9
 ```
 
+### Protocol Constants (bb 0.87)
+
+UltraHonk defines several constants that are **fixed across all circuits**:
+
+| Constant                 | Value | Meaning                                                                                     |
+| ------------------------ | ----- | ------------------------------------------------------------------------------------------- |
+| `CONST_PROOF_SIZE_LOG_N` | 28    | Maximum supported log₂(circuit_size). Proofs are padded to this size for fixed-size format. |
+| `NUMBER_OF_SUBRELATIONS` | 26    | Total number of subrelations (constraints) checked in sumcheck.                             |
+| `NUMBER_OF_ALPHAS`       | 25    | Alpha challenges for batching subrelations (= NUM_SUBRELATIONS - 1).                        |
+| `NUMBER_OF_ENTITIES`     | 40    | Total polynomial evaluations in sumcheck (27 VK + 8 witness + 5 shifted).                   |
+
+And one constant that **varies per circuit**:
+
+| Constant | Value  | Meaning                                                                                    |
+| -------- | ------ | ------------------------------------------------------------------------------------------ |
+| `LOG_N`  | varies | Actual log₂(circuit_size) for this specific circuit. Determines number of sumcheck rounds. |
+
+**Why fixed constants matter:**
+
+- The transcript always hashes `CONST_PROOF_SIZE_LOG_N` times for gate challenges, regardless of actual circuit size
+- Alpha generation loops `NUMBER_OF_ALPHAS / 2` times to generate pairs of challenges
+- This ensures transcript consistency across different circuit sizes
+
+**Example across circuits:**
+
+```
+simple_square:       LOG_N = 12, all other constants fixed
+iterated_square_100: LOG_N = 12, all other constants fixed
+iterated_square_1000: LOG_N = 13, all other constants fixed
+fib_chain_100:       LOG_N = 12, all other constants fixed
+```
+
 ---
 
 ## 5. Witness Generation
@@ -489,19 +521,50 @@ Transcript Order (what gets hashed):
 
 1. vk_hash                    → (start of transcript)
 2. public_inputs[]            → (user's public values)
-3. pairing_point_object[16]   → (recursion data)
-4. W₁, W₂, W₃                 → η, η₂, η₃ (split challenges)
+3. pairing_point_object[16]   → (recursion data, 16 Fr elements)
+4. W₁, W₂, W₃ (limbed)        → η, η₂, η₃ (split challenges)
 5. lookup_counts, tags, W₄    → β, γ (split challenges)
-6. lookup_inverses, z_perm    → α (single challenge)
-7. [ZK: libra_concat, sum]    → libra_challenge
-8. (gate_challenges[])        → (derived by squaring)
+6. lookup_inverses, z_perm    → alphas[0..24] (see Alpha Generation below)
+7. [ZK: libra_concat, sum]    → libra_challenge (split)
+8. gate_challenges[0..27]     → 28 hashes, only first LOG_N used
 9. For each round r:
-   - univariate[r][]          → sumcheck_u[r] (split)
+   - univariate[r][]          → sumcheck_u[r] (split, only lo used)
 10. sumcheck_evaluations[]    → ρ (split)
-11. gemini_fold_comms[]       → gemini_r (split)
-12. gemini_a_evals[]          → shplonk_ν (split)
-13. shplonk_q                 → shplonk_z (split)
+11. [ZK: libra_eval, comms]   → (ZK-specific data)
+12. gemini_fold_comms[]       → gemini_r (split)
+13. gemini_a_evals[]          → shplonk_ν (split)
+14. [ZK: libra_poly_evals]    → (ZK-specific)
+15. shplonk_q                 → shplonk_z (split)
 ```
+
+### Alpha Challenge Generation (bb 0.87)
+
+Alpha challenges are generated differently than other challenges:
+
+```
+1. Append lookupInverses (4 limbs) + zPerm (4 limbs) to transcript
+2. Hash → split → alphas[0], alphas[1]
+3. Loop (NUMBER_OF_ALPHAS / 2 - 1) times:
+   - Hash → split → alphas[2*i], alphas[2*i+1]
+4. If NUMBER_OF_ALPHAS is odd:
+   - Hash → split → alphas[NUMBER_OF_ALPHAS-1], (discard hi)
+```
+
+This generates 25 alpha challenges from ~13 hash iterations.
+
+### Gate Challenge Generation (bb 0.87)
+
+Gate challenges use a **fixed loop count** regardless of circuit size:
+
+```
+for i in 0..CONST_PROOF_SIZE_LOG_N (28 iterations):
+    previousChallenge = hash(previousChallenge)
+    gateChallenges[i] = split(previousChallenge).lo
+
+// Only first LOG_N challenges are used in verification
+```
+
+This ensures transcript state is consistent after gate challenges.
 
 Our implementation has been validated to produce challenges matching both Barretenberg's native verifier and the generated Solidity verifier.
 

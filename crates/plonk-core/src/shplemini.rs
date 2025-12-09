@@ -16,18 +16,18 @@ use alloc::vec::Vec;
 use crate::field::{fr_add, fr_inv, fr_mul, fr_neg, fr_sub};
 use crate::key::VerificationKey;
 use crate::ops;
-use crate::proof::Proof;
+use crate::proof::{Proof, CONST_PROOF_SIZE_LOG_N};
 use crate::types::{Fr, G1, SCALAR_ONE, SCALAR_ZERO};
 use crate::verifier::Challenges;
 
-/// Number of unshifted evaluations (indices 0-35) - matches Solidity
-pub const NUMBER_UNSHIFTED: usize = 36;
+/// Number of unshifted evaluations (indices 0-34) - matches Solidity bb 0.87
+pub const NUMBER_UNSHIFTED: usize = 35;
 
-/// Number of shifted evaluations (indices 36-40)  
+/// Number of shifted evaluations (indices 35-39) - bb 0.87
 pub const NUMBER_TO_BE_SHIFTED: usize = 5;
 
-/// Total number of entities for batching
-pub const NUMBER_OF_ENTITIES: usize = NUMBER_UNSHIFTED + NUMBER_TO_BE_SHIFTED; // 41
+/// Total number of entities for batching - bb 0.87
+pub const NUMBER_OF_ENTITIES: usize = NUMBER_UNSHIFTED + NUMBER_TO_BE_SHIFTED; // 40
 
 /// Index in commitments array where shifted commitments start
 pub const SHIFTED_COMMITMENTS_START: usize = 30;
@@ -59,9 +59,10 @@ pub fn compute_shplemini_pairing_points(
     }
 
     // 1) Compute r^(2^i) powers
-    let mut r_pows = Vec::with_capacity(log_n);
+    // Need CONST_PROOF_SIZE_LOG_N powers for the full fold loop
+    let mut r_pows = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
     r_pows.push(challenges.gemini_r);
-    for i in 1..log_n {
+    for i in 1..CONST_PROOF_SIZE_LOG_N {
         r_pows.push(fr_mul(&r_pows[i - 1], &r_pows[i - 1]));
     }
 
@@ -101,6 +102,12 @@ pub fn compute_shplemini_pairing_points(
         &fr_sub(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0)),
     );
 
+    #[cfg(feature = "debug")]
+    {
+        crate::dbg_fr!("unshiftedScalar", &unshifted);
+        crate::dbg_fr!("shiftedScalar", &shifted);
+    }
+
     // 3) Accumulate scalars for commitments
     // For now, we'll compute P0 as the MSM result
 
@@ -112,7 +119,7 @@ pub fn compute_shplemini_pairing_points(
     // IMPORTANT: Solidity starts with batchingChallenge = rho, not 1!
     let mut rho_pow = challenges.rho;
     let mut eval_acc = if proof.is_zk {
-        proof.gemini_masking_eval().unwrap_or(SCALAR_ZERO)
+        proof.gemini_masking_eval()
     } else {
         SCALAR_ZERO
     };
@@ -207,12 +214,18 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("const_acc after initial term", &const_acc);
     }
 
-    // 6) Further folding (gemini fold loop: i = 1 to log_n - 1)
-    // Also compute gemini_scalars for the MSM
+    // 6) Further folding (gemini fold loop: i = 0 to CONST_PROOF_SIZE_LOG_N - 2)
+    // Solidity loops 27 times, but only accumulates for i < LOG_N - 1 (non-dummy rounds)
+    // IMPORTANT: v_pow is ALWAYS updated even in dummy rounds!
     let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
-    let mut gemini_scalars = vec![SCALAR_ZERO; log_n - 1];
+    let mut gemini_scalars = vec![SCALAR_ZERO; CONST_PROOF_SIZE_LOG_N - 1];
 
-    for j in 1..log_n {
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
+        let dummy_round = i >= log_n - 1;
+
+        if !dummy_round {
+            let j = i + 1; // Our index into r_pows, fold_pos, gemini_a_evals
+
         let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
         let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
 
@@ -222,16 +235,18 @@ pub fn compute_shplemini_pairing_points(
         let sp = fr_mul(&v_pow, &pos_inv);
         let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
 
-        // Compute gemini scalar for this fold commitment
-        // scalars[boundary + i] = -scalingFactorNeg - scalingFactorPos
-        gemini_scalars[j - 1] = fr_neg(&fr_add(&sn, &sp));
+            // Compute gemini scalar for this fold commitment
+            // scalars[boundary + i] = -scalingFactorNeg - scalingFactorPos
+            gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
 
         // Update const_acc
         const_acc = fr_add(
             &const_acc,
             &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
         );
+        }
 
+        // ALWAYS update v_pow, even in dummy rounds!
         v_pow = fr_mul(
             &v_pow,
             &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
@@ -282,34 +297,33 @@ pub fn compute_shplemini_pairing_points(
         );
 
         // Get libra poly evals
-        if let Some(libra_evals) = proof.libra_poly_evals() {
-            #[cfg(feature = "debug")]
-            {
-                crate::trace!("===== LIBRA POLY EVALS =====");
-                for (idx, eval) in libra_evals.iter().enumerate() {
-                    crate::dbg_fr!(&format!("libraPolyEvals[{}]", idx), eval);
-                }
+        let libra_evals = proof.libra_poly_evals();
+        #[cfg(feature = "debug")]
+        {
+            crate::trace!("===== LIBRA POLY EVALS =====");
+            for (idx, eval) in libra_evals.iter().enumerate() {
+                crate::dbg_fr!(&format!("libraPolyEvals[{}]", idx), eval);
             }
-
-            // For each libraPolyEval, compute batchingScalars and update const_acc
-            // denominators = [denom0, denom1, denom0, denom0]
-            let denominators = [denom0, denom1, denom0, denom0];
-            let mut batching_scalars = [SCALAR_ZERO; 4];
-            for (i, eval) in libra_evals.iter().enumerate() {
-                let scaling_factor = fr_mul(&denominators[i], &v_pow);
-                batching_scalars[i] = fr_neg(&scaling_factor);
-                const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
-                v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
-            }
-
-            // Final libra scalars for commitments:
-            // scalars[boundary] = batchingScalars[0]
-            // scalars[boundary+1] = batchingScalars[1] + batchingScalars[2]
-            // scalars[boundary+2] = batchingScalars[3]
-            libra_scalars[0] = batching_scalars[0];
-            libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
-            libra_scalars[2] = batching_scalars[3];
         }
+
+        // For each libraPolyEval, compute batchingScalars and update const_acc
+        // denominators = [denom0, denom1, denom0, denom0]
+        let denominators = [denom0, denom1, denom0, denom0];
+        let mut batching_scalars = [SCALAR_ZERO; 4];
+        for (i, eval) in libra_evals.iter().enumerate() {
+            let scaling_factor = fr_mul(&denominators[i], &v_pow);
+            batching_scalars[i] = fr_neg(&scaling_factor);
+            const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
+            v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
+        }
+
+        // Final libra scalars for commitments:
+        // scalars[boundary] = batchingScalars[0]
+        // scalars[boundary+1] = batchingScalars[1] + batchingScalars[2]
+        // scalars[boundary+2] = batchingScalars[3]
+        libra_scalars[0] = batching_scalars[0];
+        libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
+        libra_scalars[2] = batching_scalars[3];
     }
 
     #[cfg(feature = "debug")]
@@ -393,17 +407,20 @@ fn compute_p0_full(
         crate::dbg_g1!("vk.commitments[27] (lagrangeLast)", &vk.commitments[27]);
 
         // Print first wire commitment
-        crate::dbg_g1!("wire_commitment(0) (w1)", &proof.wire_commitment(0));
+        crate::dbg_g1!("witness_commitment(0) (w1)", &proof.witness_commitment(0));
     }
 
     // Add geminiMaskingPoly * (-unshifted)
     if proof.is_zk {
         let neg_unshifted = fr_neg(unshifted_scalar);
-        if let Some(masking_comm) = proof.gemini_masking_commitment() {
-            let scaled =
-                ops::g1_scalar_mul(&masking_comm, &neg_unshifted).map_err(|_| "G1 mul failed")?;
-            p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
+        #[cfg(feature = "debug")]
+        {
+            crate::dbg_fr!("scalar[1] (masking, -unshifted)", &neg_unshifted);
         }
+        let masking_comm = proof.gemini_masking_poly();
+        let scaled =
+            ops::g1_scalar_mul(&masking_comm, &neg_unshifted).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
     }
 
     // Build scalars for VK and proof commitments
@@ -412,18 +429,19 @@ fn compute_p0_full(
     let neg_unshifted = fr_neg(unshifted_scalar);
     let neg_shifted = fr_neg(shifted_scalar);
 
-    // VK commitments (28 entries, indices 2-29 in Solidity)
-    // scalars[i+2] = -unshifted * rho^(i+1) for i = 0..28
+    // VK commitments (27 entries for bb 0.87, indices 2-28 in Solidity)
+    // scalars[i+2] = -unshifted * rho^(i+1) for i = 0..num_commitments
     // Note: batchingChallenge starts at rho, so first scalar is -unshifted * rho
+    let num_vk_commitments = vk.num_commitments;
     let mut rho_pow = challenges.rho;
-    for i in 0..28 {
+    for i in 0..num_vk_commitments {
         let scalar = fr_mul(&neg_unshifted, &rho_pow);
         let commitment = vk.commitments[i];
         let scaled = ops::g1_scalar_mul(&commitment, &scalar).map_err(|_| "G1 mul failed")?;
         p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
 
         #[cfg(feature = "debug")]
-        if i < 3 || i == 27 {
+        if i < 3 || i == num_vk_commitments - 1 {
             crate::dbg_fr!(&format!("VK[{}] scalar (rho^{})", i, i + 1), &scalar);
         }
 
@@ -433,7 +451,10 @@ fn compute_p0_full(
     #[cfg(feature = "debug")]
     {
         crate::dbg_g1!("P0 after VK commitments", &p0);
-        crate::dbg_fr!("rho_pow after VK (should be rho^29)", &rho_pow);
+        crate::dbg_fr!(
+            &format!("rho_pow after VK (should be rho^{})", num_vk_commitments + 1),
+            &rho_pow
+        );
     }
 
     // Proof wire commitments (8 entries, indices 30-37 in Solidity)
@@ -451,7 +472,7 @@ fn compute_p0_full(
     // They get both unshifted and shifted scalar contributions
     // SHIFTED_COMMITMENTS_START = 30
     for (sol_idx, &our_idx) in wire_mapping.iter().enumerate() {
-        let commitment = proof.wire_commitment(our_idx);
+        let commitment = proof.witness_commitment(our_idx);
 
         // Solidity scalars[30..38] start with unshifted scalar contribution
         // After VK loop (28 iterations), rho_pow = rho^29
@@ -525,17 +546,18 @@ fn compute_p0_full(
     }
 
     // Add gemini fold commitments with their scalars
-    // scalars[38..38+log_n-1] = gemini_scalars
+    // Solidity: for all CONST_PROOF_SIZE_LOG_N - 1 = 27 commitments
+    // scalars are zero for dummy rounds (i >= log_n - 1)
     #[cfg(feature = "debug")]
     {
-        crate::trace!("===== GEMINI FOLD SCALARS =====");
+        crate::trace!("===== GEMINI FOLD SCALARS (27 total) =====");
     }
-    for i in 0..(log_n - 1) {
+    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
         #[cfg(feature = "debug")]
-        {
+        if i < 3 || i == 26 {
             crate::dbg_fr!(&format!("gemini_scalars[{}]", i), &gemini_scalars[i]);
         }
-        let commitment = proof.gemini_fold_comm(i);
+        let commitment = proof.gemini_fold_commitment(i);
         let scaled =
             ops::g1_scalar_mul(&commitment, &gemini_scalars[i]).map_err(|_| "G1 mul failed")?;
         p0 = ops::g1_add(&p0, &scaled).map_err(|_| "G1 add failed")?;
@@ -557,20 +579,22 @@ fn compute_p0_full(
         }
 
         // libraCommitments[0], [1], [2]
-        if let Some(libra_comms) = proof.libra_commitments() {
-            let scaled0 = ops::g1_scalar_mul(&libra_comms[0], &libra_scalars[0])
-                .map_err(|_| "G1 mul failed")?;
-            p0 = ops::g1_add(&p0, &scaled0).map_err(|_| "G1 add failed")?;
+        let libra_comm_0 = proof.libra_commitment_0();
+        let libra_comm_1 = proof.libra_commitment_1();
+        let libra_comm_2 = proof.libra_commitment_2();
 
-            // libra_scalars[1] = batchingScalars[1] + batchingScalars[2] (combined)
-            let scaled1 = ops::g1_scalar_mul(&libra_comms[1], &libra_scalars[1])
-                .map_err(|_| "G1 mul failed")?;
-            p0 = ops::g1_add(&p0, &scaled1).map_err(|_| "G1 add failed")?;
+        let scaled0 =
+            ops::g1_scalar_mul(&libra_comm_0, &libra_scalars[0]).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled0).map_err(|_| "G1 add failed")?;
 
-            let scaled2 = ops::g1_scalar_mul(&libra_comms[2], &libra_scalars[2])
-                .map_err(|_| "G1 mul failed")?;
-            p0 = ops::g1_add(&p0, &scaled2).map_err(|_| "G1 add failed")?;
-        }
+        // libra_scalars[1] = batchingScalars[1] + batchingScalars[2] (combined)
+        let scaled1 =
+            ops::g1_scalar_mul(&libra_comm_1, &libra_scalars[1]).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled1).map_err(|_| "G1 add failed")?;
+
+        let scaled2 =
+            ops::g1_scalar_mul(&libra_comm_2, &libra_scalars[2]).map_err(|_| "G1 mul failed")?;
+        p0 = ops::g1_add(&p0, &scaled2).map_err(|_| "G1 add failed")?;
 
         #[cfg(feature = "debug")]
         {
@@ -604,9 +628,9 @@ mod tests {
     #[test]
     fn test_constants() {
         // Match Solidity constants
-        assert_eq!(NUMBER_UNSHIFTED, 36);
+        assert_eq!(NUMBER_UNSHIFTED, 35);
         assert_eq!(NUMBER_TO_BE_SHIFTED, 5);
-        assert_eq!(NUMBER_OF_ENTITIES, 41);
+        assert_eq!(NUMBER_OF_ENTITIES, 40);
         assert_eq!(SHIFTED_COMMITMENTS_START, 30);
         assert_eq!(LIBRA_COMMITMENTS, 3);
         assert_eq!(LIBRA_EVALUATIONS, 4);

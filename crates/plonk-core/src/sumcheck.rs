@@ -194,7 +194,7 @@ fn verify_sumcheck_rounds(
     // For ZK proofs, initial target = libra_sum * libra_challenge
     // For non-ZK proofs, initial target is 0
     let mut target = if proof.is_zk {
-        let libra_sum = proof.libra_sum().unwrap_or(SCALAR_ZERO);
+        let libra_sum = proof.libra_sum();
         if let Some(lc) = libra_challenge {
             fr_mul(&libra_sum, lc)
         } else {
@@ -215,7 +215,7 @@ fn verify_sumcheck_rounds(
     // Process each round
     for round in 0..log_n {
         // Get univariate coefficients for this round
-        let univariate = proof.sumcheck_univariate(round);
+        let univariate = proof.sumcheck_univariates_for_round(round);
 
         // Check round sum: u[0] + u[1] == target
         let sum = fr_add(&univariate[0], &univariate[1]);
@@ -227,7 +227,7 @@ fn verify_sumcheck_rounds(
             crate::dbg_fr!("target", &target);
         }
 
-        if !check_round_sum(univariate, &target) {
+        if !check_round_sum(&univariate, &target) {
             crate::trace!("FAILED: round {} sum check", round);
             return Err("sumcheck round sum check failed");
         }
@@ -239,7 +239,7 @@ fn verify_sumcheck_rounds(
         }
 
         // Compute next target using barycentric interpolation
-        target = next_target(univariate, chi, proof.is_zk)
+        target = next_target(&univariate, chi, proof.is_zk)
             .map_err(|_| "barycentric interpolation failed")?;
         if round < 3 {
             crate::dbg_fr!("next_target", &target);
@@ -292,7 +292,8 @@ pub fn verify_sumcheck(
     // Solidity: grandHonkRelationSum = grandHonkRelationSum * (1 - evaluation) + libraEvaluation * libraChallenge
     // where evaluation = product(sumCheckUChallenges[2..LOG_N])
     if proof.is_zk {
-        if let (Some(libra_eval), Some(libra_chal)) = (proof.libra_evaluation(), libra_challenge) {
+        if let Some(libra_chal) = libra_challenge {
+            let libra_eval = proof.libra_evaluation();
             // Compute evaluation = product(sumcheck_challenges[2..log_n])
             let mut evaluation = SCALAR_ONE;
             for i in 2..log_n {
@@ -324,7 +325,8 @@ pub fn verify_sumcheck(
     // Debug: compute expected grand_before_ZK from target
     #[cfg(feature = "debug")]
     if proof.is_zk {
-        if let (Some(libra_eval), Some(libra_chal)) = (proof.libra_evaluation(), libra_challenge) {
+        if let Some(libra_chal) = libra_challenge {
+            let libra_eval = proof.libra_evaluation();
             let mut evaluation = SCALAR_ONE;
             for i in 2..proof.log_n {
                 evaluation = fr_mul(&evaluation, &challenges.sumcheck_u_challenges[i]);
@@ -384,8 +386,8 @@ fn accumulate_relations(
         public_inputs_delta: relation_params.public_inputs_delta,
     };
 
-    // Accumulate all 26 subrelations
-    let grand = crate::relations::accumulate_relation_evaluations(evals, &rp, alphas, pow_partial);
+    // Accumulate all 28 subrelations (bb 0.87)
+    let grand = crate::relations::accumulate_relation_evaluations(&evals, &rp, alphas, pow_partial);
 
     Ok(grand)
 }
