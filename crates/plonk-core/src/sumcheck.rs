@@ -15,7 +15,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::field::{batch_inv, fr_add, fr_from_u64, fr_mul, fr_sub};
+use crate::field::{batch_inv, fr_add, fr_from_u64, fr_inv, fr_mul, fr_sub};
 use crate::proof::Proof;
 use crate::types::{Fr, SCALAR_ONE, SCALAR_ZERO};
 
@@ -133,6 +133,9 @@ fn check_round_sum(univariate: &[Fr], target: &Fr) -> bool {
     sum == *target
 }
 
+/// Toggle for A/B testing batch inversion optimization
+const USE_BATCH_INVERSION: bool = true;
+
 /// Calculate next target using barycentric interpolation with batch inversion
 /// B(χ) = ∏(χ - i) for i in 0..n
 /// result = B(χ) * Σ(u[i] / (BARY[i] * (χ - i)))
@@ -142,6 +145,15 @@ fn check_round_sum(univariate: &[Fr], target: &Fr) -> bool {
 /// New: 1 inversion per round × 28 rounds = ~84K CUs  
 /// Savings: ~300-400K CUs per proof
 fn next_target(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
+    if USE_BATCH_INVERSION {
+        next_target_batch(univariate, chi, is_zk)
+    } else {
+        next_target_individual(univariate, chi, is_zk)
+    }
+}
+
+/// Optimized version with batch inversion (ONE fr_inv call)
+fn next_target_batch(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
     let n = if is_zk { 9 } else { 8 };
 
     // Step 1: Compute chi_minus[i] = χ - i for all i (reused in both B(χ) and denominators)
@@ -170,6 +182,32 @@ fn next_target(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static 
     let mut acc = SCALAR_ZERO;
     for i in 0..n {
         let term = fr_mul(&univariate[i], &denom_invs[i]);
+        acc = fr_add(&acc, &term);
+    }
+
+    // result = B(χ) * acc
+    Ok(fr_mul(&b, &acc))
+}
+
+/// Original version with individual inversions (9 fr_inv calls per round)
+fn next_target_individual(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
+    let n = if is_zk { 9 } else { 8 };
+
+    // Compute B(χ) = ∏(χ - i)
+    let mut b = SCALAR_ONE;
+    for i in 0..n {
+        let chi_minus_i = fr_sub(chi, &I_FR[i]);
+        b = fr_mul(&b, &chi_minus_i);
+    }
+
+    // Accumulate: acc = Σ(u[i] / (BARY[i] * (χ - i)))
+    let mut acc = SCALAR_ZERO;
+    for i in 0..n {
+        let chi_minus_i = fr_sub(chi, &I_FR[i]);
+        let bary_i = if is_zk { &BARY_9[i] } else { &BARY_8[i] };
+        let denom = fr_mul(bary_i, &chi_minus_i);
+        let denom_inv = fr_inv(&denom).ok_or("inversion failed in barycentric")?;
+        let term = fr_mul(&univariate[i], &denom_inv);
         acc = fr_add(&acc, &term);
     }
 

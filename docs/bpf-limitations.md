@@ -260,8 +260,18 @@ For Solana, consider:
 4. ✅ **Karatsuba multiplication**: ~12% improvement in `fr_mul`
 5. ✅ **Montgomery multiplication**: **~87% improvement** in `fr_mul` (7x faster!)
 6. ✅ **Binary Extended GCD for `fr_inv`**: Much faster than Fermat's Little Theorem
-7. ✅ **Sumcheck splitting**: 2 rounds per TX, ~650K CUs each, works!
-8. ⏳ **MSM splitting**: Phase 3 exceeds 1.4M CUs, needs splitting
+7. ✅ **Batch inversion for sumcheck**: **38% savings** (1,065K → 655K CUs per 2 rounds)
+8. ✅ **Sumcheck splitting**: 2 rounds per TX, ~650K CUs each, works!
+9. ⏳ **MSM splitting**: Phase 3 exceeds 1.4M CUs, needs splitting
+
+### Batch Inversion Results (A/B Tested)
+
+| Sumcheck Round Mode | CUs per 2 rounds | Savings |
+|---------------------|------------------|---------|
+| Individual inversions (9 per round) | ~1,065K | baseline |
+| Batch inversion (1 per round) | ~655K | **-38%** |
+
+This validates the optimization from `docs/suggested-optimizations.md`.
 
 ## Integration Test vs Real BPF
 
