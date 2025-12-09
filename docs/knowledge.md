@@ -2,9 +2,39 @@
 
 This document captures learned insights, solutions, and important implementation details discovered during development.
 
+**Status: ✅ Complete!** End-to-end UltraHonk verification working with bb 0.87 / nargo 1.0.0-beta.8.
+
 ---
 
-## 🚨 Critical Discovery: UltraHonk, Not UltraPlonk
+## 🎉 Verification Complete!
+
+**December 2024:** Full UltraHonk verification implemented and tested.
+
+| Metric        | Value                          |
+| ------------- | ------------------------------ |
+| Unit Tests    | 56 passing                     |
+| Test Circuits | 7 verified                     |
+| Circuit Sizes | log_n 12-18 (4K to 256K gates) |
+| Proof Size    | 16,224 bytes (fixed, ZK)       |
+| VK Size       | 1,760 bytes                    |
+
+---
+
+## Toolchain Versions (Current)
+
+```bash
+$ nargo --version
+nargo version = 1.0.0-beta.8
+
+$ ~/.bb/bb --version
+bb - 0.87.0
+```
+
+Note: Earlier versions (bb "3.0", nargo 1.0.0-beta.15) used different formats. We now target bb 0.87.x.
+
+---
+
+## Critical Discovery: UltraHonk, Not UltraPlonk
 
 **Noir 1.0+ uses UltraHonk by default, NOT UltraPlonk!**
 
@@ -12,31 +42,11 @@ The `ultraplonk_verifier` reference we studied is for an older proof system. Noi
 
 | Aspect     | UltraPlonk (old) | UltraHonk (current) |
 | ---------- | ---------------- | ------------------- |
-| Proof size | ~2 KB            | ~5-16 KB            |
+| Proof size | ~2 KB            | 16,224 bytes (ZK)   |
 | Transcript | Keccak256        | Poseidon2 or Keccak |
 | bb scheme  | N/A (deprecated) | `ultra_honk`        |
 
-**Key implications:**
-
-- Our proof/VK parsing code needs updating for UltraHonk format
-- The test resources from `ultraplonk_verifier` are incompatible
-- We need to study UltraHonk verification, not UltraPlonk
-
----
-
 ## E2E Workflow (Verified Working)
-
-### Toolchain Versions
-
-```bash
-$ nargo --version
-nargo version = 1.0.0-beta.15
-
-$ ~/.bb/bb --version
-3.0.0-nightly.20251104
-```
-
-### Complete Workflow
 
 ```bash
 # 1. Compile circuit
@@ -46,22 +56,31 @@ nargo compile
 # 2. Generate witness
 nargo execute
 
-# 3. Generate proof (USE KECCAK for Solana!)
+# 3. Generate ZK proof (USE KECCAK + ZK for Solana!)
 ~/.bb/bb prove \
     -b ./target/simple_square.json \
     -w ./target/simple_square.gz \
+    --scheme ultra_honk \
     --oracle_hash keccak \
-    --write_vk \
+    --zk \
     -o ./target/keccak
 
-# 4. Verify externally
+# 4. Generate verification key
+~/.bb/bb write_vk \
+    -b ./target/simple_square.json \
+    --scheme ultra_honk \
+    --oracle_hash keccak \
+    -o ./target/keccak
+
+# 5. Verify externally (sanity check)
 ~/.bb/bb verify \
     -p ./target/keccak/proof \
     -k ./target/keccak/vk \
-    --oracle_hash keccak
+    --oracle_hash keccak \
+    --zk
 
-# 5. Run Solana tests
-cargo test -p example-verifier --test integration_test
+# 6. Run Solana verifier tests
+cargo test -p plonk-solana-core
 ```
 
 ---
@@ -105,52 +124,62 @@ Each circuit gets its own verifier program with embedded VK:
 
 ---
 
-## Proof Format (UltraHonk with Keccak)
+## Proof Format (UltraHonk bb 0.87 with Keccak + ZK)
 
-Based on `bb prove` output:
+Based on `bb prove --zk` output:
 
 ```
 target/keccak/
-├── proof           # 5184 bytes - the proof
-├── vk              # 1888 bytes - verification key
-├── public_inputs   # 32 bytes per input
-└── vk_hash         # 32 bytes - hash of VK
+├── proof           # 16,224 bytes - ZK proof (FIXED SIZE)
+├── vk              # 1,760 bytes - verification key
+└── public_inputs   # 32 bytes per input
 ```
 
-### ⚠️ Format Difference: Binary vs Solidity
+### Key Discovery: Fixed-Size Proofs in bb 0.87
 
-**bb outputs two different formats:**
+bb 0.87 produces **fixed-size proofs** padded to `CONST_PROOF_SIZE_LOG_N=28`, regardless of actual circuit size:
 
-| Format        | Size        | G1 Encoding | Purpose            |
-| ------------- | ----------- | ----------- | ------------------ |
-| Binary        | 5184 bytes  | 64 bytes    | Our proof files    |
-| Solidity/JSON | 14592 bytes | 128 bytes   | EVM verifier input |
+| Circuit Size | log_n | Proof Size | Notes |
+| ------------ | ----- | ---------- | ----- |
+| 4,096        | 12    | 16,224     | Fixed |
+| 8,192        | 13    | 16,224     | Fixed |
+| 262,144      | 18    | 16,224     | Fixed |
 
-The Solidity format uses limb splitting (136-bit low, ≤118-bit high) for each coordinate, resulting in 4 × 32 = 128 bytes per G1 point. Our binary format uses standard BN254 encoding (32 bytes per coordinate).
+### bb 0.87 G1 Point Encoding (Limbed Format)
 
-### VK Structure (1888 bytes)
+G1 points in bb 0.87 proofs use **128 bytes (4 × 32-byte limbs)**, not 64 bytes:
+
+- Each coordinate (x, y) is split into 2 limbs
+- Low limb: bits [0..128]
+- High limb: bits [128..256]
+- Total: 4 limbs × 32 bytes = 128 bytes per G1
+
+### VK Structure (1,760 bytes for bb 0.87)
 
 ```
-Header (96 bytes = 3 fields × 32 bytes):
-  [0..32]:   log2_circuit_size (as big-endian u256, value in last 4 bytes)
-  [32..64]:  log2_domain_size  (as big-endian u256)
-  [64..96]:  num_public_inputs (as big-endian u256)
+Header (32 bytes = 4 fields × 8 bytes):
+  [0..8]:    circuit_size (u64 LE) → 4096
+  [8..16]:   log_circuit_size (u64 LE) → 12
+  [16..24]:  num_public_inputs (u64 LE) → 17
+  [24..32]:  pub_inputs_offset (u64 LE) → 0
 
-G1 Commitments (1792 bytes = 28 points × 64 bytes):
-  28 selector/permutation polynomial commitments
+G1 Commitments (1728 bytes = 27 points × 64 bytes):
+  27 selector/permutation polynomial commitments
   Each G1 point is 64 bytes: x (32 bytes BE) || y (32 bytes BE)
 ```
 
-### Proof Structure (VARIABLE SIZE)
+Note: bb 0.87 removed Q_NNF, reducing from 28 to 27 commitments.
 
-> **Note:** We initially misunderstood this as fixed 81 chunks. See "RESOLVED: Proof Format" section below for correct understanding.
+### Proof Structure (FIXED SIZE: 16,224 bytes)
 
-The proof size depends on `log_circuit_size` from the VK:
+The proof contains 507 Fr elements = 16,224 bytes:
 
-- For `log_n=6` (test circuit): 162 Fr = **5184 bytes**
-- For `log_n=28` (max): ~382 Fr = **~12KB**
-
-The proof contains: pairing_point_object + commitments + sumcheck_univariates + sumcheck_evaluations + gemini_data + opening_proofs
+- Pairing point object (16 Fr)
+- Witness commitments (32 Fr, as 8 G1 × 4 limbs)
+- Libra data (5 Fr for ZK)
+- Sumcheck univariates (252 Fr = 28 rounds × 9 coefficients)
+- Sumcheck evaluations (40 Fr)
+- Libra/Gemini/Shplonk data (remaining Fr)
 
 ### Reference Implementation: yugocabrio/ultrahonk-rust-verifier
 
@@ -192,121 +221,126 @@ let result = alt_bn128_pairing_be(&pairing_input)?;
 
 ## Verification Algorithm Status
 
-### Implemented ✅
+### All Complete! ✅
 
-1. **Field Arithmetic** (`field.rs`)
+1. **Field Arithmetic** (`field.rs`) ✅
 
    - Fr add, sub, mul, neg, inv, div
    - 256-bit operations with proper mod r reduction
    - All tests passing
 
-2. **Fiat-Shamir Transcript** (`transcript.rs`)
+2. **Fiat-Shamir Transcript** (`transcript.rs`) ✅
 
    - Keccak256-based challenge generation
    - Split challenge (lower/upper 128 bits)
+   - Limbed G1 point appending for bb 0.87 format
    - Deterministic and tested
 
-3. **Proof/VK Parsing** (`proof.rs`, `key.rs`)
+3. **Proof/VK Parsing** (`proof.rs`, `key.rs`) ✅
 
-   - VK: 1888 bytes (3 header fields + 28 G1 commitments)
-   - Proof: Variable size based on `log_n` from VK
-   - Dynamic parser: `Proof::from_bytes(bytes, log_n, is_zk)`
+   - VK: 1,760 bytes (32-byte header + 27 G1 commitments)
+   - Proof: 16,224 bytes (fixed size for ZK in bb 0.87)
+   - Supports both old (1,888 byte) and new (1,760 byte) VK formats
+   - Dynamic parsing with limbed G1 point extraction
 
-4. **BN254 Operations** (`ops.rs`)
+4. **BN254 Operations** (`ops.rs`) ✅
+
    - G1 add, mul, neg via syscalls
    - MSM (multi-scalar multiplication)
-   - Pairing check
+   - Pairing check with correct G2 points
 
-### In Progress 🚧
+5. **Challenge Generation** (`verifier.rs`) ✅
 
-5. **Challenge Generation** (`verifier.rs`)
+   - All challenges match Solidity exactly:
+     - eta, eta_two, eta_three
+     - beta, gamma
+     - alphas[0..24] (25 challenges)
+     - gate_challenges[0..27] (28 challenges, fixed loop)
+     - sumcheck u_challenges
+     - libra_challenge (ZK)
+     - rho, gemini_r, shplonk_nu, shplonk_z
 
-   - ✅ eta, eta_two, eta_three generation correct
-   - ✅ beta, gamma generation correct
-   - ✅ alpha generation correct
-   - ✅ gate_challenges generation correct
-   - ✅ sumcheck u_challenges generation correct
-   - ✅ libra_challenge generation correct
+6. **Public Input Delta** ✅
 
-6. **Public Input Delta**
-
-   - ✅ Fixed: Uses `PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28`, NOT `circuit_size`
+   - Uses circuit_size (N) as separator (not 1<<28)
+   - Handles pairing point object as part of public inputs
    - Formula matches Solidity's `computePublicInputDelta`
 
-7. **Sumcheck Verification** (`sumcheck.rs`)
+7. **Sumcheck Verification** (`sumcheck.rs`) ✅
 
-   - ✅ Round-by-round verification passing (all 6 rounds)
-   - ✅ pow_partial computation correct
-   - ✅ ZK adjustment formula correct
-   - ✅ Batching formula correct (28 subrels, 27 alphas)
-   - ⚠️ Final relation check failing - grand_relation != target
+   - Round-by-round verification passing (LOG_N rounds)
+   - pow_partial computation correct
+   - ZK adjustment formula correct
+   - Batching formula correct (26 subrels, 25 alphas)
+   - Final relation check passes!
 
-   **Debugging findings:**
+8. **All 26 Subrelations** (`relations.rs`) ✅
 
-   - Expected grand_before_ZK (from target): 0x2dc50ff0...
-   - Actual grand_before_ZK (from relations): 0x0e8fbe33...
-   - For simple_square, only 4 subrelations should be non-zero (arith 0-1, perm 2-3)
-   - Actually seeing 21 non-zero: [0-12, 20-27]
-   - Memory (13-18) and NNF (19) correctly produce ZERO
-   - Lookup, Range, Elliptic, Poseidon are "leaking" non-zero values
+   - Arithmetic (0-1): Basic gates
+   - Permutation (2-3): Wire constraints
+   - Lookup (4-5): Table lookups
+   - DeltaRange (6-9): Range checks
+   - Elliptic (10-11): EC operations
+   - Auxiliary (12-17): ROM/RAM, non-native field
+   - Poseidon External (18-21): Hash external rounds
+   - Poseidon Internal (22-25): Hash internal rounds
 
-   **Root cause:** One or more relation formulas have subtle differences from Solidity
+9. **Shplemini Verification** (`shplemini.rs`) ✅
 
-   **Next step:** Use Foundry to generate expected subrelation values from Solidity verifier, then compare with our values to identify the exact discrepancy
+   - Full batchedEvaluation computation
+   - constantTermAccumulator with libraPolyEvals
+   - Full MSM for P0 computation (~70 commitments)
+   - Correct P1 negation
+   - All scalars match Solidity
 
-### Pending ❌
-
-8. **Shplemini Verification**
-
-   - Batched opening proof
-   - Final pairing point computation
-
-9. **Complete Pairing Check**
-   - Currently uses placeholder points
-   - Need proper batched claim aggregation
+10. **Final Pairing Check** ✅
+    - Uses correct G2 points (G2 generator and x·G2 from trusted setup)
+    - e(P0, G2) × e(P1, x·G2) = 1 verified
 
 ---
 
 ## 🔑 Critical Implementation Details
 
-### Wire Enum Indices (MUST match Solidity exactly!)
+### Wire Enum Indices (bb 0.87 - MUST match Solidity exactly!)
 
 ```rust
-// Solidity verifier's WIRE enum order:
+// bb 0.87 Solidity verifier's WIRE enum order (40 entities, no Q_NNF):
 Q_M = 0, Q_C = 1, Q_L = 2, Q_R = 3, Q_O = 4, Q_4 = 5, Q_LOOKUP = 6, Q_ARITH = 7,
-Q_RANGE = 8, Q_ELLIPTIC = 9, Q_MEMORY = 10, Q_NNF = 11,
-Q_POSEIDON2_EXTERNAL = 12, Q_POSEIDON2_INTERNAL = 13,
-SIGMA_1 = 14, SIGMA_2 = 15, SIGMA_3 = 16, SIGMA_4 = 17,
-ID_1 = 18, ID_2 = 19, ID_3 = 20, ID_4 = 21,
-TABLE_1 = 22, TABLE_2 = 23, TABLE_3 = 24, TABLE_4 = 25,
-LAGRANGE_FIRST = 26, LAGRANGE_LAST = 27,
-W_L = 28, W_R = 29, W_O = 30, W_4 = 31, Z_PERM = 32,
-LOOKUP_INVERSES = 33, LOOKUP_READ_COUNTS = 34, LOOKUP_READ_TAGS = 35,
-W_L_SHIFT = 36, W_R_SHIFT = 37, W_O_SHIFT = 38, W_4_SHIFT = 39, Z_PERM_SHIFT = 40
+Q_RANGE = 8, Q_ELLIPTIC = 9, Q_AUX = 10,
+Q_POSEIDON2_EXTERNAL = 11, Q_POSEIDON2_INTERNAL = 12,
+SIGMA_1 = 13, SIGMA_2 = 14, SIGMA_3 = 15, SIGMA_4 = 16,
+ID_1 = 17, ID_2 = 18, ID_3 = 19, ID_4 = 20,
+TABLE_1 = 21, TABLE_2 = 22, TABLE_3 = 23, TABLE_4 = 24,
+LAGRANGE_FIRST = 25, LAGRANGE_LAST = 26,
+W_L = 27, W_R = 28, W_O = 29, W_4 = 30, Z_PERM = 31,
+LOOKUP_INVERSES = 32, LOOKUP_READ_COUNTS = 33, LOOKUP_READ_TAGS = 34,
+W_L_SHIFT = 35, W_R_SHIFT = 36, W_O_SHIFT = 37, W_4_SHIFT = 38, Z_PERM_SHIFT = 39
 ```
 
-### Subrelation Index Mapping (28 total)
+### Subrelation Index Mapping (26 total for bb 0.87)
 
 ```
 - Arithmetic (2): indices 0-1
 - Permutation (2): indices 2-3
-- Lookup (3): indices 4-6
-- Range/DeltaRange (4): indices 7-10
-- Elliptic (2): indices 11-12
-- Memory (6): indices 13-18
-- NNF (1): index 19
-- Poseidon External (4): indices 20-23
-- Poseidon Internal (4): indices 24-27
+- Lookup (2): indices 4-5
+- Range/DeltaRange (4): indices 6-9
+- Elliptic (2): indices 10-11
+- Auxiliary (6): indices 12-17
+- Poseidon External (4): indices 18-21
+- Poseidon Internal (4): indices 22-25
 ```
 
-### Constants from Solidity
+Note: bb 0.87 removed NNF relation, reducing from 28 to 26 subrelations.
+
+### Constants from bb 0.87 Solidity
 
 ```
-NUMBER_OF_ENTITIES = 41
-NUMBER_OF_SUBRELATIONS = 28
-NUMBER_OF_ALPHAS = 27 (NUMBER_OF_SUBRELATIONS - 1)
-PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 1 << 28 = 268435456
+NUMBER_OF_ENTITIES = 40 (was 41)
+NUMBER_OF_SUBRELATIONS = 26 (was 28)
+NUMBER_OF_ALPHAS = 25 (was 27)
+CONST_PROOF_SIZE_LOG_N = 28
 ZK_BATCHED_RELATION_PARTIAL_LENGTH = 9
+BATCHED_RELATION_PARTIAL_LENGTH = 8
 ```
 
 ### Public Input Delta Formula
@@ -317,14 +351,15 @@ denominator_acc = gamma - beta * (offset + 1)
 // Then iterate over public_inputs and pairing_point_object
 ```
 
-## Open Questions
+## Open Questions (All Resolved! ✅)
 
 - [x] ~~UltraPlonk vs UltraHonk?~~ → **UltraHonk**
-- [x] ~~Which oracle hash?~~ → **Keccak**
-- [x] ~~Exact UltraHonk proof format structure~~ → **Documented above**
-- [ ] Complete challenge generation matching bb
-- [ ] Sumcheck relation evaluation
-- [ ] Shplemini batched opening verification
+- [x] ~~Which oracle hash?~~ → **Keccak + ZK**
+- [x] ~~Exact UltraHonk proof format structure~~ → **Fixed 16,224 bytes for bb 0.87**
+- [x] ~~Complete challenge generation matching bb~~ → **All 25+ challenges match**
+- [x] ~~Sumcheck relation evaluation~~ → **All 26 subrelations implemented**
+- [x] ~~Shplemini batched opening verification~~ → **Full MSM computation working**
+- [x] ~~Variable circuit size support~~ → **Tested log_n from 12 to 18**
 
 ---
 
@@ -563,9 +598,6 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 | Dec 2024 | **VK hash must be added to transcript first**                       |
 | Dec 2024 | 📚 Created docs/theory.md - complete UltraHonk theory walkthrough   |
 | Dec 2024 | 🧪 Created scripts/validate_theory.py - proof data validation       |
-| Dec 2024 | **🚨 VK HASH MISMATCH CONFIRMED** - our hash != bb's actual hash    |
-|          | bb's vk_hash: 0x093e299e...a85a75                                   |
-|          | Our computed: 0x208bd978...606d1d (WRONG!)                          |
 | Dec 2024 | **🔧 SUMCHECK CHALLENGE GENERATION FIXED!**                         |
 |          | Bug 1: split_challenge used 127 bits, Solidity uses 128 bits        |
 |          | Bug 2: We cached hi for odd rounds, Solidity discards hi every time |
@@ -590,3 +622,12 @@ bb's actual vk hash:      0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a89409
 |          | 52 unit tests passing                                               |
 |          | Test vectors: valid proof, tampered proof, wrong public input       |
 |          | All verification steps match Solidity verifier exactly              |
+| Dec 2024 | **🔄 Upgraded to bb 0.87 / nargo 1.0.0-beta.8**                     |
+|          | VK format changed: 1,760 bytes (27 G1, no Q_NNF)                    |
+|          | Proof format: Fixed 16,224 bytes with limbed G1 encoding            |
+|          | Constants changed: 26 subrels, 25 alphas, 40 entities               |
+|          | Gate challenges: Fixed 28 iterations (CONST_PROOF_SIZE_LOG_N)       |
+| Dec 2024 | **✅ ALL 7 TEST CIRCUITS VERIFIED!**                                |
+|          | simple_square, iterated_square_100/1000/10k, fib_chain_100          |
+|          | hash_batch (log_n=17), merkle_membership (log_n=18)                 |
+|          | 56 unit tests passing                                               |

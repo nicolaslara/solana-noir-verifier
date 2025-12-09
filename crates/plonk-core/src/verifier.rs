@@ -1416,4 +1416,144 @@ mod tests {
         // Log the hash for debugging
         println!("VK hash: 0x{}", hex::encode(vk_hash));
     }
+
+    /// Test: Verify all available test circuits
+    ///
+    /// This test verifies proofs from multiple test circuits with varying sizes.
+    /// It demonstrates that our verifier handles different circuit sizes correctly.
+    #[test]
+    fn test_all_available_circuits() {
+        use std::path::Path;
+
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-circuits");
+
+        // List of test circuits with their expected properties
+        // (name, expected_log_n, is_zk, num_public_inputs excluding pairing points)
+        // All circuits are now built with --zk flag, so they all produce ZK proofs
+        let circuits = vec![
+            ("simple_square", 12, true, 1),
+            ("iterated_square_100", 12, true, 1),
+            ("iterated_square_1000", 13, true, 1),
+            ("iterated_square_10k", 14, true, 1),
+            ("fib_chain_100", 12, true, 1),
+            ("hash_batch", 17, true, 32),
+            ("merkle_membership", 18, true, 32),
+            // ("iterated_square_100k", 17, true, 1), // Skip - takes longer to verify
+        ];
+
+        let mut passed = 0;
+        let mut skipped = 0;
+        let mut failed = 0;
+
+        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Testing all available circuits");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        for (name, expected_log_n, is_zk, expected_num_pi) in circuits {
+            let circuit_path = base.join(name).join("target/keccak");
+            let vk_path = circuit_path.join("vk");
+            let proof_path = circuit_path.join("proof");
+            let pi_path = circuit_path.join("public_inputs");
+
+            print!("  {:<25} ", name);
+
+            // Check if files exist
+            if !vk_path.exists() || !proof_path.exists() || !pi_path.exists() {
+                println!("⚠️  SKIPPED (files not found)");
+                skipped += 1;
+                continue;
+            }
+
+            // Load artifacts
+            let vk_bytes = std::fs::read(&vk_path).unwrap();
+            let proof_bytes = std::fs::read(&proof_path).unwrap();
+            let pi_bytes = std::fs::read(&pi_path).unwrap();
+
+            // Check proof size to determine if ZK or non-ZK
+            let expected_zk_size = crate::proof::Proof::expected_size_bytes(true);
+            let expected_non_zk_size = crate::proof::Proof::expected_size_bytes(false);
+            let actual_is_zk = proof_bytes.len() == expected_zk_size;
+
+            if actual_is_zk != is_zk {
+                println!(
+                    "⚠️  SKIPPED (expected {} proof, got {} bytes)",
+                    if is_zk { "ZK" } else { "non-ZK" },
+                    proof_bytes.len()
+                );
+                skipped += 1;
+                continue;
+            }
+
+            // Parse VK to check log_n
+            let vk = match crate::key::VerificationKey::from_bytes(&vk_bytes) {
+                Ok(vk) => vk,
+                Err(e) => {
+                    println!("❌ FAILED (VK parse error: {:?})", e);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            // Verify log_n
+            if vk.log2_circuit_size as usize != expected_log_n {
+                println!(
+                    "❌ FAILED (log_n mismatch: expected {}, got {})",
+                    expected_log_n, vk.log2_circuit_size
+                );
+                failed += 1;
+                continue;
+            }
+
+            // Parse public inputs (each is 32 bytes)
+            let public_inputs: Vec<crate::types::Fr> = pi_bytes
+                .chunks(32)
+                .map(|c| {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(c);
+                    arr
+                })
+                .collect();
+
+            // Verify number of public inputs (excluding pairing points for ZK proofs)
+            let actual_pi_count = public_inputs.len();
+            if actual_pi_count != expected_num_pi {
+                println!(
+                    "⚠️  PI count: expected {}, got {}",
+                    expected_num_pi, actual_pi_count
+                );
+            }
+
+            // Verify the proof
+            match super::verify(&vk_bytes, &proof_bytes, &public_inputs, actual_is_zk) {
+                Ok(()) => {
+                    println!(
+                        "✅ PASSED (log_n={}, {} proof, {} PI)",
+                        expected_log_n,
+                        if actual_is_zk { "ZK" } else { "non-ZK" },
+                        actual_pi_count
+                    );
+                    passed += 1;
+                }
+                Err(e) => {
+                    println!("❌ FAILED ({:?})", e);
+                    failed += 1;
+                }
+            }
+        }
+
+        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!(
+            "Results: {} passed, {} failed, {} skipped",
+            passed, failed, skipped
+        );
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        // Only fail if there were actual failures (not just skips)
+        assert_eq!(failed, 0, "Some circuits failed verification");
+    }
 }

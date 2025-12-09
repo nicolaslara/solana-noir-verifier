@@ -563,8 +563,7 @@ fn test_actual_eta_computation() {
     use sha3::{Digest, Keccak256};
 
     // Load actual proof if available
-    let Ok(proof_bytes) =
-        std::fs::read("../../test-circuits/simple_square/target/keccak/proof")
+    let Ok(proof_bytes) = std::fs::read("../../test-circuits/simple_square/target/keccak/proof")
     else {
         println!("⚠️  Proof file not found. Skipping test.");
         return;

@@ -92,12 +92,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### Version Requirements
 
-| Tool              | Version        | Notes                 |
-| ----------------- | -------------- | --------------------- |
-| Noir (nargo)      | 1.0.0-beta.15+ | UltraHonk support     |
-| Barretenberg (bb) | 3.0.0+         | Auto-detected by bbup |
-| Rust              | 1.75+          |                       |
-| Solana SDK        | 3.0+           | BN254 syscalls        |
+| Tool              | Version      | Notes                    |
+| ----------------- | ------------ | ------------------------ |
+| Noir (nargo)      | 1.0.0-beta.8 | UltraHonk/Keccak support |
+| Barretenberg (bb) | 0.87.x       | Auto-detected by bbup    |
+| Rust              | 1.75+        |                          |
+| Solana SDK        | 3.0+         | BN254 syscalls           |
 
 ## 📋 E2E Workflow
 
@@ -135,15 +135,20 @@ nargo execute                    # → target/my_circuit.gz (witness)
 ~/.bb/bb prove \
     -b ./target/my_circuit.json \
     -w ./target/my_circuit.gz \
-    --oracle_hash keccak \       # Use Keccak for Solana (~5KB proofs)
-    --write_vk \
-    -o ./target/keccak           # → proof, vk, public_inputs
+    --oracle_hash keccak \
+    --zk \                       # Use ZK mode for Solana (~16KB proofs)
+    -o ./target/keccak           # → proof, public_inputs
+
+~/.bb/bb write_vk \
+    -b ./target/my_circuit.json \
+    --oracle_hash keccak \
+    -o ./target/keccak           # → vk
 ```
 
 #### 1.3 Verify with bb (Sanity Check)
 
 ```bash
-~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk --oracle_hash keccak
+~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk --oracle_hash keccak --zk
 # Expected: "Proof verified successfully"
 ```
 
@@ -170,9 +175,9 @@ This generates:
 ```rust
 // programs/my_circuit_verifier/src/vk.rs
 pub const NUM_PUBLIC_INPUTS: usize = 1;
-pub const PROOF_SIZE: usize = 5184;
-pub const VK_SIZE: usize = 1888;
-pub const VK_BYTES: [u8; 1888] = [ /* your circuit's VK */ ];
+pub const PROOF_SIZE: usize = 16224;  // ZK proof (fixed size in bb 0.87)
+pub const VK_SIZE: usize = 1760;      // VK size
+pub const VK_BYTES: [u8; 1760] = [ /* your circuit's VK */ ];
 ```
 
 #### 2.2 Create Your Verifier Program
@@ -229,14 +234,16 @@ Run all of Phase 1 + 2.1 in one command:
 
 ## 📊 Proof Formats
 
-Barretenberg supports two oracle hash modes:
+Barretenberg 0.87 supports two oracle hash modes:
 
-| Mode                | Proof Size | VK Size   | Use Case         |
-| ------------------- | ---------- | --------- | ---------------- |
-| Poseidon2 (default) | ~16 KB     | ~3.6 KB   | Recursive proofs |
-| **Keccak**          | **~5 KB**  | **~2 KB** | **EVM/Solana** ✓ |
+| Mode                | Proof Size   | VK Size   | Use Case         |
+| ------------------- | ------------ | --------- | ---------------- |
+| Poseidon2 (default) | ~16 KB       | ~3.6 KB   | Recursive proofs |
+| **Keccak + ZK**     | **16,224 B** | **1,760** | **EVM/Solana** ✓ |
 
-**Always use `--oracle_hash keccak` for Solana verification.**
+**Always use `--oracle_hash keccak --zk` for Solana verification.**
+
+Note: bb 0.87 produces **fixed-size proofs** (16,224 bytes for ZK) regardless of circuit complexity. This is due to `CONST_PROOF_SIZE_LOG_N=28` padding.
 
 ## 🏗️ Project Structure
 
@@ -290,24 +297,36 @@ cargo run -p plonk-solana-vk-codegen -- \
 - [`tasks.md`](./tasks.md) - Implementation progress
 - [`docs/knowledge.md`](./docs/knowledge.md) - Implementation notes
 
-## ⚠️ Current Status
+## ✅ Current Status
 
-**Work in Progress** - The e2e workflow is set up but verification logic is not complete.
+**Complete!** End-to-end UltraHonk verification working with bb 0.87 / nargo 1.0.0-beta.8.
 
 ### Completed ✅
 
 - [x] Project structure and dependencies
 - [x] BN254 operations via syscalls
-- [x] Proof/VK parsing
+- [x] Proof/VK parsing (bb 0.87 format with limbed G1 points)
 - [x] Fiat-Shamir transcript (Keccak256)
-- [x] Solana program template
-- [x] E2E test harness
+- [x] All 25 alpha challenges generation
+- [x] Gate challenges (CONST_PROOF_SIZE_LOG_N iterations)
+- [x] Sumcheck verification (all rounds)
+- [x] All 26 subrelations (arithmetic, permutation, lookup, range, elliptic, aux, poseidon)
+- [x] Shplemini batch opening verification
+- [x] KZG pairing check
+- [x] **56 unit tests passing**
+- [x] **7 test circuits verified** (log_n from 12 to 18)
 
-### TODO 🚧
+### Test Circuits Verified ✅
 
-- [ ] UltraHonk widget evaluations
-- [ ] KZG pairing verification
-- [ ] Full e2e proof verification
+| Circuit              | log_n | Public Inputs | Status |
+| -------------------- | ----- | ------------- | ------ |
+| simple_square        | 12    | 1             | ✅     |
+| iterated_square_100  | 12    | 1             | ✅     |
+| iterated_square_1000 | 13    | 1             | ✅     |
+| iterated_square_10k  | 14    | 1             | ✅     |
+| fib_chain_100        | 12    | 1             | ✅     |
+| hash_batch           | 17    | 32            | ✅     |
+| merkle_membership    | 18    | 32            | ✅     |
 
 ## 🔗 References
 

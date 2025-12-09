@@ -1,10 +1,16 @@
 # Solana Noir Verifier - Implementation Tasks
 
-## 🚨 Critical Discovery
+## ✅ Implementation Complete!
 
-**Noir 1.0 uses UltraHonk, NOT UltraPlonk!**
+**December 2024:** Full UltraHonk verification working with bb 0.87 / nargo 1.0.0-beta.8.
 
-The `ultraplonk_verifier` reference is for an older system. We need to implement UltraHonk verification.
+| Metric        | Value                    |
+| ------------- | ------------------------ |
+| Unit Tests    | 56 passing               |
+| Test Circuits | 7 verified               |
+| Circuit Sizes | log_n 12-18              |
+| Proof Size    | 16,224 bytes (fixed, ZK) |
+| VK Size       | 1,760 bytes              |
 
 ---
 
@@ -17,24 +23,28 @@ nargo compile
 # 2. Execute (generate witness)
 nargo execute
 
-# 3. Prove (USE KECCAK!)
+# 3. Prove (USE KECCAK + ZK!)
 ~/.bb/bb prove -b ./target/circuit.json -w ./target/circuit.gz \
-    --oracle_hash keccak --write_vk -o ./target/keccak
+    --scheme ultra_honk --oracle_hash keccak --zk -o ./target/keccak
 
-# 4. Verify externally
+# 4. Write VK
+~/.bb/bb write_vk -b ./target/circuit.json \
+    --scheme ultra_honk --oracle_hash keccak -o ./target/keccak
+
+# 5. Verify externally
 ~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk \
-    --oracle_hash keccak
+    --oracle_hash keccak --zk
 
-# 5. Solana test
-cargo test -p example-verifier --test integration_test
+# 6. Solana verifier test
+cargo test -p plonk-solana-core
 ```
 
-### Proof Sizes
+### Sizes (bb 0.87)
 
-| Oracle     | Proof    | VK       | Use          |
-| ---------- | -------- | -------- | ------------ |
-| Poseidon2  | 16 KB    | 3.6 KB   | Recursive    |
-| **Keccak** | **5 KB** | **2 KB** | **Solana** ✓ |
+| Mode          | Proof      | VK        | Use          |
+| ------------- | ---------- | --------- | ------------ |
+| Poseidon2     | ~16 KB     | ~3.6 KB   | Recursive    |
+| **Keccak+ZK** | **16,224** | **1,760** | **Solana** ✓ |
 
 ---
 
@@ -159,46 +169,49 @@ Our implementation handles **variable-size proofs** based on the actual circuit'
 
 ### Test Circuit Suite (December 2024)
 
-All circuits verified with `bb` (Barretenberg CLI):
+All circuits verified with `bb 0.87` (ZK proofs):
 
-| Circuit                | ACIR Opcodes | n (circuit size) | log_n | Proof Size | Features             |
-| ---------------------- | ------------ | ---------------- | ----- | ---------- | -------------------- |
-| `simple_square`        | 1            | 4,096            | 12    | 16,224     | Basic arithmetic     |
-| `iterated_square_100`  | 100          | 4,096            | 12    | 14,592     | 100 iterations       |
-| `iterated_square_1000` | 1,000        | 8,192            | 13    | 14,592     | 1k iterations        |
-| `iterated_square_10k`  | 10,000       | 16,384           | 14    | 14,592     | 10k iterations       |
-| `iterated_square_100k` | 100,000      | 131,072          | 17    | 14,592     | 100k iterations      |
-| `hash_batch`           | 2,112        | 131,072          | 17    | 14,592     | 32× blake3 + XOR     |
-| `merkle_membership`    | 2,688        | 262,144          | 18    | 14,592     | 16-level Merkle tree |
-| `fib_chain_100`        | 1            | 4,096            | 12    | 14,592     | Fibonacci chain      |
+| Circuit                | ACIR Opcodes | n (circuit size) | log_n | Proof Size | Features             | Status |
+| ---------------------- | ------------ | ---------------- | ----- | ---------- | -------------------- | ------ |
+| `simple_square`        | 1            | 4,096            | 12    | 16,224     | Basic arithmetic     | ✅     |
+| `iterated_square_100`  | 100          | 4,096            | 12    | 16,224     | 100 iterations       | ✅     |
+| `iterated_square_1000` | 1,000        | 8,192            | 13    | 16,224     | 1k iterations        | ✅     |
+| `iterated_square_10k`  | 10,000       | 16,384           | 14    | 16,224     | 10k iterations       | ✅     |
+| `iterated_square_100k` | 100,000      | 131,072          | 17    | 16,224     | 100k iterations      | ⏭️     |
+| `hash_batch`           | 2,112        | 131,072          | 17    | 16,224     | 32× blake3 + XOR     | ✅     |
+| `merkle_membership`    | 2,688        | 262,144          | 18    | 16,224     | 16-level Merkle tree | ✅     |
+| `fib_chain_100`        | 1            | 4,096            | 12    | 16,224     | Fibonacci chain      | ✅     |
 
-**Key observations:**
+**Key observations (bb 0.87):**
 
-- Proof size is **constant** (14,592 bytes) regardless of circuit complexity
-- All proofs have exactly **456 field elements**
+- ZK proof size is **constant** (16,224 bytes = 507 Fr) regardless of circuit complexity
+- bb 0.87 uses fixed-size proofs padded to `CONST_PROOF_SIZE_LOG_N=28`
 - Hash operations (blake3) expand circuit size significantly more than arithmetic
 - `hash_batch` (2112 opcodes) → log_n=17, `merkle_membership` (2688 opcodes) → log_n=18
 
-Key differences from zkVerify/yugocabrio:
+**Our implementation:**
 
-- They use **fixed-size arrays** (`[Fr; 28]`) and handle "dummy rounds" for smaller circuits
-- We use **dynamic Vecs** sized to actual `log_n` from the VK
-- Both approaches work correctly, ours is more memory-efficient for small circuits
+- Handles both old (1,888-byte) and new (1,760-byte) VK formats
+- Fixed-size proof parsing with limbed G1 point extraction
+- All challenges match Solidity verifier exactly
 
-### Completed Debugging (All Verified Correct)
+### Completed Debugging (All Verified Correct) ✅
 
-1. ✅ **Challenge generation** - All matches Solidity
-2. ✅ **Wire enum indices** - All 41 match Solidity WIRE enum
-3. ✅ **NUM_SUBRELATIONS = 28, NUMBER_OF_ALPHAS = 27**
-4. ✅ **public_input_delta** - Fixed to use 1<<28 separator
-5. ✅ **Sumcheck round verification** - All 6 pass
+1. ✅ **Challenge generation** - All matches Solidity (25 alphas, 28 gate challenges)
+2. ✅ **Wire enum indices** - All 40 match bb 0.87 Solidity WIRE enum
+3. ✅ **NUM_SUBRELATIONS = 26, NUMBER_OF_ALPHAS = 25** (updated for bb 0.87)
+4. ✅ **public_input_delta** - Uses circuit_size (N) as separator
+5. ✅ **Sumcheck round verification** - All LOG_N rounds pass
 6. ✅ **ZK adjustment formula** - Matches Solidity exactly
-7. **Relation Evaluation** - 26 subrelations
-   - Arithmetic (0-1) and Permutation (2-3) are critical
-   - Many others may be zero for simple circuits
-8. **Shplemini MSM** - Final pairing point computation
-   - Currently using simplified placeholder
-   - Needs full ~70 commitment MSM
+7. ✅ **All 26 Subrelations** - Full implementation
+   - Arithmetic (0-1), Permutation (2-3), Lookup (4-5)
+   - DeltaRange (6-9), Elliptic (10-11), Auxiliary (12-17)
+   - Poseidon External (18-21), Poseidon Internal (22-25)
+8. ✅ **Shplemini MSM** - Full ~70 commitment computation
+   - batchedEvaluation matches Solidity
+   - constantTermAccumulator with libraPolyEvals
+   - All scalars match Solidity
+9. ✅ **Final Pairing Check** - Uses correct G2 points
 
 ---
 
@@ -282,12 +295,15 @@ The proof DOES contain sumcheck data - it's just sized for the actual circuit:
 4. **Final Check**
    - `pairing_check(p0, p1)` with fixed G2 constants
 
-### Key Constants
+### Key Constants (bb 0.87)
 
 ```rust
 CONST_PROOF_SIZE_LOG_N = 28
 BATCHED_RELATION_PARTIAL_LENGTH = 8
-NUMBER_OF_ENTITIES = 41
+ZK_BATCHED_RELATION_PARTIAL_LENGTH = 9
+NUMBER_OF_ENTITIES = 40 (was 41)
+NUMBER_OF_SUBRELATIONS = 26 (was 28)
+NUMBER_OF_ALPHAS = 25 (was 27)
 NUMBER_UNSHIFTED = 35
 NUMBER_SHIFTED = 5
 ```

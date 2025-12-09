@@ -34,20 +34,23 @@ Each circuit is compiled with `nargo`, then proved and verified with `bb` (Barre
 
 Total data needed to verify a proof = **Proof + VK + Public Inputs**
 
+All proofs are ZK proofs (built with `--zk` flag).
+
 | Circuit                | Proof  | VK    | Public Inputs | Total  | Public Output              |
 | ---------------------- | ------ | ----- | ------------- | ------ | -------------------------- |
 | `simple_square`        | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
-| `iterated_square_100`  | 14,592 | 1,760 | 32            | 16,384 | `pub Field` (1 field)      |
-| `iterated_square_1000` | 14,592 | 1,760 | 32            | 16,384 | `pub Field` (1 field)      |
-| `iterated_square_10k`  | 14,592 | 1,760 | 32            | 16,384 | `pub Field` (1 field)      |
-| `iterated_square_100k` | 14,592 | 1,760 | 32            | 16,384 | `pub Field` (1 field)      |
-| `hash_batch`           | 14,592 | 1,760 | 1,024         | 17,376 | `pub [u8; 32]` (32 fields) |
-| `merkle_membership`    | 14,592 | 1,760 | 1,024         | 17,376 | `pub [u8; 32]` (32 fields) |
-| `fib_chain_100`        | 14,592 | 1,760 | 32            | 16,384 | `pub Field` (1 field)      |
+| `iterated_square_100`  | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
+| `iterated_square_1000` | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
+| `iterated_square_10k`  | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
+| `iterated_square_100k` | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
+| `hash_batch`           | 16,224 | 1,760 | 1,024         | 19,008 | `pub [u8; 32]` (32 fields) |
+| `merkle_membership`    | 16,224 | 1,760 | 1,024         | 19,008 | `pub [u8; 32]` (32 fields) |
+| `fib_chain_100`        | 16,224 | 1,760 | 32            | 18,016 | `pub Field` (1 field)      |
 
 ## Key Observations
 
-- **Proof size is constant** (~14.6 KB, 456 field elements) regardless of circuit complexity
+- **ZK Proof size is constant** (16,224 bytes = 507 field elements) regardless of circuit complexity
+  - bb 0.87 uses fixed-size proofs based on `CONST_PROOF_SIZE_LOG_N=28`
 - **VK size is constant** (1,760 bytes) regardless of circuit complexity
 - **Public inputs vary** based on the circuit's public outputs (32 bytes per field element)
 - Hash operations (blake3) expand circuit size significantly more than arithmetic:

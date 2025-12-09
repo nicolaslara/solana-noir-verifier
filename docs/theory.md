@@ -159,14 +159,14 @@ UltraHonk is Aztec/Barretenberg's latest proving system, evolved from UltraPlonk
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Sizes and Costs (Our Test Circuit)
+### Sizes and Costs (bb 0.87)
 
-| Component          | Size       | Notes                      |
-| ------------------ | ---------- | -------------------------- |
-| Verification Key   | 1888 bytes | 28 G1 commitments + header |
-| Proof (ZK, Keccak) | 5184 bytes | 162 field elements         |
-| Public Input       | 32 bytes   | Just `y = 9`               |
-| Solana Compute     | ~300K CU   | Using BN254 syscalls       |
+| Component          | Size         | Notes                               |
+| ------------------ | ------------ | ----------------------------------- |
+| Verification Key   | 1,760 bytes  | 27 G1 commitments (limbed) + header |
+| Proof (ZK, Keccak) | 16,224 bytes | 507 field elements (fixed size)     |
+| Public Input       | 32 bytes     | Just `y = 9`                        |
+| Solana Compute     | ~300K CU     | Using BN254 syscalls                |
 
 ---
 
@@ -274,12 +274,14 @@ From our VK (first 96 bytes = 3 headers):
 
 UltraHonk defines several constants that are **fixed across all circuits**:
 
-| Constant                 | Value | Meaning                                                                                     |
-| ------------------------ | ----- | ------------------------------------------------------------------------------------------- |
-| `CONST_PROOF_SIZE_LOG_N` | 28    | Maximum supported log₂(circuit_size). Proofs are padded to this size for fixed-size format. |
-| `NUMBER_OF_SUBRELATIONS` | 26    | Total number of subrelations (constraints) checked in sumcheck.                             |
-| `NUMBER_OF_ALPHAS`       | 25    | Alpha challenges for batching subrelations (= NUM_SUBRELATIONS - 1).                        |
-| `NUMBER_OF_ENTITIES`     | 40    | Total polynomial evaluations in sumcheck (27 VK + 8 witness + 5 shifted).                   |
+| Constant                             | Value | Meaning                                                                                     |
+| ------------------------------------ | ----- | ------------------------------------------------------------------------------------------- |
+| `CONST_PROOF_SIZE_LOG_N`             | 28    | Maximum supported log₂(circuit_size). Proofs are padded to this size for fixed-size format. |
+| `NUMBER_OF_SUBRELATIONS`             | 26    | Total number of subrelations (constraints) checked in sumcheck.                             |
+| `NUMBER_OF_ALPHAS`                   | 25    | Alpha challenges for batching subrelations (= NUM_SUBRELATIONS - 1).                        |
+| `NUMBER_OF_ENTITIES`                 | 40    | Total polynomial evaluations in sumcheck (27 VK + 8 witness + 5 shifted).                   |
+| `ZK_BATCHED_RELATION_PARTIAL_LENGTH` | 9     | Coefficients per sumcheck univariate (ZK mode).                                             |
+| `BATCHED_RELATION_PARTIAL_LENGTH`    | 8     | Coefficients per sumcheck univariate (non-ZK mode).                                         |
 
 And one constant that **varies per circuit**:
 
@@ -289,17 +291,21 @@ And one constant that **varies per circuit**:
 
 **Why fixed constants matter:**
 
-- The transcript always hashes `CONST_PROOF_SIZE_LOG_N` times for gate challenges, regardless of actual circuit size
+- The transcript always hashes `CONST_PROOF_SIZE_LOG_N` (28) times for gate challenges, regardless of actual circuit size
+- Sumcheck univariates are padded to `CONST_PROOF_SIZE_LOG_N` rounds in proofs
 - Alpha generation loops `NUMBER_OF_ALPHAS / 2` times to generate pairs of challenges
+- Gemini fold commitments and evaluations are also fixed to `CONST_PROOF_SIZE_LOG_N - 1` and `CONST_PROOF_SIZE_LOG_N` respectively
 - This ensures transcript consistency across different circuit sizes
 
 **Example across circuits:**
 
 ```
-simple_square:       LOG_N = 12, all other constants fixed
-iterated_square_100: LOG_N = 12, all other constants fixed
-iterated_square_1000: LOG_N = 13, all other constants fixed
-fib_chain_100:       LOG_N = 12, all other constants fixed
+simple_square:        LOG_N = 12, circuit_size = 4,096
+iterated_square_100:  LOG_N = 12, circuit_size = 4,096
+iterated_square_1000: LOG_N = 13, circuit_size = 8,192
+iterated_square_10k:  LOG_N = 14, circuit_size = 16,384
+hash_batch:           LOG_N = 17, circuit_size = 131,072
+merkle_membership:    LOG_N = 18, circuit_size = 262,144
 ```
 
 ---
@@ -398,7 +404,7 @@ This checks that P(τ) - y = Q(τ) · (τ - z), which implies P(z) = y.
 
 ### VK Commitments
 
-The VK contains 28 G1 points - commitments to the circuit's fixed polynomials:
+The VK contains 27 G1 points - commitments to the circuit's fixed polynomials:
 
 | Commitment                           | What It Represents         |
 | ------------------------------------ | -------------------------- |
@@ -410,6 +416,8 @@ The VK contains 28 G1 points - commitments to the circuit's fixed polynomials:
 | `[L_first], [L_last]`                | Lagrange basis polynomials |
 
 Each G1 point is 64 bytes (32-byte x + 32-byte y coordinate).
+
+**Note:** bb 0.87 removed Q_NNF, so there are now 27 commitments (not 28).
 
 ---
 
@@ -783,21 +791,22 @@ fn vk_g2() -> G2 {
 
 ## 13. Data Formats: VK and Proof
 
-### Verification Key (1888 bytes)
+### Verification Key (1,760 bytes for bb 0.87)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ Header (96 bytes)                                               │
+│ Header (32 bytes)                                               │
 ├─────────────────┬──────────────────────────────────────────────┤
-│ [0..32]         │ log2_circuit_size (u256, BE) → 6             │
-│ [32..64]        │ log2_domain_size (u256, BE) → 17             │
-│ [64..96]        │ num_public_inputs (u256, BE) → 1             │
+│ [0..8]          │ circuit_size (u64, LE) → 4096                │
+│ [8..16]         │ log_circuit_size (u64, LE) → 12              │
+│ [16..24]        │ num_public_inputs (u64, LE) → 17             │
+│ [24..32]        │ pub_inputs_offset (u64, LE) → 0              │
 ├─────────────────┴──────────────────────────────────────────────┤
-│ Commitments (28 × 64 = 1792 bytes)                              │
+│ Commitments (27 × 64 = 1,728 bytes)                             │
 ├────────────────────────────────────────────────────────────────┤
 │ G1 point format: x (32 bytes BE) ‖ y (32 bytes BE)             │
 │                                                                 │
-│ Order (matches Solidity's WIRE enum):                          │
+│ Order (matches bb 0.87 Solidity's WIRE enum):                  │
 │   [0]  Q_m        - multiplication selector                    │
 │   [1]  Q_c        - constant selector                          │
 │   [2]  Q_l        - left wire selector                         │
@@ -808,78 +817,79 @@ fn vk_g2() -> G2 {
 │   [7]  Q_arith    - arithmetic gate indicator                  │
 │   [8]  Q_range    - range constraint selector                  │
 │   [9]  Q_elliptic - elliptic curve selector                    │
-│   [10] Q_memory   - memory selector                            │
-│   [11] Q_nnf      - NNF selector                               │
-│   [12] Q_poseidon2_external                                    │
-│   [13] Q_poseidon2_internal                                    │
-│   [14] σ₁        - permutation poly 1                          │
-│   [15] σ₂        - permutation poly 2                          │
-│   [16] σ₃        - permutation poly 3                          │
-│   [17] σ₄        - permutation poly 4                          │
-│   [18] ID₁       - identity poly 1                             │
-│   [19] ID₂       - identity poly 2                             │
-│   [20] ID₃       - identity poly 3                             │
-│   [21] ID₄       - identity poly 4                             │
-│   [22] Table₁    - lookup table column 1                       │
-│   [23] Table₂    - lookup table column 2                       │
-│   [24] Table₃    - lookup table column 3                       │
-│   [25] Table₄    - lookup table column 4                       │
-│   [26] L_first   - Lagrange first row                          │
-│   [27] L_last    - Lagrange last row                           │
+│   [10] Q_aux      - auxiliary selector (memory/ROM)            │
+│   [11] Q_poseidon2_external                                    │
+│   [12] Q_poseidon2_internal                                    │
+│   [13] σ₁        - permutation poly 1                          │
+│   [14] σ₂        - permutation poly 2                          │
+│   [15] σ₃        - permutation poly 3                          │
+│   [16] σ₄        - permutation poly 4                          │
+│   [17] ID₁       - identity poly 1                             │
+│   [18] ID₂       - identity poly 2                             │
+│   [19] ID₃       - identity poly 3                             │
+│   [20] ID₄       - identity poly 4                             │
+│   [21] Table₁    - lookup table column 1                       │
+│   [22] Table₂    - lookup table column 2                       │
+│   [23] Table₃    - lookup table column 3                       │
+│   [24] Table₄    - lookup table column 4                       │
+│   [25] L_first   - Lagrange first row                          │
+│   [26] L_last    - Lagrange last row                           │
 └────────────────────────────────────────────────────────────────┘
+
+Note: bb 0.87 removed Q_NNF, reducing from 28 to 27 commitments.
 ```
 
-### Proof Structure (Variable Size)
+### Proof Structure (Fixed Size: 16,224 bytes for bb 0.87 ZK)
 
-For ZK proof with log(n)=6: **162 Fr elements = 5184 bytes**
+bb 0.87 produces **fixed-size proofs** padded to `CONST_PROOF_SIZE_LOG_N=28`.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ 1. Pairing Point Object (16 Fr = 512 bytes)                    │
-│    IPA accumulator data for recursion                          │
-│    Format: 4 limbs × 4 coordinates (lhs.x, lhs.y, rhs.x, rhs.y)│
+│    Recursive proof aggregation data (used as public inputs)    │
 ├────────────────────────────────────────────────────────────────┤
-│ 2. Witness Commitments (8 G1 = 16 Fr = 512 bytes)              │
-│    [0-1]   W₁ commitment                                       │
-│    [2-3]   W₂ commitment                                       │
-│    [4-5]   W₃ commitment                                       │
-│    [6-7]   lookup_read_counts commitment                       │
-│    [8-9]   lookup_read_tags commitment                         │
-│    [10-11] W₄ commitment                                       │
-│    [12-13] lookup_inverses commitment                          │
-│    [14-15] z_perm commitment                                   │
+│ 2. Witness Commitments (8 G1 × 128 bytes = 1024 bytes)         │
+│    Each G1 as 4 limbs (128 bytes), not 64 bytes!               │
+│    [0-3]   W₁ commitment (4 Fr limbs)                          │
+│    [4-7]   W₂ commitment (4 Fr limbs)                          │
+│    [8-11]  W₃ commitment (4 Fr limbs)                          │
+│    [12-15] W₄ commitment (4 Fr limbs)                          │
+│    [16-19] z_perm commitment (4 Fr limbs)                      │
+│    [20-23] lookup_inverses commitment (4 Fr limbs)             │
+│    [24-27] lookup_read_counts commitment (4 Fr limbs)          │
+│    [28-31] lookup_read_tags commitment (4 Fr limbs)            │
 ├────────────────────────────────────────────────────────────────┤
-│ 3. Libra Data [ZK only] (3 Fr = 96 bytes)                      │
-│    [0-1]   libra_concat commitment (G1)                        │
-│    [2]     libra_sum (Fr)                                      │
+│ 3. Libra Data [ZK only] (5 Fr = 160 bytes)                     │
+│    [0-3]   libra_commitments[0] (G1 as 4 Fr limbs)             │
+│    [4]     libra_sum (Fr)                                      │
 ├────────────────────────────────────────────────────────────────┤
-│ 4. Sumcheck Univariates (log(n) × 9 = 54 Fr = 1728 bytes)      │
-│    For each round r in 0..6:                                   │
-│      9 coefficients of univariate polynomial                   │
+│ 4. Sumcheck Univariates (CONST_PROOF_SIZE × 9 = 252 × 32)      │
+│    Fixed 28 rounds × 9 coefficients = 252 Fr                   │
+│    Padded with zeros for circuits with LOG_N < 28              │
 ├────────────────────────────────────────────────────────────────┤
-│ 5. Sumcheck Evaluations (41 Fr = 1312 bytes)                   │
+│ 5. Sumcheck Evaluations (40 Fr = 1280 bytes)                   │
 │    All polynomial evaluations at sumcheck point χ              │
-│    (28 VK polys + 8 witness polys + 5 shifted)                │
+│    (27 VK polys + 8 witness polys + 5 shifted)                │
 ├────────────────────────────────────────────────────────────────┤
-│ 6. Libra Post-Sumcheck [ZK only] (8 Fr = 256 bytes)            │
-│    libra_claimed_eval, libra_grand_sum_comm,                   │
-│    libra_quotient_comm, gemini_masking_comm,                   │
-│    gemini_masking_eval                                         │
+│ 6. Libra Evaluation [ZK only] (1 Fr)                           │
 ├────────────────────────────────────────────────────────────────┤
-│ 7. Gemini Fold Commitments ((log(n)-1) × 2 = 10 Fr)            │
-│    5 G1 points for polynomial folding                          │
+│ 7. Libra Post-Sumcheck [ZK only] (13 Fr)                       │
+│    libra_commitments[1,2] (8 Fr), gemini_masking (4+1 Fr)      │
 ├────────────────────────────────────────────────────────────────┤
-│ 8. Gemini A Evaluations (log(n) = 6 Fr)                        │
-│    Evaluations of folded polynomials at r                      │
+│ 8. Gemini Fold Commitments (27 G1 × 128 bytes)                 │
+│    (CONST_PROOF_SIZE_LOG_N - 1) G1 points as limbs             │
 ├────────────────────────────────────────────────────────────────┤
-│ 9. Small IPA [ZK only] (2 Fr)                                  │
+│ 9. Gemini A Evaluations (28 Fr)                                │
+│    CONST_PROOF_SIZE_LOG_N evaluations                          │
 ├────────────────────────────────────────────────────────────────┤
-│ 10. Shplonk Q Commitment (2 Fr = 1 G1)                         │
+│ 10. Libra Poly Evals [ZK only] (4 Fr)                          │
 ├────────────────────────────────────────────────────────────────┤
-│ 11. KZG Quotient Commitment (2 Fr = 1 G1)                      │
+│ 11. Shplonk Q Commitment (4 Fr = 128 bytes, G1 as limbs)       │
 ├────────────────────────────────────────────────────────────────┤
-│ 12. Extra Protocol Data (2 Fr)                                 │
+│ 12. KZG Quotient Commitment (4 Fr = 128 bytes, G1 as limbs)    │
 └────────────────────────────────────────────────────────────────┘
+
+Total: 507 Fr elements = 16,224 bytes
 ```
 
 ---
@@ -888,29 +898,29 @@ For ZK proof with log(n)=6: **162 Fr elements = 5184 bytes**
 
 ### Module Structure
 
-| Theory Component       | Code Location                         | Status                 |
-| ---------------------- | ------------------------------------- | ---------------------- |
-| VK Parsing             | `crates/plonk-core/src/key.rs`        | ✅ Working             |
-| Proof Parsing          | `crates/plonk-core/src/proof.rs`      | ✅ Working             |
-| Transcript/Fiat-Shamir | `crates/plonk-core/src/transcript.rs` | ✅ Working             |
-| Challenge Generation   | `crates/plonk-core/src/verifier.rs`   | ✅ Working             |
-| Sumcheck Rounds        | `crates/plonk-core/src/sumcheck.rs`   | ✅ Working             |
-| 28 Subrelations        | `crates/plonk-core/src/relations.rs`  | ✅ Working             |
-| Gemini Folding         | `crates/plonk-core/src/shplemini.rs`  | ✅ Working             |
-| Shplemini MSM          | `crates/plonk-core/src/shplemini.rs`  | ✅ Working             |
-| Pairing Check          | `crates/plonk-core/src/verifier.rs`   | ✅ Working             |
-| BN254 Operations       | `crates/plonk-core/src/ops.rs`        | ✅ Via Solana syscalls |
-| Field Arithmetic       | `crates/plonk-core/src/field.rs`      | ✅ Working             |
+| Theory Component       | Code Location                         | Status                  |
+| ---------------------- | ------------------------------------- | ----------------------- |
+| VK Parsing             | `crates/plonk-core/src/key.rs`        | ✅ Working (bb 0.87)    |
+| Proof Parsing          | `crates/plonk-core/src/proof.rs`      | ✅ Working (fixed-size) |
+| Transcript/Fiat-Shamir | `crates/plonk-core/src/transcript.rs` | ✅ Working              |
+| Challenge Generation   | `crates/plonk-core/src/verifier.rs`   | ✅ Working              |
+| Sumcheck Rounds        | `crates/plonk-core/src/sumcheck.rs`   | ✅ Working              |
+| 26 Subrelations        | `crates/plonk-core/src/relations.rs`  | ✅ Working              |
+| Gemini Folding         | `crates/plonk-core/src/shplemini.rs`  | ✅ Working              |
+| Shplemini MSM          | `crates/plonk-core/src/shplemini.rs`  | ✅ Working              |
+| Pairing Check          | `crates/plonk-core/src/verifier.rs`   | ✅ Working              |
+| BN254 Operations       | `crates/plonk-core/src/ops.rs`        | ✅ Via Solana syscalls  |
+| Field Arithmetic       | `crates/plonk-core/src/field.rs`      | ✅ Working              |
 
 ### Key Functions
 
 ```rust
 /// Main entry point - verifies an UltraHonk proof
 pub fn verify(
-    vk_bytes: &[u8],        // 1888 bytes
-    proof_bytes: &[u8],     // Variable, depends on log(n)
+    vk_bytes: &[u8],        // 1,760 bytes (bb 0.87)
+    proof_bytes: &[u8],     // 16,224 bytes (fixed size for ZK)
     public_inputs: &[Fr],   // Array of 32-byte field elements
-    is_zk: bool,            // true for default Keccak proofs
+    is_zk: bool,            // true for --zk proofs
 ) -> Result<(), VerifyError>
 
 /// Generate all challenges via Fiat-Shamir
@@ -936,19 +946,20 @@ pub fn compute_shplemini_pairing_points(
 ) -> Result<(G1, G1), &'static str>
 ```
 
-### The 28 Subrelations
+### The 26 Subrelations (bb 0.87)
 
 | Index | Type              | What It Checks                         |
 | ----- | ----------------- | -------------------------------------- |
 | 0-1   | Arithmetic        | Basic arithmetic gates (add, multiply) |
 | 2-3   | Permutation       | Wire copy constraints                  |
-| 4-6   | Lookup            | Table lookups                          |
-| 7-10  | DeltaRange        | Range constraints                      |
-| 11-12 | Elliptic          | EC point operations                    |
-| 13-18 | Memory            | ROM/RAM access                         |
-| 19    | NNF               | Negation normal form                   |
-| 20-23 | Poseidon External | Poseidon hash (external rounds)        |
-| 24-27 | Poseidon Internal | Poseidon hash (internal rounds)        |
+| 4-5   | Lookup            | Table lookups                          |
+| 6-9   | DeltaRange        | Range constraints                      |
+| 10-11 | Elliptic          | EC point operations                    |
+| 12-17 | Auxiliary         | ROM/RAM access, non-native field       |
+| 18-21 | Poseidon External | Poseidon hash (external rounds)        |
+| 22-25 | Poseidon Internal | Poseidon hash (internal rounds)        |
+
+**Note:** bb 0.87 removed the NNF relation, reducing from 28 to 26 subrelations.
 
 For our simple `x² = 9` circuit, only arithmetic (0-1) and permutation (2-3) are active.
 
@@ -962,41 +973,35 @@ For our simple `x² = 9` circuit, only arithmetic (0-1) and permutation (2-3) ar
 Circuit:      simple_square (x² = y)
 Witness:      x = 3 (private)
 Public Input: y = 9
-log_n:        6 (circuit_size = 64)
+log_n:        12 (circuit_size = 4,096)
 is_zk:        true (Keccak oracle)
+bb version:   0.87.x
+nargo version: 1.0.0-beta.8
 ```
 
-### Validated VK Hash
+### Test Circuits Verified ✅
 
-Our VK hash computation now matches Barretenberg exactly:
+All 7 test circuits pass verification:
 
-```
-bb verify shows:  0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75
-Our implementation: 0x093e299e4b0c0559f7aa64cb989d22d9d10b1d6b343ce1a894099f63d7a85a75 ✅
-```
-
-### Example Challenges (First Few)
-
-From our debug output, matching Solidity:
-
-```
-eta:     0x29a1b17fe56c5a83ea0b6e0e3d57df11d05afca4aca9e77e1b6c2e4e7c3d5f1a
-eta_two: 0x1234...
-beta:    0x0abc...
-gamma:   0x5678...
-```
+| Circuit              | log_n | Circuit Size | Public Inputs | Status |
+| -------------------- | ----- | ------------ | ------------- | ------ |
+| simple_square        | 12    | 4,096        | 1             | ✅     |
+| iterated_square_100  | 12    | 4,096        | 1             | ✅     |
+| iterated_square_1000 | 13    | 8,192        | 1             | ✅     |
+| iterated_square_10k  | 14    | 16,384       | 1             | ✅     |
+| fib_chain_100        | 12    | 4,096        | 1             | ✅     |
+| hash_batch           | 17    | 131,072      | 32            | ✅     |
+| merkle_membership    | 18    | 262,144      | 32            | ✅     |
 
 ### Sumcheck Verification
 
-All 6 rounds pass:
+All rounds pass (LOG_N rounds active, padded to 28 total):
 
 ```
 Round 0: u[0] + u[1] = target ✅
 Round 1: u[0] + u[1] = target ✅
-Round 2: u[0] + u[1] = target ✅
-Round 3: u[0] + u[1] = target ✅
-Round 4: u[0] + u[1] = target ✅
-Round 5: u[0] + u[1] = target ✅
+...
+Round LOG_N-1: u[0] + u[1] = target ✅
 Final relation check: PASS ✅
 ```
 
@@ -1008,14 +1013,28 @@ cd test-circuits/simple_square
 nargo compile
 nargo execute
 ~/.bb/bb prove -b ./target/simple_square.json -w ./target/simple_square.gz \
-    --oracle_hash keccak --write_vk -o ./target/keccak
+    --scheme ultra_honk --oracle_hash keccak --zk -o ./target/keccak
+~/.bb/bb write_vk -b ./target/simple_square.json \
+    --scheme ultra_honk --oracle_hash keccak -o ./target/keccak
 
-# Run verification test
-cargo test -p example-verifier --test integration_test
+# Verify with bb (sanity check)
+~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk \
+    --oracle_hash keccak --zk
 
-# Run with debug output
-cargo test -p plonk-core test_debug_real_proof --features debug -- --nocapture
+# Run all verifier tests
+cargo test -p plonk-solana-core
+
+# Run all circuits test
+cargo test test_all_available_circuits -- --nocapture
 ```
+
+### Key Validation Points
+
+- ✅ All challenge generation matches Solidity verifier exactly
+- ✅ All 26 subrelations computed correctly
+- ✅ Shplemini MSM computation matches Solidity
+- ✅ Final pairing check passes
+- ✅ 56 unit tests passing
 
 ---
 
