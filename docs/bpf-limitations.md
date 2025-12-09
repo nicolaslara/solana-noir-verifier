@@ -266,10 +266,10 @@ For Solana, consider:
 
 ### Batch Inversion Results (A/B Tested)
 
-| Sumcheck Round Mode | CUs per 2 rounds | Savings |
-|---------------------|------------------|---------|
-| Individual inversions (9 per round) | ~1,065K | baseline |
-| Batch inversion (1 per round) | ~655K | **-38%** |
+| Sumcheck Round Mode                 | CUs per 2 rounds | Savings  |
+| ----------------------------------- | ---------------- | -------- |
+| Individual inversions (9 per round) | ~1,065K          | baseline |
+| Batch inversion (1 per round)       | ~655K            | **-38%** |
 
 This validates the optimization from `docs/suggested-optimizations.md`.
 

@@ -1,6 +1,17 @@
-Here’s what jumps out from the code + your BPF notes, focusing specifically on “math we do a ton of” and how to squeeze CUs out of it.
+Here's what jumps out from the code + your BPF notes, focusing specifically on "math we do a ton of" and how to squeeze CUs out of it.
 
-I’ll give you:
+## Implementation Status
+
+| Optimization                        | Status  | Actual Result                                    |
+| ----------------------------------- | ------- | ------------------------------------------------ |
+| **1. Batch inversion for sumcheck** | ✅ DONE | **38% savings** (1,065K → 655K CUs per 2 rounds) |
+| 2. Precompute I_FR constants        | ✅ DONE | Avoids fr_from_u64 calls                         |
+| 3. Montgomery multiplication        | ✅ DONE | **7x faster** field muls                         |
+| 4. Binary Extended GCD              | ✅ DONE | Much faster than Fermat                          |
+| 5. Shplemini MSM precompute         | ⏳ TODO | Not yet implemented                              |
+| 6. Relation batching                | ⏳ TODO | Not yet implemented                              |
+
+I'll give you:
 
 - Where in the code the hotspot lives
 - What’s actually expensive there
