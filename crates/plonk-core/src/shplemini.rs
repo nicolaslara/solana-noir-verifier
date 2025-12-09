@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::field::{batch_inv, fr_add, fr_inv, fr_mul, fr_neg, fr_sub};
+use crate::field::{batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_neg, fr_sub, FrLimbs};
 use crate::key::VerificationKey;
 use crate::ops;
 use crate::proof::{Proof, CONST_PROOF_SIZE_LOG_N};
@@ -22,6 +22,9 @@ use crate::verifier::Challenges;
 
 /// Number of unshifted evaluations (indices 0-34) - matches Solidity bb 0.87
 pub const NUMBER_UNSHIFTED: usize = 35;
+
+/// Toggle for FrLimbs optimization (for A/B testing)
+const USE_FR_LIMBS: bool = true;
 
 // ============================================================================
 // Intermediate state for multi-TX Shplemini verification
@@ -100,25 +103,41 @@ pub fn shplemini_phase3a(
         );
     }
 
-    // 1) Compute r^(2^i) powers
-    let mut r_pows = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
-    r_pows.push(challenges.gemini_r);
+    // Convert inputs to FrLimbs for all computation
+    let gemini_r_l = FrLimbs::from_bytes(&challenges.gemini_r);
+    let shplonk_z_l = FrLimbs::from_bytes(&challenges.shplonk_z);
+    let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
+
+    // 1) Compute r^(2^i) powers in FrLimbs (28 squares, no conversion overhead)
+    let mut r_pows_l = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
+    r_pows_l.push(gemini_r_l);
     for i in 1..CONST_PROOF_SIZE_LOG_N {
-        r_pows.push(fr_mul(&r_pows[i - 1], &r_pows[i - 1]));
+        r_pows_l.push(r_pows_l[i - 1].square());
     }
 
-    // 2) Compute shplonk weights
-    let z_minus_r0 = fr_sub(&challenges.shplonk_z, &r_pows[0]);
-    let z_plus_r0 = fr_add(&challenges.shplonk_z, &r_pows[0]);
-    let pos0 = fr_inv(&z_minus_r0).ok_or("shplonk denominator z - r^0 is zero")?;
-    let neg0 = fr_inv(&z_plus_r0).ok_or("shplonk denominator z + r^0 is zero")?;
+    // 2) Compute shplonk weights in FrLimbs with batch inversion
+    let z_minus_r0 = shplonk_z_l.sub(&r_pows_l[0]);
+    let z_plus_r0 = shplonk_z_l.add(&r_pows_l[0]);
 
-    let unshifted = fr_add(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0));
-    let r_inv = fr_inv(&challenges.gemini_r).ok_or("gemini_r is zero")?;
-    let shifted = fr_mul(
-        &r_inv,
-        &fr_sub(&pos0, &fr_mul(&challenges.shplonk_nu, &neg0)),
-    );
+    // Batch invert all 3 denominators at once
+    let denoms = vec![z_minus_r0, z_plus_r0, gemini_r_l];
+    let invs = batch_inv_limbs(&denoms).ok_or("shplonk batch inversion failed")?;
+    let pos0_l = invs[0];
+    let neg0_l = invs[1];
+    let r_inv_l = invs[2];
+
+    // unshifted = pos0 + nu * neg0
+    let unshifted_l = pos0_l.add(&shplonk_nu_l.mul(&neg0_l));
+
+    // shifted = r_inv * (pos0 - nu * neg0)
+    let shifted_l = r_inv_l.mul(&pos0_l.sub(&shplonk_nu_l.mul(&neg0_l)));
+
+    // Convert results back to Fr for compatibility with existing code
+    let r_pows: Vec<Fr> = r_pows_l.iter().map(|l| l.to_bytes()).collect();
+    let pos0 = pos0_l.to_bytes();
+    let neg0 = neg0_l.to_bytes();
+    let unshifted = unshifted_l.to_bytes();
+    let shifted = shifted_l.to_bytes();
 
     // Debug: print unshifted (only when debug-solana feature is enabled)
     #[cfg(all(feature = "solana", feature = "debug-solana"))]
@@ -164,19 +183,22 @@ pub fn shplemini_phase3a(
         solana_program::log::sol_log_compute_units();
     }
 
-    // 3) Accumulate evals with rho powers
+    // 3) Accumulate evals with rho powers (all in FrLimbs)
     let evals = proof.sumcheck_evaluations();
-    let mut rho_pow = challenges.rho;
-    let mut eval_acc = if proof.is_zk {
-        proof.gemini_masking_eval()
+    let rho_l = FrLimbs::from_bytes(&challenges.rho);
+    let mut rho_pow_l = rho_l;
+    let mut eval_acc_l = if proof.is_zk {
+        FrLimbs::from_bytes(&proof.gemini_masking_eval())
     } else {
-        SCALAR_ZERO
+        FrLimbs::ZERO
     };
 
     for eval in evals.iter().take(NUMBER_OF_ENTITIES) {
-        eval_acc = fr_add(&eval_acc, &fr_mul(eval, &rho_pow));
-        rho_pow = fr_mul(&rho_pow, &challenges.rho);
+        let eval_l = FrLimbs::from_bytes(eval);
+        eval_acc_l = eval_acc_l.add(&eval_l.mul(&rho_pow_l));
+        rho_pow_l = rho_pow_l.mul(&rho_l);
     }
+    let eval_acc = eval_acc_l.to_bytes();
 
     #[cfg(feature = "solana")]
     {
@@ -356,31 +378,46 @@ pub fn shplemini_phase3b1(
         solana_program::log::sol_log_compute_units();
     }
 
-    let r_pows = &phase3a.r_pows;
-    let pos0 = &phase3a.pos0;
-    let neg0 = &phase3a.neg0;
+    // Convert all inputs to FrLimbs for computation
+    let r_pows_l: Vec<FrLimbs> = phase3a
+        .r_pows
+        .iter()
+        .map(|r| FrLimbs::from_bytes(r))
+        .collect();
+    let pos0_l = FrLimbs::from_bytes(&phase3a.pos0);
+    let neg0_l = FrLimbs::from_bytes(&phase3a.neg0);
+    let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_a_evals = proof.gemini_a_evaluations();
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
+        .iter()
+        .map(|e| FrLimbs::from_bytes(e))
+        .collect();
+    let sumcheck_u_l: Vec<FrLimbs> = challenges
+        .sumcheck_challenges
+        .iter()
+        .take(log_n)
+        .map(|u| FrLimbs::from_bytes(u))
+        .collect();
 
-    // BATCH INVERSION OPTIMIZATION:
+    // BATCH INVERSION OPTIMIZATION with FrLimbs:
     // Precompute all fold denominators and batch invert them.
     // den[j] = r_pows[j-1] * (1 - u[j-1]) + u[j-1]
-    // This only depends on precomputed values, not on running state.
-    let mut fold_denoms: Vec<Fr> = Vec::with_capacity(log_n);
-    let mut r2_one_minus_u_vals: Vec<Fr> = Vec::with_capacity(log_n);
+    let mut fold_denoms_l: Vec<FrLimbs> = Vec::with_capacity(log_n);
+    let mut r2_one_minus_u_l: Vec<FrLimbs> = Vec::with_capacity(log_n);
 
     for j in 1..=log_n {
-        let r2 = r_pows[j - 1];
-        let u = challenges.sumcheck_challenges[j - 1];
-        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
-        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
-        let den = fr_add(&r2_one_minus_u, &u);
-        fold_denoms.push(den);
-        r2_one_minus_u_vals.push(r2_one_minus_u);
+        let r2 = &r_pows_l[j - 1];
+        let u = &sumcheck_u_l[j - 1];
+        let one_minus_u = FrLimbs::ONE.sub(u);
+        let r2_omu = r2.mul(&one_minus_u);
+        let den = r2_omu.add(u);
+        fold_denoms_l.push(den);
+        r2_one_minus_u_l.push(r2_omu);
     }
 
     // Batch invert all fold denominators at once
-    let fold_den_invs =
-        batch_inv(&fold_denoms).ok_or("batch inversion of fold denominators failed")?;
+    let fold_den_invs_l =
+        batch_inv_limbs(&fold_denoms_l).ok_or("batch inversion of fold denominators failed")?;
 
     #[cfg(feature = "solana")]
     {
@@ -388,32 +425,39 @@ pub fn shplemini_phase3b1(
         solana_program::log::sol_log_compute_units();
     }
 
-    // Folding rounds using precomputed inverses
-    let mut fold_pos = vec![SCALAR_ZERO; log_n];
-    let mut cur = phase3a.eval_acc;
+    // Folding rounds using precomputed inverses (all in FrLimbs)
+    let two_l = FrLimbs::ONE.add(&FrLimbs::ONE);
+    let mut fold_pos_l = vec![FrLimbs::ZERO; log_n];
+    let mut cur_l = FrLimbs::from_bytes(&phase3a.eval_acc);
 
     for j in (1..=log_n).rev() {
-        let r2 = r_pows[j - 1];
-        let u = challenges.sumcheck_challenges[j - 1];
-        let r2_one_minus_u = r2_one_minus_u_vals[j - 1];
+        let r2 = &r_pows_l[j - 1];
+        let u = &sumcheck_u_l[j - 1];
+        let r2_omu = &r2_one_minus_u_l[j - 1];
 
-        let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
-        let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
-        let bracket = fr_sub(&r2_one_minus_u, &u);
-        let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
-        let num = fr_sub(&term1, &term2);
+        // term1 = r2 * cur * 2
+        let term1 = r2.mul(&cur_l).mul(&two_l);
+        // bracket = r2_one_minus_u - u
+        let bracket = r2_omu.sub(u);
+        // term2 = gemini_a_evals[j-1] * bracket
+        let term2 = gemini_a_l[j - 1].mul(&bracket);
+        // num = term1 - term2
+        let num = term1.sub(&term2);
 
-        // Use precomputed inverse
-        let den_inv = fold_den_invs[j - 1];
-        cur = fr_mul(&num, &den_inv);
-        fold_pos[j - 1] = cur;
+        // cur = num * den_inv
+        cur_l = num.mul(&fold_den_invs_l[j - 1]);
+        fold_pos_l[j - 1] = cur_l;
     }
 
     // Initial constant term accumulation
-    let const_acc = fr_add(
-        &fr_mul(&fold_pos[0], pos0),
-        &fr_mul(&fr_mul(&gemini_a_evals[0], &challenges.shplonk_nu), neg0),
-    );
+    // const_acc = fold_pos[0] * pos0 + gemini_a_evals[0] * shplonk_nu * neg0
+    let const_acc_l = fold_pos_l[0]
+        .mul(&pos0_l)
+        .add(&gemini_a_l[0].mul(&shplonk_nu_l).mul(&neg0_l));
+
+    // Convert outputs back to Fr
+    let fold_pos: Vec<Fr> = fold_pos_l.iter().map(|l| l.to_bytes()).collect();
+    let const_acc = const_acc_l.to_bytes();
 
     #[cfg(feature = "solana")]
     {
@@ -442,47 +486,54 @@ pub fn shplemini_phase3b2(
         solana_program::log::sol_log_compute_units();
     }
 
-    let r_pows = &phase3a.r_pows;
+    // Convert all inputs to FrLimbs
+    let r_pows_l: Vec<FrLimbs> = phase3a
+        .r_pows
+        .iter()
+        .map(|r| FrLimbs::from_bytes(r))
+        .collect();
+    let shplonk_z_l = FrLimbs::from_bytes(&challenges.shplonk_z);
+    let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
+    let gemini_r_l = FrLimbs::from_bytes(&challenges.gemini_r);
     let gemini_a_evals = proof.gemini_a_evaluations();
-    let fold_pos = &phase3b1.fold_pos;
-    let mut const_acc = phase3b1.const_acc;
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
+        .iter()
+        .map(|e| FrLimbs::from_bytes(e))
+        .collect();
+    let fold_pos_l: Vec<FrLimbs> = phase3b1
+        .fold_pos
+        .iter()
+        .map(|f| FrLimbs::from_bytes(f))
+        .collect();
+    let mut const_acc_l = FrLimbs::from_bytes(&phase3b1.const_acc);
 
-    // BATCH INVERSION OPTIMIZATION:
-    // Collect all denominators first, then batch invert them
-    // This replaces ~44 individual inversions with 1 batch inversion
-
-    // Collect denominators for gemini loop (non-dummy rounds only)
+    // BATCH INVERSION OPTIMIZATION with FrLimbs:
     let num_non_dummy = if log_n > 1 { log_n - 1 } else { 0 };
-    let mut all_denoms: Vec<Fr> = Vec::with_capacity(num_non_dummy * 2 + 4); // gemini + libra
+    let mut all_denoms_l: Vec<FrLimbs> = Vec::with_capacity(num_non_dummy * 2 + 4);
 
     // Gemini denominators: z - r^j and z + r^j for j = 1..log_n-1
     for i in 0..num_non_dummy {
         let j = i + 1;
-        let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
-        let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
-        all_denoms.push(z_minus_rj);
-        all_denoms.push(z_plus_rj);
+        all_denoms_l.push(shplonk_z_l.sub(&r_pows_l[j]));
+        all_denoms_l.push(shplonk_z_l.add(&r_pows_l[j]));
     }
 
     // Libra denominators (ZK only)
-    let libra_start_idx = all_denoms.len();
+    let libra_start_idx = all_denoms_l.len();
+    let subgroup_generator_l = FrLimbs::from_bytes(&[
+        0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36, 0xff,
+        0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91, 0x74, 0xa5,
+        0x7a, 0x76,
+    ]);
     if proof.is_zk {
-        let subgroup_generator: Fr = [
-            0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36,
-            0xff, 0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91,
-            0x74, 0xa5, 0x7a, 0x76,
-        ];
         // denom0 = z - r
-        all_denoms.push(fr_sub(&challenges.shplonk_z, &challenges.gemini_r));
+        all_denoms_l.push(shplonk_z_l.sub(&gemini_r_l));
         // denom1 = z - subgroup_generator * r
-        all_denoms.push(fr_sub(
-            &challenges.shplonk_z,
-            &fr_mul(&subgroup_generator, &challenges.gemini_r),
-        ));
+        all_denoms_l.push(shplonk_z_l.sub(&subgroup_generator_l.mul(&gemini_r_l)));
     }
 
     // Batch invert all denominators at once
-    let all_invs = batch_inv(&all_denoms).ok_or("batch inversion failed")?;
+    let all_invs_l = batch_inv_limbs(&all_denoms_l).ok_or("batch inversion failed")?;
 
     #[cfg(feature = "solana")]
     {
@@ -490,9 +541,10 @@ pub fn shplemini_phase3b2(
         solana_program::log::sol_log_compute_units();
     }
 
-    // Now use the precomputed inverses in the gemini loop
-    let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
-    let mut gemini_scalars = vec![SCALAR_ZERO; CONST_PROOF_SIZE_LOG_N - 1];
+    // Gemini loop in FrLimbs
+    let nu_sq_l = shplonk_nu_l.square();
+    let mut v_pow_l = nu_sq_l;
+    let mut gemini_scalars_l = vec![FrLimbs::ZERO; CONST_PROOF_SIZE_LOG_N - 1];
 
     for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
         let dummy_round = i >= log_n - 1;
@@ -500,22 +552,16 @@ pub fn shplemini_phase3b2(
         if !dummy_round {
             let j = i + 1;
             // Use precomputed inverses
-            let pos_inv = all_invs[i * 2]; // 1/(z - r^j)
-            let neg_inv = all_invs[i * 2 + 1]; // 1/(z + r^j)
+            let pos_inv = &all_invs_l[i * 2];
+            let neg_inv = &all_invs_l[i * 2 + 1];
 
-            let sp = fr_mul(&v_pow, &pos_inv);
-            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
-            gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
-            const_acc = fr_add(
-                &const_acc,
-                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
-            );
+            let sp = v_pow_l.mul(pos_inv);
+            let sn = v_pow_l.mul(&shplonk_nu_l).mul(neg_inv);
+            gemini_scalars_l[i] = sn.add(&sp).neg();
+            const_acc_l = const_acc_l.add(&gemini_a_l[j].mul(&sn).add(&fold_pos_l[j].mul(&sp)));
         }
 
-        v_pow = fr_mul(
-            &v_pow,
-            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
-        );
+        v_pow_l = v_pow_l.mul(&nu_sq_l);
     }
 
     #[cfg(feature = "solana")]
@@ -524,32 +570,37 @@ pub fn shplemini_phase3b2(
         solana_program::log::sol_log_compute_units();
     }
 
-    // Libra (ZK only) - use precomputed inverses
-    let mut libra_scalars = vec![SCALAR_ZERO; 3];
+    // Libra (ZK only)
+    let mut libra_scalars_l = vec![FrLimbs::ZERO; 3];
 
     if proof.is_zk {
-        let denom0 = all_invs[libra_start_idx];
-        let denom1 = all_invs[libra_start_idx + 1];
+        let denom0_l = &all_invs_l[libra_start_idx];
+        let denom1_l = &all_invs_l[libra_start_idx + 1];
 
-        v_pow = fr_mul(
-            &v_pow,
-            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
-        );
+        v_pow_l = v_pow_l.mul(&nu_sq_l);
 
         let libra_evals = proof.libra_poly_evals();
-        let denominators = [denom0, denom1, denom0, denom0];
-        let mut batching_scalars = [SCALAR_ZERO; 4];
-        for (i, eval) in libra_evals.iter().enumerate() {
-            let scaling_factor = fr_mul(&denominators[i], &v_pow);
-            batching_scalars[i] = fr_neg(&scaling_factor);
-            const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
-            v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
+        let libra_evals_l: Vec<FrLimbs> =
+            libra_evals.iter().map(|e| FrLimbs::from_bytes(e)).collect();
+        let denominators_l = [denom0_l, denom1_l, denom0_l, denom0_l];
+        let mut batching_scalars_l = [FrLimbs::ZERO; 4];
+
+        for (i, eval_l) in libra_evals_l.iter().enumerate() {
+            let scaling_factor = denominators_l[i].mul(&v_pow_l);
+            batching_scalars_l[i] = scaling_factor.neg();
+            const_acc_l = const_acc_l.add(&scaling_factor.mul(eval_l));
+            v_pow_l = v_pow_l.mul(&shplonk_nu_l);
         }
 
-        libra_scalars[0] = batching_scalars[0];
-        libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
-        libra_scalars[2] = batching_scalars[3];
+        libra_scalars_l[0] = batching_scalars_l[0];
+        libra_scalars_l[1] = batching_scalars_l[1].add(&batching_scalars_l[2]);
+        libra_scalars_l[2] = batching_scalars_l[3];
     }
+
+    // Convert outputs back to Fr
+    let const_acc = const_acc_l.to_bytes();
+    let gemini_scalars: Vec<Fr> = gemini_scalars_l.iter().map(|l| l.to_bytes()).collect();
+    let libra_scalars: Vec<Fr> = libra_scalars_l.iter().map(|l| l.to_bytes()).collect();
 
     #[cfg(feature = "solana")]
     {

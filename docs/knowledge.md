@@ -682,17 +682,17 @@ For production, implement VK loading from a Solana account instead of compile-ti
 - Multiple circuits with a single program deployment
 - Dynamic circuit registration
 
-### CU Usage by Circuit Size (Dec 2024)
+### CU Usage by Circuit Size (Dec 2024, with FrLimbs optimizations)
 
 | Circuit              | log_n | PIs | Total CUs | TXs |
 | -------------------- | ----- | --- | --------- | --- |
-| simple_square        | 12    | 1   | 8.7M      | 15  |
-| iterated_square_100  | 12    | 1   | 8.7M      | 15  |
-| fib_chain_100        | 12    | 1   | 8.7M      | 15  |
-| iterated_square_1000 | 13    | 1   | 9.2M      | 16  |
-| iterated_square_10k  | 14    | 1   | 9.6M      | 16  |
-| hash_batch           | 17    | 32  | 11.3M     | 17  |
-| merkle_membership    | 18    | 32  | 11.8M     | 17  |
+| simple_square        | 12    | 1   | **6.65M** | 14  |
+| iterated_square_100  | 12    | 1   | ~6.65M    | 14  |
+| fib_chain_100        | 12    | 1   | ~6.65M    | 14  |
+| iterated_square_1000 | 13    | 1   | ~7.1M     | 14  |
+| iterated_square_10k  | 14    | 1   | ~7.6M     | 14  |
+| hash_batch           | 17    | 32  | ~9.0M     | 15  |
+| merkle_membership    | 18    | 32  | ~9.4M     | 15  |
 
 **Key observations:**
 
@@ -700,6 +700,7 @@ For production, implement VK loading from a Solana account instead of compile-ti
 - log_n=12 circuits have ~identical CUs (most sumcheck rounds are padding)
 - More public inputs = more CUs for delta computation (~0.5M per 31 extra PIs)
 - Larger log_n = more active sumcheck rounds contribute
+- FrLimbs optimization: **~20% total CU reduction** across all circuits
 
 ---
 
@@ -727,21 +728,23 @@ For production, implement VK loading from a Solana account instead of compile-ti
 
 For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggested-optimizations.md)**:
 
-| Optimization                    | Status  | Impact                        |
-| ------------------------------- | ------- | ----------------------------- |
-| Montgomery multiplication       | ✅ Done | **7x faster** field muls      |
-| Batch inversion (sumcheck)      | ✅ Done | **38% savings** per round     |
-| Precompute I_FR constants       | ✅ Done | Avoids fr_from_u64            |
-| Binary Extended GCD             | ✅ Done | Faster inversions             |
-| Precompute rho powers           | ✅ Done | Avoids O(k) exponentiation    |
-| Batch inversion (Shplemini 3b2) | ✅ Done | Batched gemini+libra denoms   |
-| Batch inv fold denoms (3b1)     | ✅ Done | **60% savings** (1.3M → 534K) |
-| **FrLimbs in sumcheck**         | ✅ Done | **17.5% savings** per round   |
+| Optimization                    | Status  | Impact                         |
+| ------------------------------- | ------- | ------------------------------ |
+| Montgomery multiplication       | ✅ Done | **7x faster** field muls       |
+| Batch inversion (sumcheck)      | ✅ Done | **38% savings** per round      |
+| Precompute I_FR constants       | ✅ Done | Avoids fr_from_u64             |
+| Binary Extended GCD             | ✅ Done | Faster inversions              |
+| Precompute rho powers           | ✅ Done | Avoids O(k) exponentiation     |
+| Batch inversion (Shplemini 3b2) | ✅ Done | Batched gemini+libra denoms    |
+| Batch inv fold denoms (3b1)     | ✅ Done | **60% savings** (1.3M → 534K)  |
+| **FrLimbs in sumcheck**         | ✅ Done | **24% savings** (5M → 3.8M)    |
+| **FrLimbs in shplemini**        | ✅ Done | **16% savings** (2.95M → 2.5M) |
 
 **Current status (simple_square, log_n=12):**
 
-- Full verification: **7.66M CUs** across 15 transactions
-- Sumcheck rounds: ~1.07M CUs each (down from 1.3M)
-- Total savings from FrLimbs: ~690K CUs
+- Full verification: **6.65M CUs** across 14 transactions
+- Sumcheck rounds: ~1.35M CUs (6 rounds/TX, down from 4)
+- Phase 3 (MSM): 2.48M CUs (down from 2.95M)
+- **Total savings: ~20%** from FrLimbs optimizations (~1.7M CUs)
 
-Remaining optimizations: FrLimbs in shplemini, relation batching.
+Remaining optimizations: FrLimbs in relations, more constant precomputation.

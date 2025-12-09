@@ -310,8 +310,9 @@ async function main() {
     }
 
     
-    // Configurable rounds per TX (test with 2, 3, 4, etc.)
-    const ROUNDS_PER_TX = parseInt(process.env.ROUNDS_PER_TX || '4');
+    // Configurable rounds per TX (test with 2, 3, 4, 6, etc.)
+    // After FrLimbs optimization, 6 rounds fits comfortably under 1.4M CUs
+    const ROUNDS_PER_TX = parseInt(process.env.ROUNDS_PER_TX || '6');
     console.log(`Rounds per TX: ${ROUNDS_PER_TX}`);
     const roundResults = [];
     let allRoundsSuccess = results.phase1.success;
