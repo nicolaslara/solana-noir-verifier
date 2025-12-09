@@ -1,0 +1,5 @@
+# Standard Fibonacci starting values
+a0 = "0"
+a1 = "1"
+# fib(101) after 100 iterations
+out = "573147844013817084101"

@@ -1,0 +1,7 @@
+[package]
+name = "iterated_square_1000"
+type = "bin"
+authors = [""]
+compiler_version = ">=0.30.0"
+
+[dependencies]

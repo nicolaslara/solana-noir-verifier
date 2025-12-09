@@ -1,0 +1,7 @@
+[package]
+name = "fib_chain_100"
+type = "bin"
+authors = [""]
+compiler_version = ">=0.30.0"
+
+[dependencies]
