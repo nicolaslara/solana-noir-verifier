@@ -405,20 +405,147 @@ fn is_zero_4(a: &[u64; 4]) -> bool {
 }
 
 /// Multiply two 256-bit numbers to get 512-bit result (no reduction)
+/// Karatsuba multiplication for 4x4 limbs -> 8 limbs
+/// Reduces from 16 64-bit multiplications to ~12 (25% fewer)
 fn mul_wide_4x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
+    // Split into high and low 128-bit halves (2 limbs each)
+    // a = a_hi * 2^128 + a_lo
+    // b = b_hi * 2^128 + b_lo
+    let a_lo = [a[0], a[1]];
+    let a_hi = [a[2], a[3]];
+    let b_lo = [b[0], b[1]];
+    let b_hi = [b[2], b[3]];
+
+    // Karatsuba:
+    // z0 = a_lo * b_lo
+    // z2 = a_hi * b_hi
+    // z1 = (a_lo + a_hi) * (b_lo + b_hi) - z0 - z2
+    // result = z2 * 2^256 + z1 * 2^128 + z0
+
+    let z0 = mul_2x2(&a_lo, &b_lo); // 4 limbs
+    let z2 = mul_2x2(&a_hi, &b_hi); // 4 limbs
+
+    // Compute (a_lo + a_hi) and (b_lo + b_hi) with potential carry
+    let (a_sum, a_carry) = add_2x2(&a_lo, &a_hi);
+    let (b_sum, b_carry) = add_2x2(&b_lo, &b_hi);
+
+    // z1_base = (a_lo + a_hi) * (b_lo + b_hi)
+    let z1_base = mul_2x2(&a_sum, &b_sum);
+
+    // Handle carries: if a_carry, add b_sum * 2^128; if b_carry, add a_sum * 2^128
+    // These are at most 128-bit additions to the high part
+    let mut z1_extra = [0u64; 4];
+    if a_carry {
+        z1_extra = add_4x4_no_overflow(&z1_extra, &[0, 0, b_sum[0], b_sum[1]]);
+    }
+    if b_carry {
+        z1_extra = add_4x4_no_overflow(&z1_extra, &[0, 0, a_sum[0], a_sum[1]]);
+    }
+    if a_carry && b_carry {
+        // Both carries: add 2^256, but that's in even higher bits - we can ignore for z1's position
+        z1_extra[2] = z1_extra[2].wrapping_add(1);
+    }
+
+    // z1 = z1_base + z1_extra - z0 - z2
+    let z1_with_extra = add_4x4_no_overflow(&z1_base, &z1_extra);
+    let z1_minus_z0 = sub_4x4_with_borrow(&z1_with_extra, &z0);
+    let z1 = sub_4x4_with_borrow(&z1_minus_z0, &z2);
+
+    // Assemble result: z2 * 2^256 + z1 * 2^128 + z0
     let mut result = [0u64; 8];
 
-    for i in 0..4 {
+    // Add z0 at position 0
+    result[0] = z0[0];
+    result[1] = z0[1];
+    result[2] = z0[2];
+    result[3] = z0[3];
+
+    // Add z1 at position 2 (shifted by 128 bits = 2 limbs)
+    let (r2, c2) = result[2].overflowing_add(z1[0]);
+    result[2] = r2;
+    let (r3, c3) = result[3].overflowing_add(z1[1]);
+    let (r3, c3b) = r3.overflowing_add(c2 as u64);
+    result[3] = r3;
+    let c3_total = (c3 || c3b) as u64;
+    let (r4, c4) = z1[2].overflowing_add(c3_total);
+    result[4] = r4;
+    let (r5, c5) = z1[3].overflowing_add(c4 as u64);
+    result[5] = r5;
+
+    // Add z2 at position 4 (shifted by 256 bits = 4 limbs)
+    let (r4b, c4b) = result[4].overflowing_add(z2[0]);
+    result[4] = r4b;
+    let (r5b, c5b) = result[5].overflowing_add(z2[1]);
+    let (r5b, c5c) = r5b.overflowing_add(c4b as u64);
+    result[5] = r5b;
+    let c5_total = (c5b || c5c || c5) as u64;
+    let (r6, c6) = z2[2].overflowing_add(c5_total);
+    result[6] = r6;
+    result[7] = z2[3].wrapping_add(c6 as u64);
+
+    result
+}
+
+/// Multiply two 2-limb (128-bit) numbers -> 4 limbs (256 bits)
+/// Uses schoolbook for the base case (4 64-bit multiplications)
+#[inline(always)]
+fn mul_2x2(a: &[u64; 2], b: &[u64; 2]) -> [u64; 4] {
+    let mut result = [0u64; 4];
+
+    // Schoolbook multiplication for 2x2 limbs
+    for i in 0..2 {
         let mut carry = 0u64;
-        for j in 0..4 {
-            let (lo, hi) = mul_with_carry(a[j], b[i], result[i + j], carry);
+        for j in 0..2 {
+            let (lo, hi) = mul64(a[j], b[i], result[i + j], carry);
             result[i + j] = lo;
             carry = hi;
         }
-        result[i + 4] = carry;
+        result[i + 2] = carry;
     }
 
     result
+}
+
+/// Multiply two u64 with accumulator and carry: a*b + c + carry -> (lo, hi)
+#[inline(always)]
+fn mul64(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+    let product = (a as u128) * (b as u128) + (c as u128) + (carry as u128);
+    (product as u64, (product >> 64) as u64)
+}
+
+/// Add two 2-limb numbers, return result and carry
+#[inline(always)]
+fn add_2x2(a: &[u64; 2], b: &[u64; 2]) -> ([u64; 2], bool) {
+    let (r0, c0) = a[0].overflowing_add(b[0]);
+    let (r1, c1) = a[1].overflowing_add(b[1]);
+    let (r1, c2) = r1.overflowing_add(c0 as u64);
+    ([r0, r1], c1 || c2)
+}
+
+/// Add two 4-limb numbers without overflow tracking
+#[inline(always)]
+fn add_4x4_no_overflow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+    let (r0, c0) = a[0].overflowing_add(b[0]);
+    let (r1, c1) = a[1].overflowing_add(b[1]);
+    let (r1, c1b) = r1.overflowing_add(c0 as u64);
+    let (r2, c2) = a[2].overflowing_add(b[2]);
+    let (r2, c2b) = r2.overflowing_add((c1 || c1b) as u64);
+    let (r3, _) = a[3].overflowing_add(b[3]);
+    let (r3, _) = r3.overflowing_add((c2 || c2b) as u64);
+    [r0, r1, r2, r3]
+}
+
+/// Subtract two 4-limb numbers (a - b), assumes a >= b or wraps
+#[inline(always)]
+fn sub_4x4_with_borrow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+    let (r0, borrow0) = a[0].overflowing_sub(b[0]);
+    let (r1, borrow1) = a[1].overflowing_sub(b[1]);
+    let (r1, borrow1b) = r1.overflowing_sub(borrow0 as u64);
+    let (r2, borrow2) = a[2].overflowing_sub(b[2]);
+    let (r2, borrow2b) = r2.overflowing_sub((borrow1 || borrow1b) as u64);
+    let (r3, _) = a[3].overflowing_sub(b[3]);
+    let (r3, _) = r3.overflowing_sub((borrow2 || borrow2b) as u64);
+    [r0, r1, r2, r3]
 }
 
 /// Compute a^exp mod r using square-and-multiply

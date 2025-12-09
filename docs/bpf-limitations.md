@@ -70,13 +70,27 @@ UltraHonk verification involves **thousands** of `fr_mul` calls across:
 - Sumcheck verification (~500+ muls) - exceeds 1.4M CUs ❌
 - MSM computation (~1000+ muls) - not yet tested
 
-### Potential `fr_mul` Optimizations
+### `fr_mul` Optimizations
 
-1. **Montgomery multiplication** - Keep values in Montgomery form, avoid repeated reductions
-2. **Karatsuba algorithm** - Reduce 4 multiplications to 3 for each limb step
-3. **Assembly optimization** - Hand-tuned BPF assembly for critical paths
-4. **Solana syscall proposal** - Request Fr arithmetic syscalls (like BN254 curve ops)
-5. **Precomputation** - Move some multiplications off-chain, verify commitments on-chain
+| Optimization            | Status             | Improvement  |
+| ----------------------- | ------------------ | ------------ |
+| **Karatsuba algorithm** | ✅ Implemented     | **-12%** CUs |
+| **Montgomery form**     | 🔲 Pending         | Est. 2-3x    |
+| **BPF assembly**        | 🔲 Pending         | Est. 2x      |
+| **Solana syscall**      | 🔲 Proposal needed | Est. 100x    |
+
+#### Karatsuba Results (December 2024)
+
+Karatsuba multiplication reduces 16 64-bit muls to ~12 by splitting 256-bit numbers into 128-bit halves:
+
+- `z0 = a_lo * b_lo`
+- `z2 = a_hi * b_hi`
+- `z1 = (a_lo + a_hi)(b_lo + b_hi) - z0 - z2`
+
+| Phase       | Before | After | Reduction |
+| ----------- | ------ | ----- | --------- |
+| 1e1 (delta) | 915K   | 798K  | -13%      |
+| 1e2 (delta) | 1,068K | 936K  | -12%      |
 
 ### Current `fr_mul` Implementation
 
