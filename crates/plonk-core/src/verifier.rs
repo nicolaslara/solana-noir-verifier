@@ -999,23 +999,6 @@ fn generate_challenges(
     let (gemini_r, _) = transcript.challenge_split();
     crate::dbg_fr!("gemini_r", &gemini_r);
 
-    // Debug: print gemini_r
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "SINGLE_PASS gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            gemini_r[24],
-            gemini_r[25],
-            gemini_r[26],
-            gemini_r[27],
-            gemini_r[28],
-            gemini_r[29],
-            gemini_r[30],
-            gemini_r[31]
-        );
-    }
-
     // Add Gemini A evaluations to transcript
     // Solidity uses CONST_PROOF_SIZE_LOG_N = 28 evaluations
     crate::trace!(

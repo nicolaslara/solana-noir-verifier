@@ -581,45 +581,6 @@ pub fn compute_shplemini_pairing_points(
         crate::dbg_fr!("rho", &challenges.rho);
     }
 
-    // Debug: print key challenges for comparison with phased (last 8 bytes)
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "DEBUG gemini_r[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.gemini_r[24],
-            challenges.gemini_r[25],
-            challenges.gemini_r[26],
-            challenges.gemini_r[27],
-            challenges.gemini_r[28],
-            challenges.gemini_r[29],
-            challenges.gemini_r[30],
-            challenges.gemini_r[31]
-        );
-        std::println!(
-            "DEBUG shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_z[24],
-            challenges.shplonk_z[25],
-            challenges.shplonk_z[26],
-            challenges.shplonk_z[27],
-            challenges.shplonk_z[28],
-            challenges.shplonk_z[29],
-            challenges.shplonk_z[30],
-            challenges.shplonk_z[31]
-        );
-        std::println!(
-            "DEBUG shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_nu[24],
-            challenges.shplonk_nu[25],
-            challenges.shplonk_nu[26],
-            challenges.shplonk_nu[27],
-            challenges.shplonk_nu[28],
-            challenges.shplonk_nu[29],
-            challenges.shplonk_nu[30],
-            challenges.shplonk_nu[31]
-        );
-    }
-
     // 1) Compute r^(2^i) powers
     // Need CONST_PROOF_SIZE_LOG_N powers for the full fold loop
     let mut r_pows = Vec::with_capacity(CONST_PROOF_SIZE_LOG_N);
@@ -668,67 +629,6 @@ pub fn compute_shplemini_pairing_points(
     {
         crate::dbg_fr!("unshiftedScalar", &unshifted);
         crate::dbg_fr!("shiftedScalar", &shifted);
-    }
-
-    // Debug: print key values in single-pass
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "SINGLE_PASS shplonk_z[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_z[24],
-            challenges.shplonk_z[25],
-            challenges.shplonk_z[26],
-            challenges.shplonk_z[27],
-            challenges.shplonk_z[28],
-            challenges.shplonk_z[29],
-            challenges.shplonk_z[30],
-            challenges.shplonk_z[31]
-        );
-        std::println!(
-            "SINGLE_PASS shplonk_nu[24..32]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            challenges.shplonk_nu[24],
-            challenges.shplonk_nu[25],
-            challenges.shplonk_nu[26],
-            challenges.shplonk_nu[27],
-            challenges.shplonk_nu[28],
-            challenges.shplonk_nu[29],
-            challenges.shplonk_nu[30],
-            challenges.shplonk_nu[31]
-        );
-        std::println!(
-            "SINGLE_PASS unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            unshifted[0],
-            unshifted[1],
-            unshifted[2],
-            unshifted[3],
-            unshifted[4],
-            unshifted[5],
-            unshifted[6],
-            unshifted[7]
-        );
-        std::println!(
-            "SINGLE_PASS pos0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            pos0[0],
-            pos0[1],
-            pos0[2],
-            pos0[3],
-            pos0[4],
-            pos0[5],
-            pos0[6],
-            pos0[7]
-        );
-        std::println!(
-            "SINGLE_PASS neg0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            neg0[0],
-            neg0[1],
-            neg0[2],
-            neg0[3],
-            neg0[4],
-            neg0[5],
-            neg0[6],
-            neg0[7]
-        );
     }
 
     #[cfg(feature = "solana")]
@@ -980,34 +880,6 @@ pub fn compute_shplemini_pairing_points(
     {
         solana_program::msg!("Shplemini: before MSM");
         solana_program::log::sol_log_compute_units();
-    }
-
-    // Debug: print key values for comparison
-    #[cfg(test)]
-    {
-        extern crate std;
-        std::println!(
-            "DEBUG const_acc[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            const_acc[0],
-            const_acc[1],
-            const_acc[2],
-            const_acc[3],
-            const_acc[4],
-            const_acc[5],
-            const_acc[6],
-            const_acc[7]
-        );
-        std::println!(
-            "DEBUG unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            unshifted[0],
-            unshifted[1],
-            unshifted[2],
-            unshifted[3],
-            unshifted[4],
-            unshifted[5],
-            unshifted[6],
-            unshifted[7]
-        );
     }
 
     // 8) Build the final pairing points
