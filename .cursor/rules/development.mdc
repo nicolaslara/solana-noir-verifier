@@ -1,7 +1,7 @@
 ---
 description: Development patterns for Rust/Solana BN254 verification
 globs: crates/**/*.rs, programs/**/*.rs
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Development Rules
@@ -16,22 +16,68 @@ Use `solana-bn254` crate for all heavy curve operations:
 
 **Never** use pure Rust arkworks pairing in on-chain code - it will exceed compute limits.
 
-## Field/Curve Serialization
+## Field/Curve Serialization (bb 0.87)
 
-- Match Barretenberg's wire format for G1/G2/Fr elements
+**VK format (64-byte G1 points):**
+
 - G1 points: big-endian coordinates (x, y), 64 bytes total
+- VK size: **1,760 bytes** (32-byte header + 27 G1 commitments)
+
+**Proof format (limbed G1 points):**
+
+- G1 points in proofs use **128-byte limbed format** (4 × 32-byte limbs: x_lo, x_hi, y_lo, y_hi)
+- Proof size: **16,224 bytes** (fixed, ZK mode)
 - Fr scalars: big-endian, 32 bytes
-- All serialization must round-trip correctly with Barretenberg exports
+
+**Transcript format:**
+
+- G1 points added to transcript in **limbed format** (128 bytes, not 64!)
+- This is critical for challenge matching
+
+## bb 0.87 Constants
+
+```rust
+CONST_PROOF_SIZE_LOG_N = 28   // Proof padded to this
+NUMBER_OF_ENTITIES = 40       // Wire count
+NUMBER_OF_SUBRELATIONS = 26   // Relation count
+NUMBER_OF_ALPHAS = 25         // Alpha challenges
+VK_NUM_COMMITMENTS = 27       // G1 points in VK
+```
 
 ## Transcript (Fiat-Shamir)
 
-- Hash function: **Keccak256** (matching Barretenberg/ultraplonk_verifier)
-- Absorb order must exactly match Barretenberg:
-  1. VK commitments
-  2. Public inputs
-  3. Proof commitments
-  4. Evaluations
-- Test transcript outputs against Barretenberg challenge values
+- Hash function: **Keccak256** (use `--oracle_hash keccak`)
+- Absorb order must exactly match Solidity verifier:
+  1. Circuit metadata (size, public inputs count, offset)
+  2. Public inputs + pairing point object (16 Fr)
+  3. Witness commitments (limbed)
+  4. Generate eta, beta, gamma, alphas, gate challenges
+  5. Libra commitment + sum (ZK only)
+  6. Sumcheck univariates per round
+  7. Sumcheck evaluations + ZK elements
+  8. Generate rho, gemini_r, shplonk_nu, shplonk_z
+- **NOTE:** No VK hash in bb 0.87 transcript (was in earlier versions)
+
+## Phased Verification (Multi-TX)
+
+Solana's **1.4M CU per-TX limit** requires splitting verification:
+
+| Phase   | Description          | CUs   |
+| ------- | -------------------- | ----- |
+| Phase 1 | Challenge generation | ~287K |
+| Phase 2 | Sumcheck (3 TXs)     | ~3.8M |
+| Phase 3 | MSM (4 TXs)          | ~2.5M |
+| Phase 4 | Pairing check        | ~55K  |
+
+Store intermediate state in a verification account between TXs.
+
+## ZK Mode
+
+**Always use `--zk` flag** for Solana verification:
+
+- bb command: `bb prove --oracle_hash keccak --zk`
+- All test circuits use ZK mode
+- Non-ZK mode exists but is not tested
 
 ## no_std Compatibility
 
@@ -52,6 +98,7 @@ Use `alloc` crate for heap allocations when needed.
 ## Testing Strategy
 
 1. Unit tests with `#[cfg(test)]` - can use std
-2. Feature-gate arkworks testing: `--features test-utils`
+2. Run `test_all_available_circuits` to verify all 7 test circuits
 3. Integration tests with `solana-program-test`
 4. Always test both valid proofs AND tampered proofs
+5. For on-chain testing, use Surfpool: `CIRCUIT=x node scripts/solana/test_phased.mjs`

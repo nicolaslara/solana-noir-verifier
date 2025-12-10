@@ -1,7 +1,7 @@
 ---
 description: External references and resources for implementation
 globs:
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Key External References
@@ -10,54 +10,82 @@ When implementing features, consult these resources:
 
 ## Primary References
 
-### ultraplonk_verifier (zkVerify)
+### Barretenberg Solidity Verifier
 
-- **GitHub**: `https://github.com/zkVerify/ultraplonk_verifier`
-- Complete UltraPlonk verifier in Rust that works with Noir proofs
-- Has `noir-cli` tool for proof/VK conversion
-- MIT/Apache-2.0 licensed - can adapt code
-- **Key files**:
-  - Transcript implementation (Keccak256)
-  - Plonk verification logic
-  - Test resources with proof.bin/vk.bin
+- **Source**: Generated via `bb contract -k ./vk -o ./HonkVerifier.sol`
+- **Ground truth** for challenge generation, subrelation formulas, wire indices
+- Use `-d` flag with `bb verify` for debug output showing internal values
+- The Solidity verifier is the canonical reference for bb 0.87 UltraHonk
+
+### yugocabrio/ultrahonk-rust-verifier
+
+- **GitHub**: `https://github.com/yugocabrio/ultrahonk-rust-verifier`
+- Complete Rust UltraHonk verifier matching bb 0.87
+- Used as **algorithm reference** (not direct code - uses arkworks)
+- Key modules: `transcript.rs`, `sumcheck.rs`, `shplemini.rs`, `relations.rs`
 
 ### groth16-solana (Light Protocol)
 
 - **GitHub**: `https://github.com/Lightprotocol/groth16-solana`
-- Reference for Solana BN254 syscall usage
-- ~200k compute units for Groth16 verification
-- **Key patterns**:
-  - VK parser
-  - Proof parser
-  - Syscall integration
+- Reference for Solana BN254 syscall usage patterns
+- ~81k CUs for Groth16 (much simpler than UltraHonk)
+- **Key patterns**: VK parser, proof parser, syscall integration
 
 ### Solana BN254 Syscalls
 
-- `solana-bn254` crate (v3.1+)
+- `solana-bn254` crate
 - Active on mainnet since Solana 1.18.x
 - Operations: addition, multiplication, pairing
+- All operations use big-endian byte format
 
 ### Barretenberg
 
 - **GitHub**: `https://github.com/AztecProtocol/barretenberg`
 - Source of truth for Noir proof format
-- UltraPlonk/UltraHonk implementation details
-- Solidity verifier generator (for VK layout inspiration)
+- UltraHonk implementation details
+- Use `bb --version` to verify you're on 0.87.x
 
-## Version Compatibility
+### ultraplonk_verifier (zkVerify) - LEGACY
 
-| Component    | Version                  |
-| ------------ | ------------------------ |
-| Noir/Nargo   | v0.31.0 - v1.0.0-beta.1+ |
-| Solana SDK   | 3.0+                     |
-| solana-bn254 | 3.1+                     |
-| Rust         | 1.75+ stable             |
+- **Note**: This is for **UltraPlonk**, not UltraHonk
+- Noir 1.0+ uses UltraHonk by default
+- Only useful for understanding transcript patterns
+
+## Version Compatibility (Current)
+
+| Component    | Version      | Notes                    |
+| ------------ | ------------ | ------------------------ |
+| Noir/Nargo   | 1.0.0-beta.8 | UltraHonk/Keccak support |
+| bb           | 0.87.x       | Matched via `bbup`       |
+| Solana SDK   | 3.0+         | BN254 syscalls stable    |
+| solana-bn254 | (from SDK)   | Part of solana-program   |
+| Rust         | 1.75+ stable |                          |
 
 ## Test Resources
 
-Test vectors available from ultraplonk_verifier:
+Test vectors are in `test-circuits/`:
 
-- `tests/resources/v1.0.0-beta.1/proof.bin`
-- `tests/resources/v1.0.0-beta.1/vk.bin`
+```
+test-circuits/
+├── simple_square/target/keccak/     # Basic x²=y
+├── iterated_square_*/target/keccak/ # Scalability tests
+├── hash_batch/target/keccak/        # Blake3 hashing
+└── merkle_membership/target/keccak/ # Merkle proofs
+```
 
-Always verify new implementations against these test vectors.
+Each contains: `proof` (16,224 bytes), `vk` (1,760 bytes), `public_inputs`
+
+Rebuild with: `cd test-circuits && ./build_all.sh`
+
+## Debugging Tips
+
+```bash
+# Get bb's internal challenge values
+bb verify -d -p ./proof -k ./vk --oracle_hash keccak --zk
+
+# Generate Solidity verifier for reference
+bb contract -k ./vk -o ./HonkVerifier.sol --oracle_hash keccak
+
+# Check bb version
+~/.bb/bb --version  # Should be 0.87.x
+```
