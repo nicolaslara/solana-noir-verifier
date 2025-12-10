@@ -86,6 +86,32 @@ impl FrLimbs {
         &self.0
     }
 
+    /// Serialize to raw bytes (no Montgomery conversion)
+    /// Stores the 4 u64 limbs in little-endian order
+    /// Use this for storing FrLimbs in account state between transactions
+    #[inline]
+    pub fn to_raw_bytes(&self) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        for (i, limb) in self.0.iter().enumerate() {
+            bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Deserialize from raw bytes (no Montgomery conversion)
+    /// Reads 4 u64 limbs in little-endian order
+    /// Use this for loading FrLimbs from account state between transactions
+    #[inline]
+    pub fn from_raw_bytes(bytes: &[u8; 32]) -> Self {
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            let mut limb_bytes = [0u8; 8];
+            limb_bytes.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+            limbs[i] = u64::from_le_bytes(limb_bytes);
+        }
+        FrLimbs(limbs)
+    }
+
     /// Add: a + b mod r
     #[inline]
     pub fn add(&self, other: &FrLimbs) -> FrLimbs {

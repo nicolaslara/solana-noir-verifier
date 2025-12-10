@@ -31,25 +31,27 @@ const USE_FR_LIMBS: bool = true;
 // ============================================================================
 
 /// Intermediate state after Phase 3a (weights + scalar accumulation)
+/// Uses FrLimbs (Montgomery form) to avoid conversion overhead between phases
 #[derive(Clone)]
 pub struct ShpleminiPhase3aResult {
-    pub r_pows: Vec<Fr>,
-    pub pos0: Fr,
-    pub neg0: Fr,
-    pub unshifted: Fr,
-    pub shifted: Fr,
-    pub eval_acc: Fr,
+    pub r_pows: Vec<FrLimbs>,
+    pub pos0: FrLimbs,
+    pub neg0: FrLimbs,
+    pub unshifted: FrLimbs,
+    pub shifted: FrLimbs,
+    pub eval_acc: FrLimbs,
 }
 
 /// Intermediate state after Phase 3b (folding)
+/// Uses FrLimbs (Montgomery form) to avoid conversion overhead between phases
 #[derive(Clone)]
 pub struct ShpleminiPhase3bResult {
-    pub const_acc: Fr,
-    pub gemini_scalars: Vec<Fr>,
-    pub libra_scalars: Vec<Fr>,
-    pub r_pows: Vec<Fr>,
-    pub unshifted: Fr,
-    pub shifted: Fr,
+    pub const_acc: FrLimbs,
+    pub gemini_scalars: Vec<FrLimbs>,
+    pub libra_scalars: Vec<FrLimbs>,
+    pub r_pows: Vec<FrLimbs>,
+    pub unshifted: FrLimbs,
+    pub shifted: FrLimbs,
 }
 
 /// Phase 3a: Compute weights and scalar accumulation (~870K CUs)
@@ -132,48 +134,44 @@ pub fn shplemini_phase3a(
     // shifted = r_inv * (pos0 - nu * neg0)
     let shifted_l = r_inv_l.mul(&pos0_l.sub(&shplonk_nu_l.mul(&neg0_l)));
 
-    // Convert results back to Fr for compatibility with existing code
-    let r_pows: Vec<Fr> = r_pows_l.iter().map(|l| l.to_bytes()).collect();
-    let pos0 = pos0_l.to_bytes();
-    let neg0 = neg0_l.to_bytes();
-    let unshifted = unshifted_l.to_bytes();
-    let shifted = shifted_l.to_bytes();
-
     // Debug: print unshifted (only when debug-solana feature is enabled)
     #[cfg(all(feature = "solana", feature = "debug-solana"))]
     {
+        let unshifted_bytes = unshifted_l.to_bytes();
+        let pos0_bytes = pos0_l.to_bytes();
+        let neg0_bytes = neg0_l.to_bytes();
         solana_program::msg!(
             "3a unshifted[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            unshifted[0],
-            unshifted[1],
-            unshifted[2],
-            unshifted[3],
-            unshifted[4],
-            unshifted[5],
-            unshifted[6],
-            unshifted[7]
+            unshifted_bytes[0],
+            unshifted_bytes[1],
+            unshifted_bytes[2],
+            unshifted_bytes[3],
+            unshifted_bytes[4],
+            unshifted_bytes[5],
+            unshifted_bytes[6],
+            unshifted_bytes[7]
         );
         solana_program::msg!(
             "3a pos0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            pos0[0],
-            pos0[1],
-            pos0[2],
-            pos0[3],
-            pos0[4],
-            pos0[5],
-            pos0[6],
-            pos0[7]
+            pos0_bytes[0],
+            pos0_bytes[1],
+            pos0_bytes[2],
+            pos0_bytes[3],
+            pos0_bytes[4],
+            pos0_bytes[5],
+            pos0_bytes[6],
+            pos0_bytes[7]
         );
         solana_program::msg!(
             "3a neg0[0..8]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            neg0[0],
-            neg0[1],
-            neg0[2],
-            neg0[3],
-            neg0[4],
-            neg0[5],
-            neg0[6],
-            neg0[7]
+            neg0_bytes[0],
+            neg0_bytes[1],
+            neg0_bytes[2],
+            neg0_bytes[3],
+            neg0_bytes[4],
+            neg0_bytes[5],
+            neg0_bytes[6],
+            neg0_bytes[7]
         );
     }
 
@@ -198,7 +196,6 @@ pub fn shplemini_phase3a(
         eval_acc_l = eval_acc_l.add(&eval_l.mul(&rho_pow_l));
         rho_pow_l = rho_pow_l.mul(&rho_l);
     }
-    let eval_acc = eval_acc_l.to_bytes();
 
     #[cfg(feature = "solana")]
     {
@@ -206,161 +203,25 @@ pub fn shplemini_phase3a(
         solana_program::log::sol_log_compute_units();
     }
 
+    // Return FrLimbs directly - no conversion overhead!
     Ok(ShpleminiPhase3aResult {
-        r_pows,
-        pos0,
-        neg0,
-        unshifted,
-        shifted,
-        eval_acc,
+        r_pows: r_pows_l,
+        pos0: pos0_l,
+        neg0: neg0_l,
+        unshifted: unshifted_l,
+        shifted: shifted_l,
+        eval_acc: eval_acc_l,
     })
 }
 
-/// Phase 3b: Folding rounds + gemini loop + libra (~500K CUs)
-#[inline(never)]
-pub fn shplemini_phase3b(
-    proof: &Proof,
-    challenges: &Challenges,
-    phase3a: &ShpleminiPhase3aResult,
-    log_n: usize,
-) -> Result<ShpleminiPhase3bResult, &'static str> {
-    #[cfg(feature = "solana")]
-    {
-        solana_program::msg!("Shplemini 3b: start");
-        solana_program::log::sol_log_compute_units();
-    }
-
-    let r_pows = &phase3a.r_pows;
-    let pos0 = &phase3a.pos0;
-    let neg0 = &phase3a.neg0;
-
-    // 4) Folding rounds
-    let mut fold_pos = vec![SCALAR_ZERO; log_n];
-    let mut cur = phase3a.eval_acc;
-    let gemini_a_evals = proof.gemini_a_evaluations();
-
-    for j in (1..=log_n).rev() {
-        let r2 = r_pows[j - 1];
-        let u = challenges.sumcheck_challenges[j - 1];
-
-        let two = fr_add(&SCALAR_ONE, &SCALAR_ONE);
-        let term1 = fr_mul(&fr_mul(&r2, &cur), &two);
-        let one_minus_u = fr_sub(&SCALAR_ONE, &u);
-        let r2_one_minus_u = fr_mul(&r2, &one_minus_u);
-        let bracket = fr_sub(&r2_one_minus_u, &u);
-        let term2 = fr_mul(&gemini_a_evals[j - 1], &bracket);
-        let num = fr_sub(&term1, &term2);
-        let den = fr_add(&r2_one_minus_u, &u);
-        let den_inv = fr_inv(&den).ok_or("fold round denominator is zero")?;
-        cur = fr_mul(&num, &den_inv);
-        fold_pos[j - 1] = cur;
-    }
-
-    #[cfg(feature = "solana")]
-    {
-        solana_program::msg!("Shplemini 3b: after fold");
-        solana_program::log::sol_log_compute_units();
-    }
-
-    // 5) Constant term accumulation
-    let mut const_acc = fr_add(
-        &fr_mul(&fold_pos[0], pos0),
-        &fr_mul(&fr_mul(&gemini_a_evals[0], &challenges.shplonk_nu), neg0),
-    );
-
-    // 6) Gemini fold loop
-    let mut v_pow = fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu);
-    let mut gemini_scalars = vec![SCALAR_ZERO; CONST_PROOF_SIZE_LOG_N - 1];
-
-    for i in 0..(CONST_PROOF_SIZE_LOG_N - 1) {
-        let dummy_round = i >= log_n - 1;
-
-        if !dummy_round {
-            let j = i + 1;
-            let z_minus_rj = fr_sub(&challenges.shplonk_z, &r_pows[j]);
-            let z_plus_rj = fr_add(&challenges.shplonk_z, &r_pows[j]);
-            let pos_inv = fr_inv(&z_minus_rj).ok_or("shplonk denominator z - r^j is zero")?;
-            let neg_inv = fr_inv(&z_plus_rj).ok_or("shplonk denominator z + r^j is zero")?;
-            let sp = fr_mul(&v_pow, &pos_inv);
-            let sn = fr_mul(&fr_mul(&v_pow, &challenges.shplonk_nu), &neg_inv);
-            gemini_scalars[i] = fr_neg(&fr_add(&sn, &sp));
-            const_acc = fr_add(
-                &const_acc,
-                &fr_add(&fr_mul(&gemini_a_evals[j], &sn), &fr_mul(&fold_pos[j], &sp)),
-            );
-        }
-
-        v_pow = fr_mul(
-            &v_pow,
-            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
-        );
-    }
-
-    #[cfg(feature = "solana")]
-    {
-        solana_program::msg!("Shplemini 3b: after gemini");
-        solana_program::log::sol_log_compute_units();
-    }
-
-    // 7) Libra (ZK only)
-    let mut libra_scalars = vec![SCALAR_ZERO; 3];
-
-    if proof.is_zk {
-        let subgroup_generator: Fr = [
-            0x07, 0xb0, 0xc5, 0x61, 0xa6, 0x14, 0x84, 0x04, 0xf0, 0x86, 0x20, 0x4a, 0x9f, 0x36,
-            0xff, 0xb0, 0x61, 0x79, 0x42, 0x54, 0x67, 0x50, 0xf2, 0x30, 0xc8, 0x93, 0x61, 0x91,
-            0x74, 0xa5, 0x7a, 0x76,
-        ];
-
-        let denom0 = fr_inv(&fr_sub(&challenges.shplonk_z, &challenges.gemini_r))
-            .ok_or("libra denominator 0 is zero")?;
-        let denom1 = fr_inv(&fr_sub(
-            &challenges.shplonk_z,
-            &fr_mul(&subgroup_generator, &challenges.gemini_r),
-        ))
-        .ok_or("libra denominator 1 is zero")?;
-
-        v_pow = fr_mul(
-            &v_pow,
-            &fr_mul(&challenges.shplonk_nu, &challenges.shplonk_nu),
-        );
-
-        let libra_evals = proof.libra_poly_evals();
-        let denominators = [denom0, denom1, denom0, denom0];
-        let mut batching_scalars = [SCALAR_ZERO; 4];
-        for (i, eval) in libra_evals.iter().enumerate() {
-            let scaling_factor = fr_mul(&denominators[i], &v_pow);
-            batching_scalars[i] = fr_neg(&scaling_factor);
-            const_acc = fr_add(&const_acc, &fr_mul(&scaling_factor, eval));
-            v_pow = fr_mul(&v_pow, &challenges.shplonk_nu);
-        }
-
-        libra_scalars[0] = batching_scalars[0];
-        libra_scalars[1] = fr_add(&batching_scalars[1], &batching_scalars[2]);
-        libra_scalars[2] = batching_scalars[3];
-    }
-
-    #[cfg(feature = "solana")]
-    {
-        solana_program::msg!("Shplemini 3b: done");
-        solana_program::log::sol_log_compute_units();
-    }
-
-    Ok(ShpleminiPhase3bResult {
-        const_acc,
-        gemini_scalars,
-        libra_scalars,
-        r_pows: phase3a.r_pows.clone(),
-        unshifted: phase3a.unshifted,
-        shifted: phase3a.shifted,
-    })
-}
+// Note: Old combined shplemini_phase3b was removed - use shplemini_phase3b1 + shplemini_phase3b2
 
 /// Intermediate state after Phase 3b1 (folding only)
+/// Uses FrLimbs (Montgomery form) to avoid conversion overhead between phases
 #[derive(Clone)]
 pub struct ShpleminiPhase3b1Result {
-    pub fold_pos: Vec<Fr>,
-    pub const_acc: Fr,
+    pub fold_pos: Vec<FrLimbs>,
+    pub const_acc: FrLimbs,
 }
 
 /// Phase 3b1: Folding rounds only (~870K CUs)
@@ -378,14 +239,12 @@ pub fn shplemini_phase3b1(
         solana_program::log::sol_log_compute_units();
     }
 
-    // Convert all inputs to FrLimbs for computation
-    let r_pows_l: Vec<FrLimbs> = phase3a
-        .r_pows
-        .iter()
-        .map(|r| FrLimbs::from_bytes(r))
-        .collect();
-    let pos0_l = FrLimbs::from_bytes(&phase3a.pos0);
-    let neg0_l = FrLimbs::from_bytes(&phase3a.neg0);
+    // Use FrLimbs directly from phase3a (no conversion needed!)
+    let r_pows_l = &phase3a.r_pows;
+    let pos0_l = &phase3a.pos0;
+    let neg0_l = &phase3a.neg0;
+
+    // Only convert values from proof and challenges (still in Fr format)
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_a_evals = proof.gemini_a_evaluations();
     let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
@@ -428,7 +287,7 @@ pub fn shplemini_phase3b1(
     // Folding rounds using precomputed inverses (all in FrLimbs)
     let two_l = FrLimbs::ONE.add(&FrLimbs::ONE);
     let mut fold_pos_l = vec![FrLimbs::ZERO; log_n];
-    let mut cur_l = FrLimbs::from_bytes(&phase3a.eval_acc);
+    let mut cur_l = phase3a.eval_acc; // Already FrLimbs!
 
     for j in (1..=log_n).rev() {
         let r2 = &r_pows_l[j - 1];
@@ -452,12 +311,8 @@ pub fn shplemini_phase3b1(
     // Initial constant term accumulation
     // const_acc = fold_pos[0] * pos0 + gemini_a_evals[0] * shplonk_nu * neg0
     let const_acc_l = fold_pos_l[0]
-        .mul(&pos0_l)
-        .add(&gemini_a_l[0].mul(&shplonk_nu_l).mul(&neg0_l));
-
-    // Convert outputs back to Fr
-    let fold_pos: Vec<Fr> = fold_pos_l.iter().map(|l| l.to_bytes()).collect();
-    let const_acc = const_acc_l.to_bytes();
+        .mul(pos0_l)
+        .add(&gemini_a_l[0].mul(&shplonk_nu_l).mul(neg0_l));
 
     #[cfg(feature = "solana")]
     {
@@ -465,9 +320,10 @@ pub fn shplemini_phase3b1(
         solana_program::log::sol_log_compute_units();
     }
 
+    // Return FrLimbs directly - no conversion overhead!
     Ok(ShpleminiPhase3b1Result {
-        fold_pos,
-        const_acc,
+        fold_pos: fold_pos_l,
+        const_acc: const_acc_l,
     })
 }
 
@@ -486,12 +342,12 @@ pub fn shplemini_phase3b2(
         solana_program::log::sol_log_compute_units();
     }
 
-    // Convert all inputs to FrLimbs
-    let r_pows_l: Vec<FrLimbs> = phase3a
-        .r_pows
-        .iter()
-        .map(|r| FrLimbs::from_bytes(r))
-        .collect();
+    // Use FrLimbs directly from phase3a and phase3b1 (no conversion needed!)
+    let r_pows_l = &phase3a.r_pows;
+    let fold_pos_l = &phase3b1.fold_pos;
+    let mut const_acc_l = phase3b1.const_acc; // Already FrLimbs!
+
+    // Only convert values from proof and challenges (still in Fr format)
     let shplonk_z_l = FrLimbs::from_bytes(&challenges.shplonk_z);
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_r_l = FrLimbs::from_bytes(&challenges.gemini_r);
@@ -500,12 +356,6 @@ pub fn shplemini_phase3b2(
         .iter()
         .map(|e| FrLimbs::from_bytes(e))
         .collect();
-    let fold_pos_l: Vec<FrLimbs> = phase3b1
-        .fold_pos
-        .iter()
-        .map(|f| FrLimbs::from_bytes(f))
-        .collect();
-    let mut const_acc_l = FrLimbs::from_bytes(&phase3b1.const_acc);
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
     let num_non_dummy = if log_n > 1 { log_n - 1 } else { 0 };
@@ -597,21 +447,17 @@ pub fn shplemini_phase3b2(
         libra_scalars_l[2] = batching_scalars_l[3];
     }
 
-    // Convert outputs back to Fr
-    let const_acc = const_acc_l.to_bytes();
-    let gemini_scalars: Vec<Fr> = gemini_scalars_l.iter().map(|l| l.to_bytes()).collect();
-    let libra_scalars: Vec<Fr> = libra_scalars_l.iter().map(|l| l.to_bytes()).collect();
-
     #[cfg(feature = "solana")]
     {
         solana_program::msg!("Shplemini 3b2: done");
         solana_program::log::sol_log_compute_units();
     }
 
+    // Return FrLimbs directly - no conversion overhead!
     Ok(ShpleminiPhase3bResult {
-        const_acc,
-        gemini_scalars,
-        libra_scalars,
+        const_acc: const_acc_l,
+        gemini_scalars: gemini_scalars_l,
+        libra_scalars: libra_scalars_l,
         r_pows: phase3a.r_pows.clone(),
         unshifted: phase3a.unshifted,
         shifted: phase3a.shifted,
@@ -632,16 +478,29 @@ pub fn shplemini_phase3c(
         solana_program::log::sol_log_compute_units();
     }
 
+    // Convert FrLimbs to Fr for MSM (syscall needs big-endian bytes)
+    // This is the only place we convert - all prior phases stay in FrLimbs
+    let const_acc_fr = phase3b.const_acc.to_bytes();
+    let unshifted_fr = phase3b.unshifted.to_bytes();
+    let shifted_fr = phase3b.shifted.to_bytes();
+    let r_pows_fr: Vec<Fr> = phase3b.r_pows.iter().map(|l| l.to_bytes()).collect();
+    let gemini_scalars_fr: Vec<Fr> = phase3b
+        .gemini_scalars
+        .iter()
+        .map(|l| l.to_bytes())
+        .collect();
+    let libra_scalars_fr: Vec<Fr> = phase3b.libra_scalars.iter().map(|l| l.to_bytes()).collect();
+
     let p0 = compute_p0_full(
         proof,
         vk,
         challenges,
-        &phase3b.const_acc,
-        &phase3b.unshifted,
-        &phase3b.shifted,
-        &phase3b.r_pows,
-        &phase3b.gemini_scalars,
-        &phase3b.libra_scalars,
+        &const_acc_fr,
+        &unshifted_fr,
+        &shifted_fr,
+        &r_pows_fr,
+        &gemini_scalars_fr,
+        &libra_scalars_fr,
     )?;
 
     let kzg_quotient = proof.kzg_quotient();

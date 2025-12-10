@@ -48,6 +48,7 @@ use plonk_solana_core::{
     Challenges,
     DeltaPartialResult,
     Fr,
+    FrLimbs, // For efficient state storage
     ShpleminiPhase3aResult,
     ShpleminiPhase3b1Result,
     ShpleminiPhase3bResult,
@@ -1788,17 +1789,17 @@ fn process_phase3a_weights(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
         ProgramError::InvalidAccountData
     })?;
 
-    // Save intermediate state
+    // Save intermediate state as raw FrLimbs bytes (no Montgomery conversion!)
     for (i, r) in result.r_pows.iter().enumerate() {
         if i < 28 {
-            state.shplemini_r_pows[i] = *r;
+            state.shplemini_r_pows[i] = r.to_raw_bytes();
         }
     }
-    state.shplemini_pos0 = result.pos0;
-    state.shplemini_neg0 = result.neg0;
-    state.shplemini_unshifted = result.unshifted;
-    state.shplemini_shifted = result.shifted;
-    state.shplemini_eval_acc = result.eval_acc;
+    state.shplemini_pos0 = result.pos0.to_raw_bytes();
+    state.shplemini_neg0 = result.neg0.to_raw_bytes();
+    state.shplemini_unshifted = result.unshifted.to_raw_bytes();
+    state.shplemini_shifted = result.shifted.to_raw_bytes();
+    state.shplemini_eval_acc = result.eval_acc.to_raw_bytes();
 
     state.set_phase(phased::Phase::MsmInProgress);
     state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3aDone);
@@ -1849,14 +1850,19 @@ fn process_phase3b1_folding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     .map_err(|_| ProgramError::InvalidAccountData)?;
 
     // Reconstruct challenges and Phase 3a result from state
+    // Load FrLimbs directly from raw bytes (no Montgomery conversion!)
     let challenges = reconstruct_challenges(state);
     let phase3a_result = ShpleminiPhase3aResult {
-        r_pows: state.shplemini_r_pows.to_vec(),
-        pos0: state.shplemini_pos0,
-        neg0: state.shplemini_neg0,
-        unshifted: state.shplemini_unshifted,
-        shifted: state.shplemini_shifted,
-        eval_acc: state.shplemini_eval_acc,
+        r_pows: state
+            .shplemini_r_pows
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        pos0: FrLimbs::from_raw_bytes(&state.shplemini_pos0),
+        neg0: FrLimbs::from_raw_bytes(&state.shplemini_neg0),
+        unshifted: FrLimbs::from_raw_bytes(&state.shplemini_unshifted),
+        shifted: FrLimbs::from_raw_bytes(&state.shplemini_shifted),
+        eval_acc: FrLimbs::from_raw_bytes(&state.shplemini_eval_acc),
     };
 
     msg!("Computing shplemini phase 3b1 (folding)...");
@@ -1870,13 +1876,13 @@ fn process_phase3b1_folding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> P
             ProgramError::InvalidAccountData
         })?;
 
-    // Save fold_pos and const_acc
+    // Save fold_pos and const_acc as raw FrLimbs bytes
     for (i, f) in result.fold_pos.iter().enumerate() {
         if i < 28 {
-            state.shplemini_fold_pos[i] = *f;
+            state.shplemini_fold_pos[i] = f.to_raw_bytes();
         }
     }
-    state.shplemini_const_acc = result.const_acc;
+    state.shplemini_const_acc = result.const_acc.to_raw_bytes();
 
     state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3b1Done);
 
@@ -1925,19 +1931,27 @@ fn process_phase3b2_gemini(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
     )
     .map_err(|_| ProgramError::InvalidAccountData)?;
 
-    // Reconstruct from state
+    // Reconstruct from state - load FrLimbs directly from raw bytes
     let challenges = reconstruct_challenges(state);
     let phase3a_result = ShpleminiPhase3aResult {
-        r_pows: state.shplemini_r_pows.to_vec(),
-        pos0: state.shplemini_pos0,
-        neg0: state.shplemini_neg0,
-        unshifted: state.shplemini_unshifted,
-        shifted: state.shplemini_shifted,
-        eval_acc: state.shplemini_eval_acc,
+        r_pows: state
+            .shplemini_r_pows
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        pos0: FrLimbs::from_raw_bytes(&state.shplemini_pos0),
+        neg0: FrLimbs::from_raw_bytes(&state.shplemini_neg0),
+        unshifted: FrLimbs::from_raw_bytes(&state.shplemini_unshifted),
+        shifted: FrLimbs::from_raw_bytes(&state.shplemini_shifted),
+        eval_acc: FrLimbs::from_raw_bytes(&state.shplemini_eval_acc),
     };
     let phase3b1_result = ShpleminiPhase3b1Result {
-        fold_pos: state.shplemini_fold_pos.to_vec(),
-        const_acc: state.shplemini_const_acc,
+        fold_pos: state
+            .shplemini_fold_pos
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        const_acc: FrLimbs::from_raw_bytes(&state.shplemini_const_acc),
     };
 
     msg!("Computing shplemini phase 3b2 (gemini+libra)...");
@@ -1957,16 +1971,16 @@ fn process_phase3b2_gemini(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
         ProgramError::InvalidAccountData
     })?;
 
-    // Save intermediate state
-    state.shplemini_const_acc = result.const_acc;
+    // Save intermediate state as raw FrLimbs bytes
+    state.shplemini_const_acc = result.const_acc.to_raw_bytes();
     for (i, s) in result.gemini_scalars.iter().enumerate() {
         if i < 27 {
-            state.shplemini_gemini_scalars[i] = *s;
+            state.shplemini_gemini_scalars[i] = s.to_raw_bytes();
         }
     }
     for (i, s) in result.libra_scalars.iter().enumerate() {
         if i < 3 {
-            state.shplemini_libra_scalars[i] = *s;
+            state.shplemini_libra_scalars[i] = s.to_raw_bytes();
         }
     }
 
@@ -2057,13 +2071,26 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         state.shplemini_unshifted[7]
     );
 
+    // Load FrLimbs directly from raw bytes (no Montgomery conversion!)
     let phase3b_result = ShpleminiPhase3bResult {
-        const_acc: state.shplemini_const_acc,
-        gemini_scalars: state.shplemini_gemini_scalars.to_vec(),
-        libra_scalars: state.shplemini_libra_scalars.to_vec(),
-        r_pows: state.shplemini_r_pows.to_vec(),
-        unshifted: state.shplemini_unshifted,
-        shifted: state.shplemini_shifted,
+        const_acc: FrLimbs::from_raw_bytes(&state.shplemini_const_acc),
+        gemini_scalars: state
+            .shplemini_gemini_scalars
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        libra_scalars: state
+            .shplemini_libra_scalars
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        r_pows: state
+            .shplemini_r_pows
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        unshifted: FrLimbs::from_raw_bytes(&state.shplemini_unshifted),
+        shifted: FrLimbs::from_raw_bytes(&state.shplemini_shifted),
     };
 
     msg!("Computing shplemini phase 3c (MSM)...");
@@ -2154,14 +2181,27 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
     .map_err(|_| ProgramError::InvalidAccountData)?;
 
     // Reconstruct challenges and Phase 3b result
+    // Load FrLimbs directly from raw bytes (no Montgomery conversion!)
     let challenges = reconstruct_challenges(state);
     let phase3b_result = ShpleminiPhase3bResult {
-        const_acc: state.shplemini_const_acc,
-        gemini_scalars: state.shplemini_gemini_scalars.to_vec(),
-        libra_scalars: state.shplemini_libra_scalars.to_vec(),
-        r_pows: state.shplemini_r_pows.to_vec(),
-        unshifted: state.shplemini_unshifted,
-        shifted: state.shplemini_shifted,
+        const_acc: FrLimbs::from_raw_bytes(&state.shplemini_const_acc),
+        gemini_scalars: state
+            .shplemini_gemini_scalars
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        libra_scalars: state
+            .shplemini_libra_scalars
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        r_pows: state
+            .shplemini_r_pows
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        unshifted: FrLimbs::from_raw_bytes(&state.shplemini_unshifted),
+        shifted: FrLimbs::from_raw_bytes(&state.shplemini_shifted),
     };
 
     msg!("Computing MSM...");
