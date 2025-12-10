@@ -118,13 +118,24 @@ PRIVATE INPUTS:
 │   ├── sk    Master spending key
 │   └── ar    Per-spend randomizer
 ├── Note Data
-│   ├── value Note value
+│   ├── value Note value (64-bit range checked!)
 │   ├── rho   Nullifier seed (in commitment!)
 │   ├── rcm   Commitment randomness
 │   └── d     Diversifier
 └── Merkle Path
     ├── siblings[32]     Sibling hashes
     └── path_indices[32] Position bits
+
+COMPUTATION STEPS:
+0. Range check: value < 2^64
+1. Derive ask, nsk from sk
+2. Compute ak = ask·G, nk = nsk·G
+3. Compute ivk = Hash(ak, nk)
+4. Derive g_d, pk_d from diversifier
+5. Compute cm = Hash(g_d, pk_d, value, rho, rcm)
+6. Verify Merkle membership → anchor
+7. Compute nullifier = Hash(nk, rho)
+8. Compute rk = ak + ar·G
 
 PUBLIC OUTPUTS:
 ├── nullifier  Double-spend tag
@@ -133,23 +144,26 @@ PUBLIC OUTPUTS:
 └── rk.y       Auth key y-coordinate
 ```
 
-## What's Missing for Production
+### ✅ 64-bit Value Range Check
 
-### 1. Value Range Checks (High Priority)
-
-**Current state:** `value` is an unconstrained field element.
-
-**Risk:** Without range checks, arithmetic wraparound could create value from nothing or destroy value unexpectedly.
-
-**Fix needed:**
+The circuit enforces that `value` fits in 64 bits:
 
 ```noir
-// Constrain value to 64 bits
-assert(value < 2.pow(64), "value must be < 2^64");
-// Or use bit decomposition for tighter constraint
+fn assert_64_bits(v: Field) {
+    let bytes: [u8; 32] = v.to_be_bytes();
+    for i in 0..24 {
+        assert(bytes[i] == 0, "value exceeds 64 bits");
+    }
+}
 ```
 
-### 2. Asset Type Support (For Multi-Asset)
+**Why this matters:** Without range checks, field arithmetic wraparound could create value from nothing or destroy value unexpectedly.
+
+**Guarantee:** Values must be in range `[0, 2^64 - 1]`. Proof generation fails for values ≥ 2^64.
+
+## Future Enhancements
+
+### Asset Type Support (Optional)
 
 **Current state:** Single-asset (implicit native token).
 
@@ -160,40 +174,9 @@ assert(value < 2.pow(64), "value must be < 2^64");
 cm = Hash(DOMAIN_NOTE_COMMIT, g_d.x, pk_d.x, asset_type, value, rho, rcm)
 ```
 
-Plus value balance checks across all spends/outputs per asset type.
+**Impact analysis:** Adding `asset_type` increases circuit size by only ~0.6% (337 gates), keeping log_n=16. Verification cost identical, proof generation negligibly slower.
 
-### 3. Stronger Domain Separation Tags
-
-**Current state:** Small integers (1-6).
-
-**Improvement:** Use larger, more unique constants:
-
-```noir
-// Instead of:
-global DOMAIN_ASK: Field = 1;
-
-// Consider:
-global DOMAIN_ASK: Field = 0x5361706c696e675f41534b; // "Sapling_ASK" as hex
-```
-
-This prevents accidental collision with other protocols using similar patterns.
-
-### 4. Comprehensive Test Vectors
-
-**Current tests verify:**
-
-- Non-zero outputs
-- Nullifier determinism (same inputs → same nf)
-- Merkle path correctness
-
-**Should add:**
-
-- Different `sk` with same note → different `nf`
-- Tampered Merkle sibling → anchor mismatch
-- Edge cases (zero value, max value, etc.)
-- Known-answer tests against reference implementation
-
-### 5. Spend Authorization Signature Verification
+### Spend Authorization Signature
 
 **Current state:** Circuit outputs `rk` but doesn't verify any signature.
 
@@ -205,17 +188,36 @@ This prevents accidental collision with other protocols using similar patterns.
 
 This is outside the circuit—handled by the Solana program.
 
+## Test Suite
+
+The circuit includes **10 comprehensive tests**:
+
+| Test                                    | Security Property                          |
+| --------------------------------------- | ------------------------------------------ |
+| `test_sapling_spend`                    | Basic functionality, nullifier determinism |
+| `test_nullifier_binding`                | rho correctly bound via note commitment    |
+| `test_realistic_merkle_tree`            | Proper Merkle tree construction            |
+| `test_different_sk_different_nullifier` | Only owner can create valid nullifiers     |
+| `test_tampered_merkle_sibling`          | Merkle path integrity                      |
+| `test_path_index_sensitivity`           | Position affects anchor                    |
+| `test_rk_randomization`                 | Unlinkability via different ar             |
+| `test_zero_value_note`                  | Edge case: zero value                      |
+| `test_max_valid_value`                  | Edge case: max 64-bit value                |
+| `test_determinism`                      | Same inputs → same outputs                 |
+
+All tests pass and the circuit has been verified end-to-end on Solana (surfpool).
+
 ## Verification Cost (Solana)
 
 | Phase                | Compute Units | Transactions |
 | -------------------- | ------------- | ------------ |
-| Challenge Generation | ~318,000      | 1            |
-| Sumcheck (16 rounds) | ~4,735,000    | 4            |
-| MSM Computation      | ~2,703,000    | 4            |
+| Challenge Generation | ~319,000      | 1            |
+| Sumcheck (16 rounds) | ~4,736,000    | 4            |
+| MSM Computation      | ~2,705,000    | 4            |
 | Pairing Check        | ~55,000       | 1            |
 | **Total**            | **~7.8M CUs** | **10 TXs**   |
 
-Circuit complexity: `log_n = 16` (~65k constraints)
+Circuit complexity: `log_n = 16` (~57k gates)
 
 ## Usage
 
