@@ -88,25 +88,11 @@ fn compute_merkle_root(
     current
 }
 
-// Split a field element into 128-bit limbs for scalar multiplication
+// Convert field element to embedded curve scalar
+// Uses Noir's built-in decomposition which correctly handles the 254-bit field
+// by splitting into two 128-bit limbs (lo, hi) where scalar = lo + hi * 2^128
 fn field_to_scalar(f: Field) -> EmbeddedCurveScalar {
-    let bytes: [u8; 32] = f.to_be_bytes();
-
-    // High 128 bits (bytes 0-15)
-    let mut hi_bytes: [u8; 32] = [0; 32];
-    for i in 0..16 {
-        hi_bytes[16 + i] = bytes[i];
-    }
-    let hi = Field::from_be_bytes::<32>(hi_bytes);
-
-    // Low 128 bits (bytes 16-31)
-    let mut lo_bytes: [u8; 32] = [0; 32];
-    for i in 0..16 {
-        lo_bytes[16 + i] = bytes[16 + i];
-    }
-    let lo = Field::from_be_bytes::<32>(lo_bytes);
-
-    EmbeddedCurveScalar { lo, hi }
+    EmbeddedCurveScalar::from_field(f)
 }
 
 // ============================================================================
@@ -138,10 +124,16 @@ fn main(
     // Return: (nullifier, anchor, rk_x, rk_y)
 
     // ========================================================================
-    // STEP 0: Range check on value (CRITICAL for soundness)
+    // STEP 0a: Range check on value (CRITICAL for soundness)
     // Without this, arithmetic wraparound could create/destroy value
     // ========================================================================
     assert_64_bits(value);
+
+    // ========================================================================
+    // STEP 0b: Diversifier must be non-zero
+    // d = 0 would make g_d the point at infinity, breaking address derivation
+    // ========================================================================
+    assert(d != 0, "diversifier must be non-zero");
 
     // ========================================================================
     // STEP 1: Derive ask and nsk from the same spending key
