@@ -13,7 +13,10 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::field::{batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_neg, fr_sub, FrLimbs};
+use crate::field::{
+    batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_neg, fr_sub, FrLimbs, SmallFrArray,
+    MAX_LOG_N,
+};
 use crate::key::VerificationKey;
 use crate::ops;
 use crate::proof::{Proof, CONST_PROOF_SIZE_LOG_N};
@@ -121,9 +124,12 @@ pub fn shplemini_phase3a(
     let z_minus_r0 = shplonk_z_l.sub(&r_pows_l[0]);
     let z_plus_r0 = shplonk_z_l.add(&r_pows_l[0]);
 
-    // Batch invert all 3 denominators at once
-    let denoms = vec![z_minus_r0, z_plus_r0, gemini_r_l];
-    let invs = batch_inv_limbs(&denoms).ok_or("shplonk batch inversion failed")?;
+    // Batch invert all 3 denominators at once (stack array, no heap!)
+    let mut denoms: SmallFrArray<4> = SmallFrArray::new();
+    denoms.push(z_minus_r0);
+    denoms.push(z_plus_r0);
+    denoms.push(gemini_r_l);
+    let invs = batch_inv_limbs(denoms.as_slice()).ok_or("shplonk batch inversion failed")?;
     let pos0_l = invs[0];
     let neg0_l = invs[1];
     let r_inv_l = invs[2];
@@ -259,10 +265,10 @@ pub fn shplemini_phase3b1(
         .collect();
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
-    // Precompute all fold denominators and batch invert them.
+    // Precompute all fold denominators and batch invert them (stack arrays, no heap!)
     // den[j] = r_pows[j-1] * (1 - u[j-1]) + u[j-1]
-    let mut fold_denoms_l: Vec<FrLimbs> = Vec::with_capacity(log_n);
-    let mut r2_one_minus_u_l: Vec<FrLimbs> = Vec::with_capacity(log_n);
+    let mut fold_denoms_l: SmallFrArray<MAX_LOG_N> = SmallFrArray::new();
+    let mut r2_one_minus_u_l: SmallFrArray<MAX_LOG_N> = SmallFrArray::new();
 
     for j in 1..=log_n {
         let r2 = &r_pows_l[j - 1];
@@ -276,7 +282,7 @@ pub fn shplemini_phase3b1(
 
     // Batch invert all fold denominators at once
     let fold_den_invs_l =
-        batch_inv_limbs(&fold_denoms_l).ok_or("batch inversion of fold denominators failed")?;
+        batch_inv_limbs(fold_denoms_l.as_slice()).ok_or("batch inversion of fold denominators failed")?;
 
     #[cfg(feature = "solana")]
     {
@@ -358,6 +364,7 @@ pub fn shplemini_phase3b2(
         .collect();
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
+    // Note: Using Vec here because SmallFrArray<64> would be 2KB, causing stack overflow
     let num_non_dummy = if log_n > 1 { log_n - 1 } else { 0 };
     let mut all_denoms_l: Vec<FrLimbs> = Vec::with_capacity(num_non_dummy * 2 + 4);
 

@@ -16,26 +16,47 @@ This document tracks field arithmetic and verification optimizations for the Ult
 | 8. **FrLimbs in sumcheck**          | ✅ DONE | **17.5% savings** per round (1.3M → 1.07M CUs)   |
 | 9. **FrLimbs in shplemini**         | ✅ DONE | **16% savings** (2.95M → 2.48M CUs)              |
 | 10. **Zero-copy Proof**             | ✅ DONE | **54% CU savings** in Phase 1 (619K → 287K)      |
-| 11. Relation batching               | ⏳ TODO | Factor common challenge combos (~50-80k CUs)     |
-| 12. Challenge fr_reduce tuning      | ⏳ TODO | ~40-75k CUs via Montgomery reduction             |
-| 13. BPF assembly for mont_mul       | 💡 IDEA | Up to ~2x more on fr_mul (high effort)           |
-| 14. **Audit other copies**          | 🔍 TODO | May have similar wins elsewhere                  |
+| 11. **FrLimbs in relations**        | ✅ DONE | **32% savings** in relations (1.15M → 778K CUs)  |
+| 12. **FrLimbs direct storage**      | ✅ DONE | **262K CUs saved** (no Montgomery conv at edges) |
+| 13. SmallFrArray (stack arrays)     | ✅ DONE | **Minimal** (<100 CUs - allocation not bottleneck)|
+| 14. Degree-specialized sumcheck     | ⏳ TODO | **~200-400k CUs** (hardcoded degree-1/2/3)       |
+| 15. Relations monomial factoring    | ⏳ TODO | ~60-100k CUs (fold α/β/γ into coefficients)      |
+| 16. Padding-skipping (log_n < 28)   | 🔬 TODO | **Potentially huge** (research needed)           |
+| 17. Challenge fr_reduce tuning      | ⏳ TODO | ~40-75k CUs via Montgomery reduction             |
+| 18. BPF assembly for mont_mul       | 💡 IDEA | Up to ~400k CUs (high effort, last resort)       |
 
 ---
 
 ## Current Performance (Dec 2024)
 
-**Post-Montgomery + FrLimbs world:**
+**Post-FrLimbs everywhere (including relations + direct storage):**
 
-| Metric                          | Value         |
-| ------------------------------- | ------------- |
-| `fr_mul` (Montgomery+Karatsuba) | ~500-700 CUs  |
-| `fr_add/sub`                    | ~100-200 CUs  |
-| `fr_inv` (binary GCD)           | ~3-4k CUs     |
-| Challenge generation (1 tx)     | ~287k CUs     |
-| Sumcheck (6 rounds/tx)          | ~1.35M CUs    |
-| Full verification (log_n=12)    | **6.64M CUs** |
-| Transaction count               | **9 txs**     |
+| Metric                           | Value         |
+| -------------------------------- | ------------- |
+| `fr_mul` (Montgomery+Karatsuba)  | ~500-700 CUs  |
+| `fr_add/sub`                     | ~100-200 CUs  |
+| `fr_inv` (binary GCD)            | ~3-4k CUs     |
+| Challenge generation (1 TX)      | ~319k CUs     |
+| Sumcheck rounds (6 rounds/TX)    | ~1.35M CUs    |
+| Relations accumulation           | ~778k CUs     |
+| Shplemini phases (3a+3b1+3b2+3c) | ~2.48M CUs    |
+| **Full verification (log_n=16)** | **7.17M CUs** |
+| Transaction count                | **9 TXs**     |
+
+**Benchmark circuit:** `sapling_spend` (log_n=16, 4 public inputs)
+
+| Phase             | CUs       | TXs   |
+| ----------------- | --------- | ----- |
+| 1. Challenges     | 319K      | 1     |
+| 2a. Rounds 0-5    | 1,344K    | 1     |
+| 2b. Rounds 6-11   | 1,348K    | 1     |
+| 2c. Rounds 12-15  | 896K      | 1     |
+| 2d. Relations     | 778K      | 1     |
+| 3a. Weights       | 456K      | 1     |
+| 3b1. Folding      | 459K      | 1     |
+| 3b2. Gemini+Libra | 642K      | 1     |
+| 3c+4. MSM+Pairing | 926K      | 1     |
+| **Total**         | **7.17M** | **9** |
 
 ---
 
@@ -229,36 +250,219 @@ If similar patterns exist in Phase 2/3, could see **100-500k CU savings**.
 
 ---
 
-## 5. ⏳ TODO: Relations Accumulation Factoring
+## 5. ✅ DONE: FrLimbs in Relations
+
+### What We Implemented
+
+Converted all 26 UltraHonk subrelations in `relations.rs` to use `FrLimbs` internally:
+
+- Created `RelationParametersLimbs` for challenge storage
+- Precomputed all constant `FrLimbs` values at compile time
+- Ported all `accumulate_*` functions to `accumulate_*_l` variants
+- Only convert Fr↔FrLimbs at boundaries
+
+### Actual Results
+
+| Metric          | Before   | After    | Savings  |
+| --------------- | -------- | -------- | -------- |
+| Relations phase | 1,145K   | 778K     | **32%**  |
+| Per-subrelation | ~44K avg | ~30K avg | **~14K** |
+
+---
+
+## 6. ✅ DONE: FrLimbs Direct Storage
+
+### What We Implemented
+
+Store FrLimbs in Montgomery form directly in account state between phases:
+
+```rust
+// Added to FrLimbs in field.rs
+pub fn to_raw_bytes(&self) -> [u8; 32] { /* serialize Montgomery form */ }
+pub fn from_raw_bytes(bytes: &[u8; 32]) -> Self { /* deserialize Montgomery form */ }
+```
+
+Result structs now use `Vec<FrLimbs>` instead of `Vec<Fr>`:
+
+```rust
+pub struct ShpleminiPhase3aResult {
+    pub r_pows: Vec<FrLimbs>,    // Was Vec<Fr>
+    pub pos0: FrLimbs,           // Was Fr
+    // ...
+}
+```
+
+### Actual Results
+
+| Phase         | Before | After | Savings   |
+| ------------- | ------ | ----- | --------- |
+| 3a (weights)  | 536K   | 456K  | **-80K**  |
+| 3b1 (folding) | 576K   | 459K  | **-117K** |
+| 3b2 (gemini)  | 857K   | 642K  | **-215K** |
+| 3c+4 (MSM)    | 775K   | 926K  | +151K\*   |
+| **Net**       |        |       | **-262K** |
+
+\*Phase 3c increased because it now does all Fr conversion for MSM syscalls.
+
+---
+
+## 7. ✅ DONE: SmallFrArray (Replace Vec with Stack Arrays)
+
+### What We Implemented
+
+Added `SmallFrArray<N>` type to `field.rs` for stack-allocated arrays:
+
+```rust
+pub struct SmallFrArray<const N: usize> {
+    data: [FrLimbs; N],
+    len: usize,
+}
+```
+
+Replaced small Vec allocations in `shplemini.rs`:
+- Phase 3a: `denoms` (3 elements) → `SmallFrArray<4>`
+- Phase 3b1: `fold_denoms_l`, `r2_one_minus_u_l` → `SmallFrArray<MAX_LOG_N>`
+
+### Actual Results
+
+| Metric | Before | After | Diff |
+| ------ | ------ | ----- | ---- |
+| Phase 3a | 455,590 | 455,559 | -31 |
+| Phase 3b1 | 459,013 | 459,042 | +29 |
+| **Net** | | | **~0** |
+
+**Conclusion:** Allocation overhead is negligible compared to computation.
+
+### Stack Limit Constraint
+
+`SmallFrArray<64>` (2KB) caused stack overflow - Solana's 4KB stack is tight.
+Max safe size is ~32 FrLimbs (1KB).
+
+---
+
+## 8. ⏳ TODO: Degree-Specialized Sumcheck
 
 ### Current State
 
-`relations.rs` accumulates 26 UltraHonk subrelations. Many share common patterns:
+`next_target_l()` uses generic barycentric interpolation with 8-9 coefficients:
 
-- `β * something + γ`
-- `η^i * something`
-- Same evaluations `w_i(z)`, `w_i(-z)` used multiple times
+```rust
+// Current: generic barycentric for any degree
+fn next_target_l(univariate: &[FrLimbs], u: &FrLimbs) -> FrLimbs {
+    // ~10-20 multiplications per round
+    barycentric_eval(univariate, u, &I_FR_LIMBS, &BARY_COEFFS)
+}
+```
 
 ### Optimization
 
-Introduce a "relations context" struct that precomputes challenge combos once:
+UltraHonk's actual univariate degrees are small (1, 2, or 3). Hardcode:
 
 ```rust
-struct RelationsContext {
-    beta_times_separator: Fr,
-    gamma_plus_beta_eta: Fr,
-    eta_pows: [Fr; MAX_ETA_POWERS],
-    // etc.
+// Degree-1: h(u) = h0 + (h1 - h0) * u  → 2 muls
+fn eval_degree1(h0: &FrLimbs, h1: &FrLimbs, u: &FrLimbs) -> FrLimbs {
+    let b = h1.sub(h0);
+    h0.add(&b.mul(u))
+}
+
+// Degree-2: h(u) = a + u*(b + c*u)  → 3 muls (Horner)
+fn eval_degree2(h0: &FrLimbs, h1: &FrLimbs, h2: &FrLimbs, u: &FrLimbs) -> FrLimbs {
+    // Derive a, b, c from h(0), h(1), h(2) once
+    let a = *h0;
+    let c = h2.sub(&h1.add(&h1).sub(h0)); // c = h2 - 2*h1 + h0
+    let b = h1.sub(h0).sub(&c);           // b = h1 - h0 - c
+    a.add(&u.mul(&b.add(&c.mul(u))))
 }
 ```
 
 ### Expected Improvement
 
-Relations are ~300-400k CUs total. Factoring could save **~50-80k CUs** (15-20%).
+From ~10-20 muls/round to 2-4 muls/round = **3-5x faster** per round.
+
+With 16 rounds at ~80k CUs each in evaluation: **~200-400k CUs** saved.
 
 ---
 
-## 6. ⏳ TODO: Challenge `fr_reduce` Tuning
+## 9. ⏳ TODO: Relations Monomial Factoring
+
+### Current State
+
+Each of 26 subrelations computes its formula independently with repeated wire accesses.
+
+### Optimization
+
+Normalize all relations to a common monomial basis:
+
+```
+r_j = Σ c_{j,i} * m_i
+```
+
+Where:
+
+- `m_i` = wire values `w_1(z)`, `w_2(z)`, ..., `σ_1(z)`, ...
+- `c_{j,i}` = challenge-only coefficients (precompute once)
+
+Then accumulate:
+
+```rust
+// Precompute: coeff_for_m[i] = Σ_j α^j * c_{j,i}
+let mut acc = FrLimbs::ZERO;
+for i in 0..NUM_MONOMIALS {
+    acc = acc.add(&coeff_for_m[i].mul(&m[i]));
+}
+```
+
+### Expected Improvement
+
+Reduces from O(relations × monomials) to O(monomials) multiplications.
+
+**~60-100k CUs** saved in relations phase.
+
+---
+
+## 10. 🔬 TODO: Padding-Skipping (log_n < 28)
+
+### The Opportunity
+
+Proofs are padded to `CONST_PROOF_SIZE_LOG_N = 28`, but actual circuits are smaller:
+
+- `sapling_spend`: log_n = 16
+- `simple_square`: log_n = 12
+
+For padded rounds, the relation polynomial is zero (dummy constraints).
+
+### Potential Optimization
+
+If the padded region has **precomputable contribution**:
+
+```
+sumcheck_target = Σ_{x ∈ Active} g(x) + Σ_{x ∈ Padded} g(x)
+                                        ^^^^^^^^^^^^^^^^
+                                        Could be constant!
+```
+
+Then:
+
+- Run sumcheck for only `log_n` rounds (not 28)
+- Pre-account for padding contribution in VK
+
+### Expected Improvement
+
+For log_n=16: 28/16 = **1.75x speedup** on sumcheck (~2M CUs saved!)
+
+### Research Needed
+
+1. How does Barretenberg pad circuits?
+2. What constraints do dummy rows satisfy?
+3. Is the padding contribution truly constant per circuit?
+
+---
+
+## 11. ⏳ TODO: Challenge fr_reduce Tuning
+
+---
+
+## 11. ⏳ TODO: Challenge `fr_reduce` Tuning
 
 ### Current State
 
@@ -282,6 +486,7 @@ Called ~75 times per proof for challenge generation.
 
 1. **Montgomery reduction**: Multiply by R² and do single mont_mul
 2. **Constant-time conditional subtract**: Based on high limb value
+3. **Return FrLimbs directly**: Skip canonical form, stay in Montgomery
 
 ### Expected Improvement
 
@@ -289,7 +494,7 @@ Called ~75 times per proof for challenge generation.
 
 ---
 
-## 7. 💡 IDEA: BPF Assembly for `mont_mul`
+## 12. 💡 IDEA: BPF Assembly for `mont_mul`
 
 ### Current State
 
@@ -311,75 +516,92 @@ At ~1,400 muls/proof: ~1,400 × 300 = **~420k CUs saved**
 
 ---
 
-## 8. Phase Packing Opportunities
+## 13. Phase Packing Opportunities
 
-### Current Transaction Structure (log_n=12)
+### Current Transaction Structure (log_n=16, sapling_spend)
 
 | Phase            | CUs       | TXs   |
 | ---------------- | --------- | ----- |
-| 1. Challenges    | ~287k     | **1** |
-| 2. Sumcheck      | ~3.82M    | 3     |
-| 3. MSM/Shplemini | ~2.48M    | 4     |
-| 4. Pairing       | ~55k      | 1     |
-| **Total**        | **6.64M** | **9** |
+| 1. Challenges    | 319K      | 1     |
+| 2. Sumcheck      | 4,367K    | 4     |
+| 3+4. MSM+Pairing | 2,482K    | 4     |
+| **Total**        | **7.17M** | **9** |
 
-### With Further Optimizations
+### With Degree-Specialized Sumcheck (~300K saved)
 
-If we land copy elimination audit + relations factoring (~200-500k CUs saved):
+- Phase 2 rounds might fit in fewer TXs
+- Could potentially go from 4 → 3 sumcheck TXs
 
-- Phase 3 might consolidate further (3 TXs?)
-- Could reduce total from 9 to ~7-8 transactions
+### With Padding-Skipping (if feasible)
+
+- log_n=16 circuit runs 16 rounds instead of 28
+- Massive reduction in Phase 2
 
 ---
 
-## 9. Minor Cleanups (Free Wins)
+## 14. Minor Cleanups (Free Wins)
 
 These are in the tens of k CUs range but easy to implement:
 
-### 8.1 Ensure All Constants Are Truly Const
+### 14.1 Ensure All Constants Are Truly Const
 
 ✅ Done for sumcheck (`I_FR_LIMBS`, `BARY_*_LIMBS`)
-⏳ Check relations for similar opportunities
+✅ Done for relations (precomputed FrLimbs constants)
 
-### 8.2 Avoid Recomputing Small Differences
+### 14.2 Branchless Field Operations
 
-Store `chi_minus[i]` arrays once and reuse (already done in batch inversion refactor)
+Replace conditional branches with masks:
 
-### 8.3 Keep Tiny Wrappers Inline
+```rust
+// Instead of: if borrow != 0 { limbs = result; }
+let mask = (borrow as u64).wrapping_sub(1);
+for i in 0..4 {
+    limbs[i] = (result[i] & mask) | (limbs[i] & !mask);
+}
+```
+
+### 14.3 Keep Tiny Wrappers Inline
 
 `#[inline(always)]` on `fr_square`, `fr_neg`, etc. for Solana builds
 
 ---
 
-## Priorities
+## Priorities (Best Bang for Buck)
 
-If you need more CU savings, tackle in this order:
+Tackle in this order:
 
-1. **Audit unnecessary copies** → potentially **100-500k CUs** (medium effort, high ROI!)
-2. **Relations accumulation factoring** → ~50-80k CUs (medium effort)
-3. **Challenge `fr_reduce` tuning** → ~40-75k CUs (low effort)
-4. **BPF assembly for `mont_mul`** → up to ~400k CUs (high effort, last resort)
+| Priority | Optimization                    | Effort | Expected CUs Saved  |
+| -------- | ------------------------------- | ------ | ------------------- |
+| 1        | **Degree-specialized sumcheck** | Medium | **200-400K**        |
+| 2        | Relations monomial factoring    | Medium | 60-100K             |
+| 3        | Challenge fr_reduce tuning      | Low    | 40-75K              |
+| 4        | Padding-skipping (research)     | High   | **~2M** (if works)  |
+| 5        | BPF assembly for mont_mul       | High   | ~400K (last resort) |
+
+**Already tried:**
+- SmallFrArray (stack arrays): Implemented but **minimal impact** - allocation overhead negligible vs. computation
 
 ---
 
 ## CU Usage by Circuit Size
 
-| Circuit              | log_n | PIs | Total CUs | TXs   |
-| -------------------- | ----- | --- | --------- | ----- |
-| simple_square        | 12    | 1   | **6.64M** | **9** |
-| iterated_square_100  | 12    | 1   | ~6.64M    | 9     |
-| fib_chain_100        | 12    | 1   | ~6.64M    | 9     |
-| iterated_square_1000 | 13    | 1   | ~7.0M     | 9     |
-| iterated_square_10k  | 14    | 1   | ~7.5M     | 9     |
-| hash_batch           | 17    | 32  | ~8.9M     | 10    |
-| merkle_membership    | 18    | 32  | ~9.3M     | 10    |
+| Circuit              | log_n  | PIs   | Total CUs | TXs   |
+| -------------------- | ------ | ----- | --------- | ----- |
+| simple_square        | 12     | 1     | ~6.5M     | 9     |
+| iterated_square_100  | 12     | 1     | ~6.5M     | 9     |
+| fib_chain_100        | 12     | 1     | ~6.5M     | 9     |
+| iterated_square_1000 | 13     | 1     | ~6.8M     | 9     |
+| iterated_square_10k  | 14     | 1     | ~7.0M     | 9     |
+| **sapling_spend**    | **16** | **4** | **7.17M** | **9** |
+| hash_batch           | 17     | 32    | ~8.5M     | 10    |
+| merkle_membership    | 18     | 32    | ~9.0M     | 10    |
 
 **Key observations:**
 
 - Same proof size (16,224 bytes) regardless of circuit due to `CONST_PROOF_SIZE_LOG_N=28` padding
-- log_n=12 circuits have ~identical CUs (most sumcheck rounds are padding)
-- More public inputs = more CUs for delta computation (~0.5M per 31 extra PIs)
-- FrLimbs optimization: **~20% total CU reduction** across all circuits (~1.7M CUs saved)
+- Smaller circuits (log_n=12) still run 28 sumcheck rounds (padding overhead!)
+- More public inputs = more CUs for delta computation
+- **Primary benchmark:** `sapling_spend` (realistic MASP-style circuit)
 
 ---
 
@@ -400,10 +622,25 @@ If you need more CU savings, tackle in this order:
    → Fixed with batched denominators (~90-140k CUs saved)
 
 5. **Proof data copying**: `Proof::from_bytes()` copied 16KB to heap
-   → Fixed with zero-copy `&'a [u8]` reference (**54% CU savings in Phase 1**, 17→9 TXs)
+   → Fixed with zero-copy `&'a [u8]` reference (**54% CU savings in Phase 1**)
+
+6. **Relations in Fr format**: Each subrelation converted Fr↔FrLimbs repeatedly
+   → Fixed with full FrLimbs port of relations.rs (**32% savings**, 1.15M→778K CUs)
+
+7. **Montgomery conversion at phase boundaries**: State stored Fr, converted to FrLimbs
+   → Fixed with raw FrLimbs storage (**262K CUs saved** across phases)
+
+### Optimization Timeline (Dec 2024)
+
+| Date                      | Change                 | CU Impact |
+| ------------------------- | ---------------------- | --------- |
+| Dec 9                     | FrLimbs relations      | -367K CUs |
+| Dec 10                    | FrLimbs direct storage | -262K CUs |
+| **Total session savings** | **~630K CUs**          |
 
 ### What Made This Possible
 
 - Montgomery multiplication already in place (7x faster than naive)
 - Binary extended GCD for inversions (much faster than Fermat)
 - Solana BN254 syscalls for pairing (~100 CUs for Keccak, cheap EC ops)
+- FrLimbs type with `to_raw_bytes`/`from_raw_bytes` for zero-conversion storage
