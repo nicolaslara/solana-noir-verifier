@@ -199,6 +199,10 @@ pub enum Instruction {
     /// Phase 3c: MSM computation (~500K CUs)
     /// Accounts: [state (writable), proof_data (readonly)]
     Phase3cMsm = 53,
+
+    /// Phase 3c + 4: Combined MSM + Pairing (~790K CUs, saves 1 TX)
+    /// Accounts: [state (writable), proof_data (readonly)]
+    Phase3cAndPairing = 54,
 }
 
 // ============================================================================
@@ -266,6 +270,7 @@ pub fn process_instruction(
         51 => process_phase3b1_folding(program_id, accounts),
         52 => process_phase3b2_gemini(program_id, accounts),
         53 => process_phase3c_msm(program_id, accounts),
+        54 => process_phase3c_and_pairing(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -2102,6 +2107,99 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     state.set_phase(phased::Phase::MsmComputed);
 
     msg!("Phase 3c complete - P0/P1 computed!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Phase 3c + 4: Combined MSM + Pairing (~790K CUs, saves 1 TX)
+fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Phase 3c+4: MSM + Pairing (combined)");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase - must be after Phase 3b2
+    if state.get_phase() != phased::Phase::MsmInProgress
+        || state.get_shplemini_sub_phase() != phased::ShpleminiSubPhase::Phase3b2Done
+    {
+        msg!("Invalid phase: expected MsmInProgress(Phase3b2Done)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    // Parse VK and proof
+    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Reconstruct challenges and Phase 3b result
+    let challenges = reconstruct_challenges(state);
+    let phase3b_result = ShpleminiPhase3bResult {
+        const_acc: state.shplemini_const_acc,
+        gemini_scalars: state.shplemini_gemini_scalars.to_vec(),
+        libra_scalars: state.shplemini_libra_scalars.to_vec(),
+        r_pows: state.shplemini_r_pows.to_vec(),
+        unshifted: state.shplemini_unshifted,
+        shifted: state.shplemini_shifted,
+    };
+
+    msg!("Computing MSM...");
+    sol_log_compute_units();
+
+    // Phase 3c: Compute P0/P1
+    let (p0, p1) = shplemini_phase3c(&proof, &vk, &challenges, &phase3b_result).map_err(|e| {
+        msg!("MSM failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    msg!("Running pairing check...");
+    sol_log_compute_units();
+
+    // Phase 4: Pairing check immediately
+    let pairing_ok = verify_step4_pairing_check(&p0, &p1).map_err(|e| {
+        msg!("Pairing failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save final state
+    state.p0 = p0;
+    state.p1 = p1;
+
+    if pairing_ok {
+        state.verified = 1;
+        state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Complete);
+        state.set_phase(phased::Phase::Complete);
+        msg!("✅ UltraHonk proof verified successfully!");
+    } else {
+        state.verified = 0;
+        state.set_phase(phased::Phase::Failed);
+        msg!("❌ Pairing check failed");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     sol_log_compute_units();
     Ok(())
 }

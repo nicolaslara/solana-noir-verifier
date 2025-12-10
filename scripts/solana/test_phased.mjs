@@ -45,6 +45,10 @@ const IX_PHASE3A_WEIGHTS = 50;
 const IX_PHASE3B1_FOLDING = 51;
 const IX_PHASE3B2_GEMINI = 52;
 const IX_PHASE3C_MSM = 53;
+const IX_PHASE3C_AND_PAIRING = 54;  // Combined 3c+4 (saves 1 TX)
+
+// Combine Phase 3c (MSM) + Phase 4 (Pairing) into single TX (set COMBINE_PHASE_3C_4=0 to disable)
+const COMBINE_PHASE_3C_4 = process.env.COMBINE_PHASE_3C_4 !== '0';
 
 // Constants
 const PROOF_SIZE = 16224;
@@ -341,9 +345,15 @@ async function main() {
             results.phase3b2 = { success: false, cus: 0 };
         }
         
-        // Phase 3c: MSM computation
+        // Phase 3c: MSM computation (or combined with Phase 4)
         if (results.phase3b2?.success) {
-            results.phase3c = await createPhaseTx(IX_PHASE3C_MSM, 'Phase 3c: MSM');
+            if (COMBINE_PHASE_3C_4) {
+                // Combined Phase 3c + 4 (saves 1 TX!)
+                results.phase3c = await createPhaseTx(IX_PHASE3C_AND_PAIRING, 'Phase 3c+4: MSM + Pairing (combined)');
+                results.phase4 = { success: results.phase3c?.success, cus: 0, combined: true };
+            } else {
+                results.phase3c = await createPhaseTx(IX_PHASE3C_MSM, 'Phase 3c: MSM');
+            }
         } else {
             results.phase3c = { success: false, cus: 0 };
         }
@@ -363,8 +373,8 @@ async function main() {
         results.phase3c = { success: false, cus: 0 };
     }
     
-    // Phase 4: Final Pairing Check (no proof_data needed)
-    if (results.phase3.success) {
+    // Phase 4: Final Pairing Check (skip if combined)
+    if (!COMBINE_PHASE_3C_4 && results.phase3.success) {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
         const ix = new TransactionInstruction({
             keys: [
@@ -377,7 +387,7 @@ async function main() {
         tx.feePayer = payer.publicKey;
         tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
         results.phase4 = await executeWithCU(connection, tx, [payer], 'Phase 4: Final Pairing Check');
-    } else {
+    } else if (!results.phase4) {
         results.phase4 = { success: false, cus: 0 };
     }
     
@@ -394,28 +404,37 @@ async function main() {
     }
     console.log(`  relations:            ${results.phase2d?.success ? '✅' : '❌'} ${(results.phase2d?.cus || 0).toLocaleString()} CUs`);
     
-    console.log('Phase 3 - MSM Computation (4 TXs):');
+    const phase3TxCount = COMBINE_PHASE_3C_4 ? 4 : 4;  // 3a, 3b1, 3b2, 3c(+4)
+    console.log(`Phase 3 - MSM Computation (${phase3TxCount} TXs${COMBINE_PHASE_3C_4 ? ', incl. pairing' : ''}):`);
     console.log(`  3a (weights):         ${results.phase3a?.success ? '✅' : '❌'} ${(results.phase3a?.cus || 0).toLocaleString()} CUs`);
     console.log(`  3b1 (folding):        ${results.phase3b1?.success ? '✅' : '❌'} ${(results.phase3b1?.cus || 0).toLocaleString()} CUs`);
     console.log(`  3b2 (gemini+libra):   ${results.phase3b2?.success ? '✅' : '❌'} ${(results.phase3b2?.cus || 0).toLocaleString()} CUs`);
-    console.log(`  3c (MSM):             ${results.phase3c?.success ? '✅' : '❌'} ${(results.phase3c?.cus || 0).toLocaleString()} CUs`);
-    
-    console.log('Phase 4 - Pairing Check (1 TX):');
-    console.log(`  4 (Pairing):          ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
+    if (COMBINE_PHASE_3C_4) {
+        console.log(`  3c+4 (MSM+Pairing):   ${results.phase3c?.success ? '✅' : '❌'} ${(results.phase3c?.cus || 0).toLocaleString()} CUs`);
+    } else {
+        console.log(`  3c (MSM):             ${results.phase3c?.success ? '✅' : '❌'} ${(results.phase3c?.cus || 0).toLocaleString()} CUs`);
+        console.log('Phase 4 - Pairing Check (1 TX):');
+        console.log(`  4 (Pairing):          ${results.phase4.success ? '✅' : '❌'} ${results.phase4.cus?.toLocaleString()} CUs`);
+    }
     
     const challengeCUs = results.phase1.cus || 0;
     const sumcheckCUs = results.phase2.cus || 0;
     const msmCUs = results.phase3.cus || 0;
-    const pairingCUs = results.phase4.cus || 0;
+    const pairingCUs = COMBINE_PHASE_3C_4 ? 0 : (results.phase4.cus || 0);
     const total = challengeCUs + sumcheckCUs + msmCUs + pairingCUs;
     
     const numRoundTXs = phase2Rounds.length;
-    const totalTXs = 1 + numRoundTXs + 1 + 4 + 1; // Phase 1(1) + rounds + relations + Phase 3(4) + Phase 4(1)
+    const phase4TXs = COMBINE_PHASE_3C_4 ? 0 : 1;
+    const totalTXs = 1 + numRoundTXs + 1 + 4 + phase4TXs;
     
     console.log(`\nPhase 1 (Challenges): ${challengeCUs.toLocaleString()} CUs (1 TX)`);
     console.log(`Phase 2 (Sumcheck):   ${sumcheckCUs.toLocaleString()} CUs (${numRoundTXs + 1} TXs)`);
-    console.log(`Phase 3 (MSM):        ${msmCUs.toLocaleString()} CUs (4 TXs)`);
-    console.log(`Phase 4 (Pairing):    ${pairingCUs.toLocaleString()} CUs (1 TX)`);
+    if (COMBINE_PHASE_3C_4) {
+        console.log(`Phase 3+4 (MSM+Pair): ${msmCUs.toLocaleString()} CUs (4 TXs)`);
+    } else {
+        console.log(`Phase 3 (MSM):        ${msmCUs.toLocaleString()} CUs (4 TXs)`);
+        console.log(`Phase 4 (Pairing):    ${pairingCUs.toLocaleString()} CUs (1 TX)`);
+    }
     console.log(`Total: ${total.toLocaleString()} CUs across ${totalTXs} transactions`);
     
     const allSuccess = results.phase1.success && 

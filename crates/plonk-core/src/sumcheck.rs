@@ -907,6 +907,8 @@ pub fn verify_sumcheck(
 ///
 /// This evaluates all constraint polynomials at the sumcheck point and
 /// combines them using the alpha challenges.
+///
+/// Uses FrLimbs internally for faster computation (avoids per-operation byte conversions).
 fn accumulate_relations(
     proof: &Proof,
     relation_params: &RelationParameters,
@@ -920,8 +922,13 @@ fn accumulate_relations(
         return Err("insufficient sumcheck evaluations");
     }
 
-    // Convert our RelationParameters to the relations module format
-    let rp = crate::relations::RelationParameters {
+    // Convert all inputs to FrLimbs once at the boundary
+    let evals_l: Vec<FrLimbs> = evals.iter().map(FrLimbs::from_bytes).collect();
+    let alphas_l: Vec<FrLimbs> = alphas.iter().map(FrLimbs::from_bytes).collect();
+    let pow_partial_l = FrLimbs::from_bytes(pow_partial);
+
+    // Convert relation parameters to FrLimbs
+    let rp_fr = crate::relations::RelationParameters {
         eta: relation_params.eta,
         eta_two: relation_params.eta_two,
         eta_three: relation_params.eta_three,
@@ -929,11 +936,18 @@ fn accumulate_relations(
         gamma: relation_params.gamma,
         public_inputs_delta: relation_params.public_inputs_delta,
     };
+    let rp_l = crate::relations::RelationParametersLimbs::from_fr(&rp_fr);
 
-    // Accumulate all 28 subrelations (bb 0.87)
-    let grand = crate::relations::accumulate_relation_evaluations(&evals, &rp, alphas, pow_partial);
+    // Accumulate using FrLimbs (faster - no per-operation byte conversions)
+    let grand_l = crate::relations::accumulate_relation_evaluations_l(
+        &evals_l,
+        &rp_l,
+        &alphas_l,
+        &pow_partial_l,
+    );
 
-    Ok(grand)
+    // Convert result back to Fr at the boundary
+    Ok(grand_l.to_bytes())
 }
 
 #[cfg(test)]
