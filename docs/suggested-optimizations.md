@@ -4,26 +4,25 @@ This document tracks field arithmetic and verification optimizations for the Ult
 
 ## Implementation Status
 
-| Optimization                        | Status  | Actual Result                                    |
-| ----------------------------------- | ------- | ------------------------------------------------ |
-| **1. Batch inversion for sumcheck** | ✅ DONE | **38% savings** (1,065K → 655K CUs per 2 rounds) |
-| 2. Precompute I_FR constants        | ✅ DONE | Avoids fr_from_u64 calls                         |
-| 3. Montgomery multiplication        | ✅ DONE | **7x faster** field muls                         |
-| 4. Binary Extended GCD              | ✅ DONE | Much faster than Fermat                          |
-| 5. Shplemini rho^k precompute       | ✅ DONE | Avoids O(k) exponentiation per shifted wire      |
-| 6. Shplemini batch inversion (3b2)  | ✅ DONE | Batched gemini + libra denominators              |
-| 7. Batch inv fold denoms (3b1)      | ✅ DONE | **60% savings** (1,337K → 534K CUs)              |
-| 8. **FrLimbs in sumcheck**          | ✅ DONE | **17.5% savings** per round (1.3M → 1.07M CUs)   |
-| 9. **FrLimbs in shplemini**         | ✅ DONE | **16% savings** (2.95M → 2.48M CUs)              |
-| 10. **Zero-copy Proof**             | ✅ DONE | **54% CU savings** in Phase 1 (619K → 287K)      |
-| 11. **FrLimbs in relations**        | ✅ DONE | **32% savings** in relations (1.15M → 778K CUs)  |
-| 12. **FrLimbs direct storage**      | ✅ DONE | **262K CUs saved** (no Montgomery conv at edges) |
-| 13. SmallFrArray (stack arrays)     | ✅ DONE | **Minimal** (<100 CUs - allocation not bottleneck)|
-| 14. Degree-specialized sumcheck     | ⏳ TODO | **~200-400k CUs** (hardcoded degree-1/2/3)       |
-| 15. Relations monomial factoring    | ⏳ TODO | ~60-100k CUs (fold α/β/γ into coefficients)      |
-| 16. Padding-skipping (log_n < 28)   | 🔬 TODO | **Potentially huge** (research needed)           |
-| 17. Challenge fr_reduce tuning      | ⏳ TODO | ~40-75k CUs via Montgomery reduction             |
-| 18. BPF assembly for mont_mul       | 💡 IDEA | Up to ~400k CUs (high effort, last resort)       |
+| Optimization                        | Status  | Actual Result                                      |
+| ----------------------------------- | ------- | -------------------------------------------------- |
+| **1. Batch inversion for sumcheck** | ✅ DONE | **38% savings** (1,065K → 655K CUs per 2 rounds)   |
+| 2. Precompute I_FR constants        | ✅ DONE | Avoids fr_from_u64 calls                           |
+| 3. Montgomery multiplication        | ✅ DONE | **7x faster** field muls                           |
+| 4. Binary Extended GCD              | ✅ DONE | Much faster than Fermat                            |
+| 5. Shplemini rho^k precompute       | ✅ DONE | Avoids O(k) exponentiation per shifted wire        |
+| 6. Shplemini batch inversion (3b2)  | ✅ DONE | Batched gemini + libra denominators                |
+| 7. Batch inv fold denoms (3b1)      | ✅ DONE | **60% savings** (1,337K → 534K CUs)                |
+| 8. **FrLimbs in sumcheck**          | ✅ DONE | **17.5% savings** per round (1.3M → 1.07M CUs)     |
+| 9. **FrLimbs in shplemini**         | ✅ DONE | **16% savings** (2.95M → 2.48M CUs)                |
+| 10. **Zero-copy Proof**             | ✅ DONE | **54% CU savings** in Phase 1 (619K → 287K)        |
+| 11. **FrLimbs in relations**        | ✅ DONE | **32% savings** in relations (1.15M → 778K CUs)    |
+| 12. **FrLimbs direct storage**      | ✅ DONE | **262K CUs saved** (no Montgomery conv at edges)   |
+| 13. SmallFrArray (stack arrays)     | ✅ DONE | **Minimal** (<100 CUs - allocation not bottleneck) |
+| 14. Degree-specialized sumcheck     | ⏳ TODO | **~200-400k CUs** (hardcoded degree-1/2/3)         |
+| 15. Relations monomial factoring    | ⏳ TODO | ~60-100k CUs (fold α/β/γ into coefficients)        |
+| 16. Challenge fr_reduce tuning      | ⏳ TODO | ~40-75k CUs via Montgomery reduction               |
+| 17. BPF assembly for mont_mul       | 💡 IDEA | Up to ~400k CUs (high effort, last resort)         |
 
 ---
 
@@ -31,11 +30,13 @@ This document tracks field arithmetic and verification optimizations for the Ult
 
 **Post-FrLimbs everywhere (including relations + direct storage):**
 
-| Metric                           | Value         |
-| -------------------------------- | ------------- |
-| `fr_mul` (Montgomery+Karatsuba)  | ~500-700 CUs  |
-| `fr_add/sub`                     | ~100-200 CUs  |
-| `fr_inv` (binary GCD)            | ~3-4k CUs     |
+| Metric                           | Value          |
+| -------------------------------- | -------------- |
+| `fr_mul` (Montgomery, **actual**)| **~2,400 CUs** |
+| `fr_add/sub`                     | ~100-200 CUs   |
+| `fr_inv` (binary GCD)            | ~25K CUs       |
+
+> **Note:** Montgomery multiplication is ~4x more expensive on BPF than originally estimated due to u128 emulation overhead.
 | Challenge generation (1 TX)      | ~319k CUs     |
 | Sumcheck rounds (6 rounds/TX)    | ~1.35M CUs    |
 | Relations accumulation           | ~778k CUs     |
@@ -320,16 +321,17 @@ pub struct SmallFrArray<const N: usize> {
 ```
 
 Replaced small Vec allocations in `shplemini.rs`:
+
 - Phase 3a: `denoms` (3 elements) → `SmallFrArray<4>`
 - Phase 3b1: `fold_denoms_l`, `r2_one_minus_u_l` → `SmallFrArray<MAX_LOG_N>`
 
 ### Actual Results
 
-| Metric | Before | After | Diff |
-| ------ | ------ | ----- | ---- |
-| Phase 3a | 455,590 | 455,559 | -31 |
-| Phase 3b1 | 459,013 | 459,042 | +29 |
-| **Net** | | | **~0** |
+| Metric    | Before  | After   | Diff   |
+| --------- | ------- | ------- | ------ |
+| Phase 3a  | 455,590 | 455,559 | -31    |
+| Phase 3b1 | 459,013 | 459,042 | +29    |
+| **Net**   |         |         | **~0** |
 
 **Conclusion:** Allocation overhead is negligible compared to computation.
 
@@ -420,49 +422,7 @@ Reduces from O(relations × monomials) to O(monomials) multiplications.
 
 ---
 
-## 10. 🔬 TODO: Padding-Skipping (log_n < 28)
-
-### The Opportunity
-
-Proofs are padded to `CONST_PROOF_SIZE_LOG_N = 28`, but actual circuits are smaller:
-
-- `sapling_spend`: log_n = 16
-- `simple_square`: log_n = 12
-
-For padded rounds, the relation polynomial is zero (dummy constraints).
-
-### Potential Optimization
-
-If the padded region has **precomputable contribution**:
-
-```
-sumcheck_target = Σ_{x ∈ Active} g(x) + Σ_{x ∈ Padded} g(x)
-                                        ^^^^^^^^^^^^^^^^
-                                        Could be constant!
-```
-
-Then:
-
-- Run sumcheck for only `log_n` rounds (not 28)
-- Pre-account for padding contribution in VK
-
-### Expected Improvement
-
-For log_n=16: 28/16 = **1.75x speedup** on sumcheck (~2M CUs saved!)
-
-### Research Needed
-
-1. How does Barretenberg pad circuits?
-2. What constraints do dummy rows satisfy?
-3. Is the padding contribution truly constant per circuit?
-
----
-
-## 11. ⏳ TODO: Challenge fr_reduce Tuning
-
----
-
-## 11. ⏳ TODO: Challenge `fr_reduce` Tuning
+## 10. ⏳ TODO: Challenge `fr_reduce` Tuning
 
 ### Current State
 
@@ -494,7 +454,7 @@ Called ~75 times per proof for challenge generation.
 
 ---
 
-## 12. 💡 IDEA: BPF Assembly for `mont_mul`
+## 11. 💡 IDEA: BPF Assembly for `mont_mul`
 
 ### Current State
 
@@ -516,7 +476,7 @@ At ~1,400 muls/proof: ~1,400 × 300 = **~420k CUs saved**
 
 ---
 
-## 13. Phase Packing Opportunities
+## 12. Phase Packing Opportunities
 
 ### Current Transaction Structure (log_n=16, sapling_spend)
 
@@ -532,23 +492,18 @@ At ~1,400 muls/proof: ~1,400 × 300 = **~420k CUs saved**
 - Phase 2 rounds might fit in fewer TXs
 - Could potentially go from 4 → 3 sumcheck TXs
 
-### With Padding-Skipping (if feasible)
-
-- log_n=16 circuit runs 16 rounds instead of 28
-- Massive reduction in Phase 2
-
 ---
 
-## 14. Minor Cleanups (Free Wins)
+## 13. Minor Cleanups (Free Wins)
 
 These are in the tens of k CUs range but easy to implement:
 
-### 14.1 Ensure All Constants Are Truly Const
+### 13.1 Ensure All Constants Are Truly Const
 
 ✅ Done for sumcheck (`I_FR_LIMBS`, `BARY_*_LIMBS`)
 ✅ Done for relations (precomputed FrLimbs constants)
 
-### 14.2 Branchless Field Operations
+### 13.2 Branchless Field Operations
 
 Replace conditional branches with masks:
 
@@ -560,7 +515,7 @@ for i in 0..4 {
 }
 ```
 
-### 14.3 Keep Tiny Wrappers Inline
+### 13.3 Keep Tiny Wrappers Inline
 
 `#[inline(always)]` on `fr_square`, `fr_neg`, etc. for Solana builds
 
@@ -575,10 +530,10 @@ Tackle in this order:
 | 1        | **Degree-specialized sumcheck** | Medium | **200-400K**        |
 | 2        | Relations monomial factoring    | Medium | 60-100K             |
 | 3        | Challenge fr_reduce tuning      | Low    | 40-75K              |
-| 4        | Padding-skipping (research)     | High   | **~2M** (if works)  |
-| 5        | BPF assembly for mont_mul       | High   | ~400K (last resort) |
+| 4        | BPF assembly for mont_mul       | High   | ~400K (last resort) |
 
 **Already tried:**
+
 - SmallFrArray (stack arrays): Implemented but **minimal impact** - allocation overhead negligible vs. computation
 
 ---

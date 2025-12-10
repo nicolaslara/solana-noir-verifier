@@ -348,42 +348,69 @@ fn next_target_batch(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'s
 }
 
 /// FrLimbs-native version: uses PRECOMPUTED constants, all internal work in Montgomery form
+/// OPTIMIZED: Uses fixed-size stack arrays instead of Vec to avoid heap allocation
+///
+/// CU Breakdown (measured on Solana BPF, mont_mul ≈ 2,400 CUs):
+/// - Conversions (10 mont_muls): ~24K CUs
+/// - chi_minus + B product (9+9 = 18 ops): ~44K CUs
+/// - Denominators (9 muls): ~22K CUs
+/// - Batch inversion (26 muls + 1 GCD): ~87K CUs
+/// - Accumulate + result (10 muls): ~28K CUs
+/// Total: ~205-215K CUs per round
 fn next_target_batch_limbs(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<Fr, &'static str> {
     let n = if is_zk { 9 } else { 8 };
 
     // Convert only non-constant inputs to FrLimbs
     let chi_l = FrLimbs::from_bytes(chi);
 
-    // Convert univariate coefficients (these come from proof, can't precompute)
-    let u_limbs: Vec<FrLimbs> = univariate
-        .iter()
-        .take(n)
-        .map(|u| FrLimbs::from_bytes(u))
-        .collect();
-
-    // Step 1: Compute chi_minus[i] = χ - i using PRECOMPUTED I_FR_LIMBS (no conversion!)
-    let chi_minus: Vec<FrLimbs> = (0..n).map(|i| chi_l.sub(&I_FR_LIMBS[i])).collect();
-
-    // Step 2: Compute B(χ) = ∏(χ - i) - single mul per element, no conversion!
-    let mut b = FrLimbs::ONE;
-    for cm in &chi_minus {
-        b = b.mul(cm);
+    // Convert univariate coefficients - FIXED ARRAY instead of Vec
+    let mut u_limbs = [FrLimbs::ZERO; 9];
+    for i in 0..n {
+        u_limbs[i] = FrLimbs::from_bytes(&univariate[i]);
     }
 
-    // Step 3: Compute all denominators using PRECOMPUTED BARY_*_LIMBS (no conversion!)
-    let denoms: Vec<FrLimbs> = (0..n)
-        .map(|i| {
-            let bary = if is_zk {
-                &BARY_9_LIMBS[i]
-            } else {
-                &BARY_8_LIMBS[i]
-            };
-            bary.mul(&chi_minus[i])
-        })
-        .collect();
+    // Step 1: Compute chi_minus[i] = χ - i - FIXED ARRAY instead of Vec
+    let mut chi_minus = [FrLimbs::ZERO; 9];
+    for i in 0..n {
+        chi_minus[i] = chi_l.sub(&I_FR_LIMBS[i]);
+    }
 
-    // Step 4: Batch invert all denominators with only ONE inversion!
-    let denom_invs = batch_inv_limbs(&denoms).ok_or("batch inversion failed in barycentric")?;
+    // Step 2: Compute B(χ) = ∏(χ - i)
+    let mut b = FrLimbs::ONE;
+    for i in 0..n {
+        b = b.mul(&chi_minus[i]);
+    }
+
+    // Step 3: Compute all denominators - FIXED ARRAY instead of Vec
+    let mut denoms = [FrLimbs::ZERO; 9];
+    for i in 0..n {
+        let bary = if is_zk {
+            &BARY_9_LIMBS[i]
+        } else {
+            &BARY_8_LIMBS[i]
+        };
+        denoms[i] = bary.mul(&chi_minus[i]);
+    }
+
+    // Step 4: Batch invert using INLINE Montgomery's trick (avoids Vec allocation!)
+    // Compute prefix products
+    let mut prefix = [FrLimbs::ONE; 9];
+    for i in 1..n {
+        prefix[i] = prefix[i - 1].mul(&denoms[i - 1]);
+    }
+
+    // Compute product of all and invert
+    let all_product = prefix[n - 1].mul(&denoms[n - 1]);
+    let mut inv_suffix = all_product.inv().ok_or("inversion failed in barycentric")?;
+
+    // Walk backwards to compute each inverse
+    let mut denom_invs = [FrLimbs::ZERO; 9];
+    for i in (0..n).rev() {
+        denom_invs[i] = prefix[i].mul(&inv_suffix);
+        if i > 0 {
+            inv_suffix = inv_suffix.mul(&denoms[i]);
+        }
+    }
 
     // Step 5: Accumulate: acc = Σ(u[i] * denom_inv[i])
     let mut acc = FrLimbs::ZERO;
@@ -696,11 +723,11 @@ pub fn verify_sumcheck_rounds_partial(
         // Get challenge for this round
         let chi = &challenges.sumcheck_u_challenges[round];
 
-        // Compute next target using barycentric interpolation
+        // Compute next target using barycentric interpolation (~210K CUs per round)
         target = next_target(&univariate, chi, proof.is_zk)
             .map_err(|_| "barycentric interpolation failed")?;
 
-        // Update pow_partial
+        // Update pow_partial (~10K CUs)
         let gate_challenge = &challenges.gate_challenges[round];
         pow_partial = update_pow(&pow_partial, gate_challenge, chi);
     }

@@ -169,110 +169,6 @@ impl FrLimbs {
     }
 }
 
-// ============================================================================
-// SmallFrArray: Stack-allocated array to replace Vec in hot paths
-// ============================================================================
-
-/// Maximum log_n we support (proofs are padded to this)
-pub const MAX_LOG_N: usize = 32;
-
-/// Stack-allocated array of FrLimbs - avoids heap allocation overhead
-/// Use instead of Vec<FrLimbs> in hot paths where capacity is bounded
-#[derive(Clone, Copy)]
-pub struct SmallFrArray<const N: usize> {
-    data: [FrLimbs; N],
-    len: usize,
-}
-
-impl<const N: usize> SmallFrArray<N> {
-    /// Create empty array
-    #[inline(always)]
-    pub const fn new() -> Self {
-        SmallFrArray {
-            data: [FrLimbs::ZERO; N],
-            len: 0,
-        }
-    }
-
-    /// Push element (panics if full in debug, UB in release)
-    #[inline(always)]
-    pub fn push(&mut self, x: FrLimbs) {
-        debug_assert!(self.len < N, "SmallFrArray overflow");
-        self.data[self.len] = x;
-        self.len += 1;
-    }
-
-    /// Get slice of populated elements
-    #[inline(always)]
-    pub fn as_slice(&self) -> &[FrLimbs] {
-        &self.data[..self.len]
-    }
-
-    /// Get mutable slice of populated elements
-    #[inline(always)]
-    pub fn as_mut_slice(&mut self) -> &mut [FrLimbs] {
-        &mut self.data[..self.len]
-    }
-
-    /// Current length
-    #[inline(always)]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Is empty
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Get element by index
-    #[inline(always)]
-    pub fn get(&self, idx: usize) -> Option<&FrLimbs> {
-        if idx < self.len {
-            Some(&self.data[idx])
-        } else {
-            None
-        }
-    }
-
-    /// Index access (panics if out of bounds in debug)
-    #[inline(always)]
-    pub fn at(&self, idx: usize) -> &FrLimbs {
-        debug_assert!(idx < self.len, "SmallFrArray index out of bounds");
-        &self.data[idx]
-    }
-
-    /// Mutable index access
-    #[inline(always)]
-    pub fn at_mut(&mut self, idx: usize) -> &mut FrLimbs {
-        debug_assert!(idx < self.len, "SmallFrArray index out of bounds");
-        &mut self.data[idx]
-    }
-
-    /// Set length (for pre-sized arrays)
-    #[inline(always)]
-    pub fn set_len(&mut self, len: usize) {
-        debug_assert!(len <= N, "SmallFrArray set_len overflow");
-        self.len = len;
-    }
-}
-
-impl<const N: usize> core::ops::Index<usize> for SmallFrArray<N> {
-    type Output = FrLimbs;
-    #[inline(always)]
-    fn index(&self, idx: usize) -> &FrLimbs {
-        &self.data[idx]
-    }
-}
-
-impl<const N: usize> core::ops::IndexMut<usize> for SmallFrArray<N> {
-    #[inline(always)]
-    fn index_mut(&mut self, idx: usize) -> &mut FrLimbs {
-        &mut self.data[idx]
-    }
-}
-
 /// Batch inversion for FrLimbs using Montgomery's trick
 /// Given [a0, a1, ..., an-1], computes [1/a0, 1/a1, ..., 1/an-1] with only ONE inversion
 pub fn batch_inv_limbs(inputs: &[FrLimbs]) -> Option<Vec<FrLimbs>> {
@@ -321,7 +217,7 @@ pub fn batch_inv_limbs(inputs: &[FrLimbs]) -> Option<Vec<FrLimbs>> {
 
 /// Montgomery multiplication: computes a * b * R^-1 mod r
 /// If inputs are in Montgomery form (a' = a*R, b' = b*R), output is (a*b)*R (also in Montgomery form)
-#[inline(never)]
+#[inline]
 fn mont_mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     // CIOS (Coarsely Integrated Operand Scanning) Montgomery multiplication
     let mut t = [0u64; 5]; // 5 limbs to handle overflow
