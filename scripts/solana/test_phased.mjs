@@ -155,6 +155,16 @@ async function main() {
     console.log(`Proof size: ${proof.length} bytes`);
     console.log(`Public inputs: ${numPi} (${publicInputs.length} bytes)`);
     
+    // Timing tracking
+    const timing = {
+        setupStart: 0,
+        setupEnd: 0,
+        uploadStart: 0,
+        uploadEnd: 0,
+        verifyStart: 0,
+        verifyEnd: 0,
+    };
+    
     const connection = new Connection(RPC_URL, 'confirmed');
     const payer = Keypair.generate();
     const proofBuffer = Keypair.generate();
@@ -162,6 +172,7 @@ async function main() {
     
     // Airdrop
     console.log('\nSetting up accounts...');
+    timing.setupStart = Date.now();
     const airdropSig = await connection.requestAirdrop(payer.publicKey, 10_000_000_000);
     await connection.confirmTransaction(airdropSig);
     
@@ -214,7 +225,10 @@ async function main() {
     }));
     await sendAndConfirmTransaction(connection, piTx, [payer]);
     
+    timing.setupEnd = Date.now();
+    
     // Upload proof in chunks (parallel)
+    timing.uploadStart = Date.now();
     const uploadPromises = [];
     let offset = 0;
     while (offset < proof.length) {
@@ -233,7 +247,11 @@ async function main() {
         offset += chunkSize;
     }
     await Promise.all(uploadPromises);
+    timing.uploadEnd = Date.now();
     console.log(`Proof uploaded (${uploadPromises.length} chunks in parallel) ✓\n`);
+    
+    // Start verification timing
+    timing.verifyStart = Date.now();
     
     const results = {};
     
@@ -391,6 +409,9 @@ async function main() {
         results.phase4 = { success: false, cus: 0 };
     }
     
+    // End verification timing
+    timing.verifyEnd = Date.now();
+    
     // Summary
     console.log('\n=== SUMMARY ===');
     
@@ -439,6 +460,18 @@ async function main() {
     
     const allSuccess = results.phase1.success && 
                        results.phase2.success && results.phase3.success && results.phase4.success;
+    
+    // Calculate timing
+    const setupTime = timing.setupEnd - timing.setupStart;
+    const uploadTime = timing.uploadEnd - timing.uploadStart;
+    const verifyTime = timing.verifyEnd - timing.verifyStart;
+    const totalTime = timing.verifyEnd - timing.setupStart;
+    
+    console.log('\n=== TIMING ===');
+    console.log(`Setup (accounts):    ${(setupTime / 1000).toFixed(2)}s`);
+    console.log(`Proof upload:        ${(uploadTime / 1000).toFixed(2)}s`);
+    console.log(`Verification:        ${(verifyTime / 1000).toFixed(2)}s`);
+    console.log(`Total:               ${(totalTime / 1000).toFixed(2)}s`);
     
     if (allSuccess) {
         console.log('\n🎉 All phases passed! Verification complete.');
