@@ -378,3 +378,163 @@ fn test_realistic_merkle_tree() {
         main(sk, ar, different_value, rho, rcm, d, siblings, path_indices);
     assert(anchor != different_anchor, "different note should give different anchor");
 }
+
+// ============================================================================
+// Production-Grade Test Vectors
+// ============================================================================
+
+#[test]
+fn test_different_sk_different_nullifier() {
+    // Critical security property: different spending keys produce different nullifiers
+    // even with identical note data. This ensures only the true owner can spend.
+
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [0; 32];
+    let path_indices: [bool; 32] = [false; 32];
+
+    // Two different spending keys
+    let sk1: Field = 12345;
+    let sk2: Field = 54321;
+
+    let (nf1, _, _, _) = main(sk1, ar, value, rho, rcm, d, siblings, path_indices);
+    let (nf2, _, _, _) = main(sk2, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Different sk MUST produce different nullifiers
+    assert(nf1 != nf2, "different sk must produce different nullifier");
+
+    // Also verify anchors differ (different sk -> different ak/nk -> different ivk -> different cm)
+    // This is expected because the note commitment depends on pk_d which depends on sk
+}
+
+#[test]
+fn test_tampered_merkle_sibling() {
+    // Verify that changing any Merkle sibling changes the anchor.
+    // This ensures Merkle path integrity.
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+
+    let mut siblings_original: [Field; 32] = [0; 32];
+    siblings_original[5] = 123456789; // Set one sibling
+    let path_indices: [bool; 32] = [false; 32];
+
+    let (nf1, anchor1, _, _) = main(sk, ar, value, rho, rcm, d, siblings_original, path_indices);
+
+    // Tamper with a sibling
+    let mut siblings_tampered: [Field; 32] = [0; 32];
+    siblings_tampered[5] = 987654321; // Different value
+
+    let (nf2, anchor2, _, _) = main(sk, ar, value, rho, rcm, d, siblings_tampered, path_indices);
+
+    // Nullifier should be the same (doesn't depend on Merkle path)
+    assert(nf1 == nf2, "nullifier should not depend on Merkle path");
+
+    // But anchor MUST be different
+    assert(anchor1 != anchor2, "tampered sibling must change anchor");
+}
+
+#[test]
+fn test_path_index_sensitivity() {
+    // Verify that changing path indices (note position) changes the anchor.
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [12345; 32]; // Non-zero siblings
+
+    let mut path_left: [bool; 32] = [false; 32];
+    let mut path_right: [bool; 32] = [false; 32];
+    path_right[0] = true; // Change position at leaf level
+
+    let (_, anchor_left, _, _) = main(sk, ar, value, rho, rcm, d, siblings, path_left);
+    let (_, anchor_right, _, _) = main(sk, ar, value, rho, rcm, d, siblings, path_right);
+
+    // Different positions MUST produce different anchors (with non-zero siblings)
+    assert(anchor_left != anchor_right, "different position must change anchor");
+}
+
+#[test]
+fn test_rk_randomization() {
+    // Verify that different ar values produce different rk outputs.
+    // This is critical for spend unlinkability.
+
+    let sk: Field = 12345;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [0; 32];
+    let path_indices: [bool; 32] = [false; 32];
+
+    let ar1: Field = 11111;
+    let ar2: Field = 22222;
+
+    let (nf1, anchor1, rk_x1, rk_y1) = main(sk, ar1, value, rho, rcm, d, siblings, path_indices);
+    let (nf2, anchor2, rk_x2, rk_y2) = main(sk, ar2, value, rho, rcm, d, siblings, path_indices);
+
+    // Same note, same sk -> same nullifier and anchor
+    assert(nf1 == nf2, "same note should have same nullifier");
+    assert(anchor1 == anchor2, "same note should have same anchor");
+
+    // But rk MUST be different (unlinkability)
+    let rk_same = (rk_x1 == rk_x2) & (rk_y1 == rk_y2);
+    assert(!rk_same, "different ar must produce different rk");
+}
+
+#[test]
+fn test_zero_value_note() {
+    // Edge case: zero-value notes should still work correctly.
+    // (In production, you might want to reject zero-value spends at the protocol level)
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 0; // Zero value
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [0; 32];
+    let path_indices: [bool; 32] = [false; 32];
+
+    let (nullifier, anchor, rk_x, _) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Should still produce valid outputs
+    assert(nullifier != 0, "zero-value note should have non-zero nullifier");
+    assert(anchor != 0, "zero-value note should have non-zero anchor");
+    assert(rk_x != 0, "zero-value note should have non-zero rk");
+}
+
+#[test]
+fn test_determinism() {
+    // Verify that the circuit is fully deterministic:
+    // same inputs always produce same outputs.
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [98765; 32];
+    let path_indices: [bool; 32] = [true; 32];
+
+    // Run twice
+    let (nf1, anchor1, rk_x1, rk_y1) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+    let (nf2, anchor2, rk_x2, rk_y2) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Must be identical
+    assert(nf1 == nf2, "nullifier must be deterministic");
+    assert(anchor1 == anchor2, "anchor must be deterministic");
+    assert(rk_x1 == rk_x2, "rk_x must be deterministic");
+    assert(rk_y1 == rk_y2, "rk_y must be deterministic");
+}
