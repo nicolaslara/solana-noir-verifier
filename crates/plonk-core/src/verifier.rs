@@ -1992,7 +1992,8 @@ mod tests {
             ("fib_chain_100", 12, true, 1),
             ("hash_batch", 17, true, 32),
             ("merkle_membership", 18, true, 32),
-            // ("iterated_square_100k", 17, true, 1), // Skip - takes longer to verify
+            ("sapling_spend", 16, true, 4), // Sapling-style spend circuit (32-level Merkle tree)
+            ("iterated_square_100k", 17, true, 1), // Large circuit - takes longer to verify
         ];
 
         let mut passed = 0;

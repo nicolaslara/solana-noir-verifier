@@ -1023,10 +1023,9 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         let mut state_data = state_account.try_borrow_mut_data()?;
         let state = phased::VerificationState::from_bytes_mut(&mut state_data)
             .ok_or(ProgramError::InvalidAccountData)?;
+        // result_1d.sumcheck_challenges contains challenges 14-27 as indices 0-13
         for (i, sc) in result_1d.sumcheck_challenges.iter().enumerate() {
-            if i >= 14 && i < 28 {
-                state.sumcheck_challenges[i] = *sc;
-            }
+            state.sumcheck_challenges[14 + i] = *sc;
         }
         state.rho = result_1d.rho;
         state.gemini_r = result_1d.gemini_r;

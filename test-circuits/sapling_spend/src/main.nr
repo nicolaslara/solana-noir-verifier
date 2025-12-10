@@ -1,0 +1,380 @@
+// ============================================================================
+// Sapling-style Spend Circuit (Noir Port) - CORRECTED
+// ============================================================================
+// Proves knowledge of a valid spend without revealing note details.
+//
+// Key security properties:
+// 1. Nullifier is bound to the note (rho is inside cm)
+// 2. Both nk and ak derived from same spending key
+// 3. Proper rk = ak + ar*G derivation
+//
+// Public outputs:
+//   - nullifier: Prevents double-spend (bound to note via rho in cm)
+//   - anchor: Merkle root at spend time
+//   - rk_x, rk_y: Randomized authorization key (for signature verification)
+//
+// ============================================================================
+
+use std::embedded_curve_ops::{EmbeddedCurveScalar, fixed_base_scalar_mul, multi_scalar_mul};
+use std::hash::pedersen_hash;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Domain separation tags
+global DOMAIN_ASK: Field = 1; // Authorization spending key derivation
+global DOMAIN_NSK: Field = 2; // Nullifier spending key derivation
+global DOMAIN_IVK: Field = 3; // Incoming viewing key derivation
+global DOMAIN_NULLIFIER: Field = 4; // Nullifier computation
+global DOMAIN_NOTE_COMMIT: Field = 5; // Note commitment
+global DOMAIN_MERKLE: Field = 6; // Merkle tree hashing
+
+// Merkle tree depth (32 levels = 2^32 notes capacity)
+global MERKLE_DEPTH: u32 = 32;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// Hash with domain separation (2 inputs)
+fn domain_hash_2(domain: Field, a: Field, b: Field) -> Field {
+    pedersen_hash([domain, a, b])
+}
+
+// Hash with domain separation (3 inputs)
+fn domain_hash_3(domain: Field, a: Field, b: Field, c: Field) -> Field {
+    pedersen_hash([domain, a, b, c])
+}
+
+// Hash with domain separation (5 inputs)
+fn domain_hash_5(domain: Field, a: Field, b: Field, c: Field, d: Field, e: Field) -> Field {
+    pedersen_hash([domain, a, b, c, d, e])
+}
+
+// Merkle hash: hash two siblings
+fn merkle_hash(left: Field, right: Field) -> Field {
+    domain_hash_2(DOMAIN_MERKLE, left, right)
+}
+
+// Compute Merkle root from leaf and path
+fn compute_merkle_root(
+    leaf: Field,
+    siblings: [Field; MERKLE_DEPTH],
+    path_indices: [bool; MERKLE_DEPTH],
+) -> Field {
+    let mut current = leaf;
+    for i in 0..MERKLE_DEPTH {
+        let sibling = siblings[i];
+        if path_indices[i] {
+            current = merkle_hash(sibling, current);
+        } else {
+            current = merkle_hash(current, sibling);
+        }
+    }
+    current
+}
+
+// Split a field element into 128-bit limbs for scalar multiplication
+fn field_to_scalar(f: Field) -> EmbeddedCurveScalar {
+    let bytes: [u8; 32] = f.to_be_bytes();
+
+    // High 128 bits (bytes 0-15)
+    let mut hi_bytes: [u8; 32] = [0; 32];
+    for i in 0..16 {
+        hi_bytes[16 + i] = bytes[i];
+    }
+    let hi = Field::from_be_bytes::<32>(hi_bytes);
+
+    // Low 128 bits (bytes 16-31)
+    let mut lo_bytes: [u8; 32] = [0; 32];
+    for i in 0..16 {
+        lo_bytes[16 + i] = bytes[16 + i];
+    }
+    let lo = Field::from_be_bytes::<32>(lo_bytes);
+
+    EmbeddedCurveScalar { lo, hi }
+}
+
+// ============================================================================
+// Main Circuit
+// ============================================================================
+
+fn main(
+    // ========================================================================
+    // PRIVATE INPUTS - Spending Key (single key derives both ak and nk)
+    // ========================================================================
+    sk: Field, // Master spending key (derives ask and nsk)
+    ar: Field, // Re-randomization scalar for rk
+    // ========================================================================
+    // PRIVATE INPUTS - Note Data
+    // ========================================================================
+    value: Field, // Note value
+    rho: Field, // Nullifier seed (MUST be inside note commitment!)
+    rcm: Field, // Note commitment randomness
+    // ========================================================================
+    // PRIVATE INPUTS - Payment Address (diversifier)
+    // ========================================================================
+    d: Field, // Diversifier (used to derive g_d)
+    // ========================================================================
+    // PRIVATE INPUTS - Merkle Path
+    // ========================================================================
+    siblings: [Field; MERKLE_DEPTH],
+    path_indices: [bool; MERKLE_DEPTH],
+) -> pub (Field, Field, Field, Field) {
+    // Return: (nullifier, anchor, rk_x, rk_y)
+
+    // ========================================================================
+    // STEP 1: Derive ask and nsk from the same spending key
+    // This ensures the same entity controls both authorization and nullifier
+    // ========================================================================
+    let ask = pedersen_hash([DOMAIN_ASK, sk]);
+    let nsk = pedersen_hash([DOMAIN_NSK, sk]);
+
+    // ========================================================================
+    // STEP 2: Compute ak = ask * G (authorization key)
+    // ========================================================================
+    let ask_scalar = field_to_scalar(ask);
+    let ak = fixed_base_scalar_mul(ask_scalar);
+
+    // ========================================================================
+    // STEP 3: Compute nk = nsk * G (nullifier key)
+    // ========================================================================
+    let nsk_scalar = field_to_scalar(nsk);
+    let nk = fixed_base_scalar_mul(nsk_scalar);
+
+    // ========================================================================
+    // STEP 4: Compute ivk = Hash(ak, nk) (incoming viewing key)
+    // ========================================================================
+    let ivk = pedersen_hash([DOMAIN_IVK, ak.x, ak.y, nk.x, nk.y]);
+
+    // ========================================================================
+    // STEP 5: Derive payment address from diversifier
+    // g_d = d * G (diversifier base point)
+    // pk_d = ivk * g_d (diversified transmission key)
+    // ========================================================================
+    let d_scalar = field_to_scalar(d);
+    let g_d = fixed_base_scalar_mul(d_scalar);
+
+    let ivk_scalar = field_to_scalar(ivk);
+    let pk_d = multi_scalar_mul([g_d], [ivk_scalar]);
+
+    // ========================================================================
+    // STEP 6: Compute note commitment (CRITICAL: includes rho!)
+    // cm = Hash(g_d.x, pk_d.x, value, rho, rcm)
+    //
+    // Including rho in cm binds the nullifier seed to the note.
+    // This prevents double-spending: same note = same rho = same nullifier.
+    // ========================================================================
+    let cm = domain_hash_5(DOMAIN_NOTE_COMMIT, g_d.x, pk_d.x, value, rho, rcm);
+
+    // ========================================================================
+    // STEP 7: Verify Merkle membership
+    // Proves cm is in the commitment tree with the given anchor
+    // ========================================================================
+    let anchor = compute_merkle_root(cm, siblings, path_indices);
+
+    // ========================================================================
+    // STEP 8: Compute nullifier
+    // nf = Hash(nk.x, nk.y, rho)
+    //
+    // Uses the SAME rho that's committed in cm, ensuring:
+    // - Same note (same cm) -> same rho -> same nf
+    // - Cannot forge new nullifier for existing note
+    // ========================================================================
+    let nullifier = domain_hash_3(DOMAIN_NULLIFIER, nk.x, nk.y, rho);
+
+    // ========================================================================
+    // STEP 9: Compute rk = ak + ar * G (randomized auth key)
+    //
+    // This is the key used for spend authorization signatures.
+    // It's derived from:
+    // - ak: tied to the spending key via ask
+    // - ar: per-spend randomizer
+    // ========================================================================
+    let ar_scalar = field_to_scalar(ar);
+    let ar_g = fixed_base_scalar_mul(ar_scalar);
+
+    // rk = ak + ar*G (point addition via MSM with scalars = 1)
+    let rk = multi_scalar_mul(
+        [ak, ar_g],
+        [EmbeddedCurveScalar { lo: 1, hi: 0 }, EmbeddedCurveScalar { lo: 1, hi: 0 }],
+    );
+
+    // ========================================================================
+    // Return public outputs
+    // ========================================================================
+    (nullifier, anchor, rk.x, rk.y)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[test]
+fn test_sapling_spend() {
+    // Test values
+    let sk: Field = 12345; // Master spending key
+    let ar: Field = 67890; // Randomizer for rk
+    let value: Field = 1000000; // Note value
+    let rho: Field = 111222333; // Nullifier seed (in note commitment!)
+    let rcm: Field = 444555666; // Note commitment randomness
+    let d: Field = 777888999; // Diversifier
+    let siblings: [Field; 32] = [0; 32];
+    let path_indices: [bool; 32] = [false; 32];
+
+    // Run the circuit
+    let (nullifier, anchor, rk_x, _rk_y) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Basic sanity checks
+    assert(nullifier != 0, "nullifier should be non-zero");
+    assert(anchor != 0, "anchor should be non-zero");
+    assert(rk_x != 0, "rk_x should be non-zero");
+
+    // Key security property: same inputs = same nullifier
+    // (Double-spend protection)
+    let (nullifier2, _, _, _) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+    assert(nullifier == nullifier2, "same note must produce same nullifier");
+
+    // Different rho = different nullifier (but also different note!)
+    // This is correct behavior: changing rho changes the note commitment
+    let rho_different: Field = 999888777;
+    let (nullifier3, anchor3, _, _) =
+        main(sk, ar, value, rho_different, rcm, d, siblings, path_indices);
+    assert(nullifier != nullifier3, "different rho should produce different nullifier");
+    assert(anchor != anchor3, "different rho should produce different anchor (different note)");
+}
+
+#[test]
+fn test_nullifier_binding() {
+    // This test verifies the critical security property:
+    // The nullifier is bound to the note via rho being in the commitment
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+    let siblings: [Field; 32] = [0; 32];
+    let path_indices: [bool; 32] = [false; 32];
+
+    // Compute the note commitment manually to verify rho is included
+    let ask = pedersen_hash([1, sk]); // DOMAIN_ASK
+    let nsk = pedersen_hash([2, sk]); // DOMAIN_NSK
+
+    let ask_scalar = field_to_scalar(ask);
+    let ak = fixed_base_scalar_mul(ask_scalar);
+
+    let nsk_scalar = field_to_scalar(nsk);
+    let nk = fixed_base_scalar_mul(nsk_scalar);
+
+    let ivk = pedersen_hash([3, ak.x, ak.y, nk.x, nk.y]); // DOMAIN_IVK
+
+    let d_scalar = field_to_scalar(d);
+    let g_d = fixed_base_scalar_mul(d_scalar);
+
+    let ivk_scalar = field_to_scalar(ivk);
+    let pk_d = multi_scalar_mul([g_d], [ivk_scalar]);
+
+    // Note commitment includes rho!
+    let cm = pedersen_hash([5, g_d.x, pk_d.x, value, rho, rcm]); // DOMAIN_NOTE_COMMIT
+
+    // Verify the circuit produces the same commitment (implicitly via anchor)
+    let (_, anchor, _, _) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Manually compute what anchor should be (all zero siblings, leftmost position)
+    let mut expected_anchor = cm;
+    for _ in 0..32 {
+        expected_anchor = pedersen_hash([6, expected_anchor, 0]); // DOMAIN_MERKLE
+    }
+
+    assert(anchor == expected_anchor, "anchor should match manual computation");
+}
+
+#[test]
+fn test_realistic_merkle_tree() {
+    // This test builds a small Merkle tree with 4 notes and verifies
+    // that we can prove membership of one note correctly.
+    //
+    // Tree structure (depth 2 for illustration, we pad to 32):
+    //
+    //              root
+    //            /      \
+    //         h01        h23
+    //        /   \      /   \
+    //      cm0   cm1  cm2   cm3
+    //
+    // We'll prove membership of cm1 (index 1)
+    // path_indices = [true, false, false, ...] (1 in binary = 01, right at level 0)
+    // siblings = [cm0, h23, zeros...]
+
+    let sk: Field = 12345;
+    let ar: Field = 67890;
+    let value: Field = 1000000;
+    let rho: Field = 111222333;
+    let rcm: Field = 444555666;
+    let d: Field = 777888999;
+
+    // First, compute our note commitment (cm1)
+    let ask = pedersen_hash([DOMAIN_ASK, sk]);
+    let nsk = pedersen_hash([DOMAIN_NSK, sk]);
+    let ask_scalar = field_to_scalar(ask);
+    let ak = fixed_base_scalar_mul(ask_scalar);
+    let nsk_scalar = field_to_scalar(nsk);
+    let nk = fixed_base_scalar_mul(nsk_scalar);
+    let ivk = pedersen_hash([DOMAIN_IVK, ak.x, ak.y, nk.x, nk.y]);
+    let d_scalar = field_to_scalar(d);
+    let g_d = fixed_base_scalar_mul(d_scalar);
+    let ivk_scalar = field_to_scalar(ivk);
+    let pk_d = multi_scalar_mul([g_d], [ivk_scalar]);
+    let cm1 = pedersen_hash([DOMAIN_NOTE_COMMIT, g_d.x, pk_d.x, value, rho, rcm]);
+
+    // Create some other note commitments (different notes)
+    let cm0: Field = pedersen_hash([DOMAIN_NOTE_COMMIT, 1, 2, 500000, 999, 888]);
+    let cm2: Field = pedersen_hash([DOMAIN_NOTE_COMMIT, 3, 4, 750000, 777, 666]);
+    let cm3: Field = pedersen_hash([DOMAIN_NOTE_COMMIT, 5, 6, 250000, 555, 444]);
+
+    // Build the tree bottom-up
+    let h01 = pedersen_hash([DOMAIN_MERKLE, cm0, cm1]); // cm1 is RIGHT child
+    let h23 = pedersen_hash([DOMAIN_MERKLE, cm2, cm3]);
+    let subtree_root = pedersen_hash([DOMAIN_MERKLE, h01, h23]); // h01 is LEFT child
+
+    // For a 32-level tree, we need to extend upward with "empty" siblings
+    // The remaining 30 levels have the note on the left (path_indices = false)
+    let mut expected_root = subtree_root;
+    for _ in 0..30 {
+        expected_root = pedersen_hash([DOMAIN_MERKLE, expected_root, 0]);
+    }
+
+    // Build the Merkle path for cm1
+    // Level 0: cm1 is RIGHT child, sibling is cm0
+    // Level 1: h01 is LEFT child, sibling is h23
+    // Levels 2-31: subtree is LEFT child, siblings are 0
+    let mut siblings: [Field; 32] = [0; 32];
+    siblings[0] = cm0; // Sibling at leaf level
+    siblings[1] = h23; // Sibling at level 1
+    // Rest are zeros (empty subtrees)
+
+    let mut path_indices: [bool; 32] = [false; 32];
+    path_indices[0] = true; // cm1 is right child at level 0
+    // path_indices[1] = false; // h01 is left child at level 1
+    // Rest are false (left child)
+
+    // Run the circuit
+    let (nullifier, anchor, rk_x, _) = main(sk, ar, value, rho, rcm, d, siblings, path_indices);
+
+    // Verify the anchor matches our expected root
+    assert(anchor == expected_root, "anchor should match tree root");
+
+    // Sanity checks
+    assert(nullifier != 0, "nullifier should be non-zero");
+    assert(rk_x != 0, "rk_x should be non-zero");
+
+    // Verify that a different note at the same position gives different anchor
+    // (because the commitment would be different)
+    let different_value: Field = 2000000;
+    let (_, different_anchor, _, _) =
+        main(sk, ar, different_value, rho, rcm, d, siblings, path_indices);
+    assert(anchor != different_anchor, "different note should give different anchor");
+}
