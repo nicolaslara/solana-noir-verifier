@@ -1,6 +1,0 @@
-# Witness values for proving x * x == y
-# x = 3 (private)
-# y = 9 (public)
-
-x = "3"
-y = "9"
