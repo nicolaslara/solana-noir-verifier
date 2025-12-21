@@ -1,91 +1,103 @@
 ---
-description: "[ULTRAHONK - DEACTIVATED] External references and resources for implementation"
+description: "[ULTRAHONK] External references and resources for implementation"
 globs:
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Key External References
-
-When implementing features, consult these resources:
 
 ## Primary References
 
 ### Barretenberg Solidity Verifier
 
-- **Source**: Generated via `bb contract -k ./vk -o ./HonkVerifier.sol`
+- **Source**: Generated via `bb contract -k ./vk -o ./HonkVerifier.sol --oracle_hash keccak`
 - **Ground truth** for challenge generation, subrelation formulas, wire indices
 - Use `-d` flag with `bb verify` for debug output showing internal values
-- The Solidity verifier is the canonical reference for bb 0.87 UltraHonk
 
 ### yugocabrio/ultrahonk-rust-verifier
 
 - **GitHub**: `https://github.com/yugocabrio/ultrahonk-rust-verifier`
 - Complete Rust UltraHonk verifier matching bb 0.87
-- Used as **algorithm reference** (not direct code - uses arkworks)
+- **Algorithm reference** (uses arkworks, not Solana-compatible)
 - Key modules: `transcript.rs`, `sumcheck.rs`, `shplemini.rs`, `relations.rs`
 
 ### groth16-solana (Light Protocol)
 
 - **GitHub**: `https://github.com/Lightprotocol/groth16-solana`
 - Reference for Solana BN254 syscall usage patterns
-- ~81k CUs for Groth16 (much simpler than UltraHonk)
-- **Key patterns**: VK parser, proof parser, syscall integration
-
-### Solana BN254 Syscalls
-
-- `solana-bn254` crate
-- Active on mainnet since Solana 1.18.x
-- Operations: addition, multiplication, pairing
-- All operations use big-endian byte format
+- ~81k CUs for Groth16 (much simpler than UltraHonk's ~5.4M)
 
 ### Barretenberg
 
 - **GitHub**: `https://github.com/AztecProtocol/barretenberg`
 - Source of truth for Noir proof format
-- UltraHonk implementation details
 - Use `bb --version` to verify you're on 0.87.x
 
-### ultraplonk_verifier (zkVerify) - LEGACY
+## Version Compatibility
 
-- **Note**: This is for **UltraPlonk**, not UltraHonk
-- Noir 1.0+ uses UltraHonk by default
-- Only useful for understanding transcript patterns
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Noir/Nargo | 1.0.0-beta.8 | UltraHonk/Keccak support |
+| bb | 0.87.x | Install via `bbup` |
+| Solana SDK | 3.0+ | BN254 syscalls stable |
+| Rust | 1.75+ stable | |
 
-## Version Compatibility (Current)
-
-| Component    | Version      | Notes                    |
-| ------------ | ------------ | ------------------------ |
-| Noir/Nargo   | 1.0.0-beta.8 | UltraHonk/Keccak support |
-| bb           | 0.87.x       | Matched via `bbup`       |
-| Solana SDK   | 3.0+         | BN254 syscalls stable    |
-| solana-bn254 | (from SDK)   | Part of solana-program   |
-| Rust         | 1.75+ stable |                          |
-
-## Test Resources
-
-Test vectors are in `test-circuits/`:
+## Project Structure
 
 ```
-test-circuits/
-├── simple_square/target/keccak/     # Basic x²=y
-├── iterated_square_*/target/keccak/ # Scalability tests
-├── hash_batch/target/keccak/        # Blake3 hashing
-└── merkle_membership/target/keccak/ # Merkle proofs
+solana-noir-verifier/
+├── programs/ultrahonk-verifier/   # Solana program
+│   └── src/lib.rs                 # Main verifier logic
+├── crates/plonk-solana-core/      # Core verification library
+├── scripts/solana/
+│   └── test_phased.mjs            # E2E test script
+├── test-circuits/                  # Noir test circuits
+│   ├── simple_square/
+│   ├── hash_batch/
+│   └── merkle_membership/
+├── tasks.md                        # Task tracking
+└── docs/knowledge.md               # Implementation notes
 ```
 
-Each contains: `proof` (16,224 bytes), `vk` (1,760 bytes), `public_inputs`
+## Test Circuits
 
-Rebuild with: `cd test-circuits && ./build_all.sh`
+| Circuit | log_n | Description |
+|---------|-------|-------------|
+| simple_square | 12 | Basic x²=y (fastest) |
+| iterated_square_* | 12-16 | Scalability tests |
+| hash_batch | 14 | Blake3 hashing |
+| merkle_membership | 14 | Merkle proofs |
 
-## Debugging Tips
+Files per circuit: `proof` (16,224 bytes), `vk` (1,760 bytes), `public_inputs`
+
+Rebuild: `cd test-circuits && ./build_all.sh`
+
+## bb 0.87 Constants
+
+```rust
+PROOF_SIZE = 16_224         // ZK mode proof size
+VK_SIZE = 1_760             // VK size
+CONST_PROOF_SIZE_LOG_N = 28 // Max supported log_n
+NUMBER_OF_ENTITIES = 40     // Wire count
+NUMBER_OF_SUBRELATIONS = 26 // Relation count
+NUMBER_OF_ALPHAS = 25       // Alpha challenges
+VK_NUM_COMMITMENTS = 27     // G1 points in VK
+```
+
+## Debugging Commands
 
 ```bash
-# Get bb's internal challenge values
+# Get bb's internal values
 bb verify -d -p ./proof -k ./vk --oracle_hash keccak --zk
 
 # Generate Solidity verifier for reference
 bb contract -k ./vk -o ./HonkVerifier.sol --oracle_hash keccak
 
 # Check bb version
-~/.bb/bb --version  # Should be 0.87.x
+~/.bb/bb --version
+
+# Run local validator
+surfpool  # Surfnet (recommended)
+# or
+solana-test-validator
 ```

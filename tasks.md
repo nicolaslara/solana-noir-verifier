@@ -417,6 +417,60 @@ Enable other Solana programs to verify proofs via CPI.
 
 ---
 
+## 🚀 Phase 5: Performance & UX Optimizations (Future)
+
+### 5.1 Jito Bundle Support
+
+- [ ] **Integrate Jito bundling for verification transactions**
+  - Current: 8 sequential transactions with individual confirmations
+  - With Jito: Bundle all 8 TXs and land them atomically in a single slot
+  - Benefits:
+    - **Faster verification**: All TXs land together (~400ms vs ~4-8s sequential)
+    - **Atomic execution**: Either all phases succeed or none do
+    - **Better UX**: Single confirmation wait instead of 8
+  - Implementation:
+    - Use `jito-ts` SDK for bundle submission
+    - Add tip instruction to last TX in bundle
+    - Handle bundle status polling
+  - Reference: [Jito Labs Bundle API](https://jito-labs.gitbook.io/)
+
+### 5.2 Fee-Charged Verification
+
+- [ ] **Implement optional fee collection for verification**
+  - **Motivation**: Monetize verification service; charge per-proof
+  - **Key constraint**: Cannot deduct from Solana tx fees—must be explicit transfer
+  
+  - **Design: Charge once per verification session**
+    - Charge at `verify_init` (recommended) or `check_proof` (caller-paid)
+    - Record "paid" in session PDA; subsequent steps don't charge again
+    - No extra transactions needed
+  
+  - **State accounts**:
+    - `FeeConfig PDA`: admin, enabled, mode, allowed_mints, fee_schedule
+    - `FeeVault PDA`: SOL vault + token ATAs for SPL fees
+    - `VerificationSession PDA`: paid status, payer, asset, amount, slot
+  
+  - **Supported assets**: SOL + allowlisted SPL tokens (USDC, etc.)
+  
+  - **Fee modes**:
+    - `None`: Free (disabled)
+    - `VerifyInitOnly`: User pays on verify_init
+    - `CheckProofOnly`: Caller program pays on check_proof
+    - `Either`: Pay at either point
+  
+  - **Clean API for integrators**:
+    - Fee accounts via `remaining_accounts` (main ix list stays stable)
+    - When fees disabled, fee accounts optional/no-op
+    - Helper crate with `FeeOption::Auto | SOL | SPL(mint) | None`
+  
+  - **v1 minimal scope**:
+    - Only charge on `verify_init`
+    - SOL + 1-2 stablecoins (USDC)
+    - Fixed fee amount per asset
+    - `FeeConfig.enabled = false` by default (free)
+
+---
+
 ## ✅ Completed Work (Archive)
 
 ### E2E Workflow (Verified Working ✅)

@@ -1,10 +1,33 @@
 ---
-description: "[ULTRAHONK - DEACTIVATED] Development patterns for Rust/Solana BN254 verification"
+description: "[ULTRAHONK] Development patterns for Rust/Solana BN254 verification"
 globs: crates/**/*.rs, programs/**/*.rs
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Development Rules
+
+## VK Registry Pattern (IMPORTANT)
+
+VK is loaded from a **separate account**, NOT embedded in the program:
+
+- One verifier program supports ANY UltraHonk circuit
+- Circuit deployer uploads VK once, reuses for all proofs
+- Phase 1 and Phase 3c+4 require VK account as parameter
+- **Never use embedded VK in production** - it's a security risk
+
+```rust
+// VK account is REQUIRED for verification
+let vk_account = next_account_info(account_iter)?;  // REQUIRED
+let vk = parse_vk(vk_account)?;
+```
+
+## Account Structure
+
+| Account | Size | Purpose |
+|---------|------|---------|
+| VK Buffer | 1,763 bytes | Header (3) + VK (1,760) |
+| Proof Buffer | ~16,261 bytes | Header (5) + PI (32×n) + Proof (16,224) |
+| State Buffer | 6,376 bytes | Verification state between TXs |
 
 ## Solana BN254 Syscalls
 
@@ -19,65 +42,56 @@ Use `solana-bn254` crate for all heavy curve operations:
 ## Field/Curve Serialization (bb 0.87)
 
 **VK format (64-byte G1 points):**
-
 - G1 points: big-endian coordinates (x, y), 64 bytes total
 - VK size: **1,760 bytes** (32-byte header + 27 G1 commitments)
 
 **Proof format (limbed G1 points):**
-
 - G1 points in proofs use **128-byte limbed format** (4 × 32-byte limbs: x_lo, x_hi, y_lo, y_hi)
 - Proof size: **16,224 bytes** (fixed, ZK mode)
 - Fr scalars: big-endian, 32 bytes
 
 **Transcript format:**
-
 - G1 points added to transcript in **limbed format** (128 bytes, not 64!)
 - This is critical for challenge matching
 
-## bb 0.87 Constants
-
-```rust
-CONST_PROOF_SIZE_LOG_N = 28   // Proof padded to this
-NUMBER_OF_ENTITIES = 40       // Wire count
-NUMBER_OF_SUBRELATIONS = 26   // Relation count
-NUMBER_OF_ALPHAS = 25         // Alpha challenges
-VK_NUM_COMMITMENTS = 27       // G1 points in VK
-```
-
-## Transcript (Fiat-Shamir)
-
-- Hash function: **Keccak256** (use `--oracle_hash keccak`)
-- Absorb order must exactly match Solidity verifier:
-  1. Circuit metadata (size, public inputs count, offset)
-  2. Public inputs + pairing point object (16 Fr)
-  3. Witness commitments (limbed)
-  4. Generate eta, beta, gamma, alphas, gate challenges
-  5. Libra commitment + sum (ZK only)
-  6. Sumcheck univariates per round
-  7. Sumcheck evaluations + ZK elements
-  8. Generate rho, gemini_r, shplonk_nu, shplonk_z
-- **NOTE:** No VK hash in bb 0.87 transcript (was in earlier versions)
-
-## Phased Verification (Multi-TX)
+## Phased Verification (8 TXs total)
 
 Solana's **1.4M CU per-TX limit** requires splitting verification:
 
-| Phase   | Description          | CUs   |
-| ------- | -------------------- | ----- |
-| Phase 1 | Challenge generation | ~287K |
-| Phase 2 | Sumcheck (3 TXs)     | ~3.8M |
-| Phase 3 | MSM (4 TXs)          | ~2.5M |
-| Phase 4 | Pairing check        | ~55K  |
+| Phase | TXs | CUs | Description |
+|-------|-----|-----|-------------|
+| Phase 1 | 1 | ~273K | Challenge generation (needs VK) |
+| Phase 2 | 3 | ~3.1M | Sumcheck (rounds + relations) |
+| Phase 3+4 | 4 | ~2.1M | MSM + Pairing (needs VK) |
+| **Total** | **8** | **~5.4M** | |
 
-Store intermediate state in a verification account between TXs.
+State stored in verification account between TXs.
+
+## Instruction Codes
+
+```rust
+// Buffer management
+IX_INIT_BUFFER = 0        // Init proof buffer
+IX_UPLOAD_CHUNK = 1       // Upload proof chunk
+IX_SET_PUBLIC_INPUTS = 3  // Set public inputs
+IX_INIT_VK_BUFFER = 4     // Init VK buffer
+IX_UPLOAD_VK_CHUNK = 5    // Upload VK chunk
+
+// Verification phases
+IX_PHASE1_FULL = 30       // All challenges (VK required)
+IX_PHASE2_ROUNDS = 40     // Sumcheck rounds
+IX_PHASE2D_RELATIONS = 43 // Relations check
+IX_PHASE3A_WEIGHTS = 50   // Shplemini weights
+IX_PHASE3B1_FOLDING = 51  // Folding
+IX_PHASE3B2_GEMINI = 52   // Gemini + libra
+IX_PHASE3C_AND_PAIRING = 54  // MSM + Pairing (VK required)
+```
 
 ## ZK Mode
 
 **Always use `--zk` flag** for Solana verification:
-
 - bb command: `bb prove --oracle_hash keccak --zk`
 - All test circuits use ZK mode
-- Non-ZK mode exists but is not tested
 
 ## no_std Compatibility
 
@@ -87,18 +101,18 @@ Core verification code in `plonk-core` must be `no_std` compatible for Solana BP
 #![cfg_attr(not(feature = "std"), no_std)]
 ```
 
-Use `alloc` crate for heap allocations when needed.
-
 ## Error Handling
 
 - Use custom error types, not panics
 - Return `ProgramError::Custom(code)` in Solana programs
 - Surface verification failures clearly, don't mask them
 
-## Testing Strategy
+## Testing
 
-1. Unit tests with `#[cfg(test)]` - can use std
-2. Run `test_all_available_circuits` to verify all 7 test circuits
-3. Integration tests with `solana-program-test`
-4. Always test both valid proofs AND tampered proofs
-5. For on-chain testing, use Surfpool: `CIRCUIT=x node scripts/solana/test_phased.mjs`
+```bash
+# Unit tests
+cargo test -p plonk-solana-core
+
+# On-chain test (requires surfnet running)
+PROGRAM_ID=<id> RPC_URL=http://127.0.0.1:8899 node scripts/solana/test_phased.mjs
+```

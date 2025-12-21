@@ -1,98 +1,133 @@
 ---
-description: "[ULTRAHONK - DEACTIVATED] Main development workflow for Solana Noir Verifier"
+description: "[ULTRAHONK] Main development workflow for Solana Noir Verifier"
 globs:
-alwaysApply: false
+alwaysApply: true
 ---
 
-# Solana Noir Verifier Workflow
+# Solana UltraHonk Verifier Workflow
 
 This rule applies to ALL interactions with this codebase.
 
-## 1. Reference the Spec First
+## Architecture Overview
 
-Before implementing or modifying any verification logic, transcript handling, or cryptographic operations:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CIRCUIT DEPLOYMENT                        │
+│                     (once per circuit)                       │
+├─────────────────────────────────────────────────────────────┤
+│  1. Create VK account                                        │
+│  2. Upload VK (2 chunks for 1,760 bytes)                    │
+│  → VK Account pubkey (save for proof verification)          │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   PROOF VERIFICATION                         │
+│                      (per proof)                             │
+├─────────────────────────────────────────────────────────────┤
+│  1. Create proof + state accounts (1 TX)                    │
+│  2. Upload proof (19 chunks in parallel)                    │
+│  3. Phase 1: Challenges (pass VK account)                   │
+│  4. Phase 2: Sumcheck (3 TXs)                               │
+│  5. Phase 3c+4: MSM + Pairing (pass VK account)             │
+│  → Verification result                                       │
+└─────────────────────────────────────────────────────────────┘
+```
 
-- **Consult `SPEC.md`** - High-level specification
-- **Consult `tasks.md`** - Current status and implementation notes
-- **Consult `docs/knowledge.md`** - Discovered implementation details
-- For transcript matching: generate Solidity verifier with `bb contract` and compare
-
-## 2. Proof Generation Workflow
-
-When working with test circuits or generating new proofs:
+## 1. Proof Generation (Noir + bb)
 
 ```bash
 cd test-circuits/<circuit_name>
 
-# 1. Compile circuit
-nargo compile
+# Compile + execute
+nargo compile && nargo execute
 
-# 2. Generate witness
-nargo execute
-
-# 3. Generate ZK proof (ALWAYS use keccak + zk for Solana)
+# Generate ZK proof (ALWAYS use keccak + zk for Solana)
 ~/.bb/bb prove \
     -b ./target/<circuit>.json \
     -w ./target/<circuit>.gz \
     --oracle_hash keccak --zk \
     -o ./target/keccak
 
-# 4. Generate VK
+# Generate VK
 ~/.bb/bb write_vk \
     -b ./target/<circuit>.json \
     --oracle_hash keccak \
     -o ./target/keccak
-
-# 5. Verify externally (sanity check)
-~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk \
-    --oracle_hash keccak --zk
 ```
 
 Or use `./build_all.sh <circuit_name>` from `test-circuits/`.
 
-## 3. Multi-Circuit Build & Test
-
-The Solana program embeds a circuit-specific VK at compile time:
+## 2. Build & Deploy Verifier Program
 
 ```bash
-# Build for specific circuit
+# Build the verifier program (circuit-agnostic)
 cd programs/ultrahonk-verifier
-CIRCUIT=hash_batch cargo build-sbf
+cargo build-sbf
 
-# Deploy to Surfpool
+# Start local validator
+surfpool  # or: solana-test-validator
+
+# Deploy
 solana program deploy target/deploy/ultrahonk_verifier.so \
     --url http://127.0.0.1:8899 --use-rpc
-
-# Test with matching circuit
-cd ../..
-CIRCUIT=hash_batch node scripts/solana/test_phased.mjs
+# → Note the Program Id
 ```
 
-Available circuits: `simple_square`, `iterated_square_*`, `fib_chain_100`, `hash_batch`, `merkle_membership`
+## 3. Run End-to-End Test
 
-## 4. Update Documentation After Sessions
+```bash
+cd /path/to/solana-noir-verifier
 
-After completing work or making significant discoveries:
+# Set environment variables
+export PROGRAM_ID=<program_id_from_deploy>
+export RPC_URL=http://127.0.0.1:8899
+export CIRCUIT=simple_square  # optional, defaults to simple_square
 
-- **Update `tasks.md`** with checked items, new tasks, and status
-- **Update `docs/knowledge.md`** with implementation details and gotchas
-- **Update `README.md`** if build/test commands or structure changes
+# Run test
+node scripts/solana/test_phased.mjs
+```
 
-## 5. Test Against Spec
+Expected output:
+- Circuit Deployment: ~0.8s (one-time)
+- Proof Verification: ~6s (8 TXs, ~5.4M CUs)
 
-When implementing features:
+## 4. Reference the Spec
 
-- Run `cargo test -p plonk-solana-core` (58 tests)
-- Run `test_all_available_circuits` for comprehensive check
-- For debugging, use `bb verify -d` to get internal challenge values
-- Compare against generated Solidity verifier for challenge matching
+Before modifying verification logic:
+- **`tasks.md`** - Current status and implementation notes
+- **`docs/knowledge.md`** - Implementation details and gotchas
+- Generate Solidity verifier with `bb contract` for comparison
 
-## 6. Debugging Challenge Mismatches
+## 5. Documentation Updates
+
+After completing work:
+- Update `tasks.md` with status
+- Update `docs/knowledge.md` with discoveries
+- Update `README.md` if commands change
+
+## 6. Debugging Tips
+
+```bash
+# Get bb's internal challenge values
+bb verify -d -p ./proof -k ./vk --oracle_hash keccak --zk
+
+# Generate Solidity verifier for reference
+bb contract -k ./vk -o ./HonkVerifier.sol --oracle_hash keccak
+
+# Check bb version
+~/.bb/bb --version  # Should be 0.87.x
+```
 
 If challenges don't match:
+1. Check transcript element order matches Solidity
+2. Verify G1 points are in **limbed format** (128 bytes)
+3. Check for missing libra commitments (ZK mode)
 
-1. Generate Solidity verifier: `bb contract -k ./vk -o ./HonkVerifier.sol --oracle_hash keccak`
-2. Add debug prints in Rust and compare hex values
-3. Check transcript element order matches Solidity exactly
-4. Verify G1 points are added in **limbed format** (128 bytes, not 64!)
-5. Check for missing elements (e.g., libra commitments for ZK proofs)
+## 7. Cost Estimates (Mainnet)
+
+| Component | Cost |
+|-----------|------|
+| Per proof verification | ~$1.10 (8 TXs, priority fees) |
+| Circuit deployment | ~$0.003 (one-time) |
+| Rent deposits (recoverable) | ~$33 per proof |
