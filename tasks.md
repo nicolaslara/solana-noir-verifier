@@ -44,27 +44,13 @@ As we iterate toward production, maintain these standards:
 
 ### 1.1 Client Library Optimization
 
-- [ ] **Fix parallel proof uploads (currently sequential!)**
-  - Current: Uses `Promise.all` but each promise awaits `sendAndConfirmTransaction`
-  - Problem: This is still sequential - each chunk waits for confirmation
-  - Solution: Use `connection.sendTransaction()` for all chunks, then batch-confirm signatures
-  - Pattern:
-    ```javascript
-    // Send all without waiting
-    const signatures = await Promise.all(chunks.map(chunk => 
-      connection.sendTransaction(tx, [payer], { skipPreflight: true })
-    ));
-    // Batch confirm all
-    await Promise.all(signatures.map(sig => 
-      connection.confirmTransaction(sig)
-    ));
-    ```
+- [x] **Fix parallel proof uploads** ✅
+  - Implemented: Uses `connection.sendTransaction()` for all chunks, then batch-confirm
+  - Result: 19 chunks uploaded in ~0.8s
 
-- [ ] **Bundle account creation with init + first chunk**
-  - Current: 4 separate TXs (create proof account, create state account, init buffer, set public inputs)
-  - Target: 1-2 TXs (create both accounts + init + set PI in one TX)
-  - Savings: ~3 network round-trips
-  - Note: Account creation requires keypair as signer, so both account keypairs needed
+- [x] **Bundle account creation with init + public inputs** ✅
+  - Implemented: 1 TX creates both accounts + init buffer + set public inputs
+  - Previous: 4 separate TXs → Now: 1 TX
 
 - [ ] **Optimize chunk sizing**
   - Current: 900 bytes per chunk (conservative)
@@ -538,7 +524,7 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
 | FrLimbs in sumcheck           | ✅ Implemented | **-24% Phase 2 (5M→3.8M)**    |
 | FrLimbs in shplemini          | ✅ Implemented | **-16% Phase 3 (2.95M→2.5M)** |
 | Zero-copy Proof struct        | ✅ Implemented | **-47% transactions**         |
-| Parallel proof upload         | ⚠️ Broken      | Needs fix (see 1.1)           |
+| Parallel proof upload         | ✅ Implemented | 19 chunks in ~0.8s            |
 
 ### Test Circuit Suite
 
