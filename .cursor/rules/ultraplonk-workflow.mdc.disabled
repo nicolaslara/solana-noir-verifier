@@ -1,0 +1,277 @@
+---
+description: Development workflow for Solana UltraPlonk verifier
+globs:
+alwaysApply: true
+---
+
+# Solana UltraPlonk Verifier Workflow
+
+This rule applies to ALL interactions with this codebase.
+
+## 1. Reference Hierarchy (Consult in Order)
+
+Before implementing or modifying any verification logic:
+
+### Ground Truth Sources
+
+1. **Barretenberg Solidity Verifier** (HIGHEST PRIORITY)
+
+   - Generated via: `bb contract --scheme ultra_plonk -k ./vk -o ./UltraPlonkVerifier.sol`
+   - Instrument with debug emissions for side-by-side comparison
+   - This is the canonical reference for challenge generation, polynomial evaluations, pairing inputs
+
+2. **Barretenberg C++ Source**
+
+   - GitHub: https://github.com/AztecProtocol/barretenberg
+   - Look in `cpp/src/barretenberg/plonk/` for UltraPlonk implementation
+   - Use to understand algorithm details not clear from Solidity
+
+3. **Our UltraHonk Verifier** (Reusable Patterns)
+   - Path: `../../../solana-noir-verifier/`
+   - Directly reuse: `field.rs`, `ops.rs`, `types.rs`
+   - Reference: transcript patterns, multi-TX structure, optimization techniques
+
+### Secondary References
+
+- **UltraPlonk knowledge** - `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/knowledge.md`
+- **UltraPlonk tasks** - `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/tasks.md`
+- **zkVerify ultraplonk_verifier** - Rust patterns and algorithm reference
+- **UltraHonk optimizations** - `./docs/suggested-optimizations.md`
+
+## 2. E2E-First Development Approach
+
+**CRITICAL**: Build for end-to-end execution from the start. Every step should:
+
+1. **Compile** - Code must compile cleanly
+2. **Pass tests** - Unit tests with known values
+3. **Run on Surfpool** - Execute on local Solana validator
+
+### Test Circuits
+
+Use these circuits for testing (already have UltraHonk proofs, need UltraPlonk equivalents):
+
+| Circuit             | log_n | PIs | Purpose                |
+| ------------------- | ----- | --- | ---------------------- |
+| `sapling_spend`     | 16    | 4   | Primary benchmark      |
+| `merkle_membership` | 18    | 32  | Larger circuit testing |
+
+### Optimization Techniques
+
+Apply these proven techniques from UltraHonk **from the start**:
+
+| Technique                     | Impact            | Where                         |
+| ----------------------------- | ----------------- | ----------------------------- |
+| **FrLimbs representation**    | ~20% total        | All field operations          |
+| **Montgomery multiplication** | 7x faster         | Field multiplication          |
+| **Binary Extended GCD**       | Much faster       | Field inversion               |
+| **Batch inversions**          | ~38% in hot paths | Anywhere multiple invs needed |
+| **Zero-copy where possible**  | Variable          | Proof/VK parsing              |
+
+### Code Philosophy
+
+**DO NOT blindly copy code** - this can inherit bugs and bad patterns:
+
+1. **Study** the UltraHonk implementation to understand the technique
+2. **Write fresh** code informed by what we learned
+3. **Only copy** if we're confident a file is exactly what we need as-is
+
+**Study these UltraHonk files for patterns:**
+
+- `field.rs` - FrLimbs, Montgomery, batch_inv patterns
+- `ops.rs` - BN254 syscall usage
+- `types.rs` - G1, G2, Scalar representations
+
+**DO NOT copy:**
+
+- Multi-TX/phased patterns - UltraPlonk fits in single TX
+- Sumcheck, Shplemini, Relations - UltraHonk-specific
+
+**On memory allocation:**
+
+- Prefer `&[u8]` references when practical
+- OK to use heap (`Vec`) if stack limits cause issues (Solana has 4KB stack)
+- Correctness and clarity over micro-optimization
+
+## 3. Research Phase Workflow
+
+Currently in research phase. Follow this workflow:
+
+### Studying zkVerify Implementation
+
+```bash
+# Clone zkVerify ultraplonk_verifier
+git clone https://github.com/zkVerify/ultraplonk_verifier
+cd ultraplonk_verifier
+
+# Study key files:
+# - src/lib.rs - Entry point
+# - src/proof.rs - Proof format
+# - src/vk.rs - Verification key format
+# - src/transcript.rs - Fiat-Shamir
+# - src/verify.rs - Verification logic
+```
+
+### Documenting Findings
+
+After studying reference implementations:
+
+1. **Update `./knowledge.md`** with discoveries
+2. **Update `./tasks.md`** with completed research items
+3. **Add code snippets** and format details
+
+## 3. Implementation Phase Workflow (Future)
+
+Once research is complete:
+
+### Proof Generation
+
+```bash
+# TBD: Exact commands for UltraPlonk proof generation
+# Likely uses older bb version:
+cd test-circuits/<circuit>
+nargo compile
+nargo execute
+bb prove --scheme ultra_plonk ... -o ./target/ultraplonk
+```
+
+### Building Solana Program
+
+```bash
+cd programs/ultraplonk-verifier
+cargo build-sbf
+
+# Deploy to Surfpool
+solana program deploy target/deploy/ultraplonk_verifier.so \
+    --url http://127.0.0.1:8899
+```
+
+### Testing
+
+```bash
+# Unit tests
+cargo test -p ultraplonk-core
+
+# Integration tests (TBD)
+node scripts/test_verify.mjs
+```
+
+## 4. Update Documentation After Sessions
+
+After completing work or making significant discoveries:
+
+- **Update UltraPlonk `knowledge.md`** - `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/knowledge.md`
+- **Update UltraPlonk `tasks.md`** - `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/tasks.md`
+- **Update README** if structure changes
+
+## 5. Cross-Reference with UltraHonk
+
+When implementing new features, check if UltraHonk has solved similar problems:
+
+```bash
+# Field arithmetic reference
+cat ../../../solana-noir-verifier/crates/plonk-core/src/field.rs
+
+# BN254 operations reference
+cat ../../../solana-noir-verifier/crates/plonk-core/src/ops.rs
+
+# Multi-TX pattern reference
+cat ../../../solana-noir-verifier/programs/ultrahonk-verifier/src/lib.rs
+```
+
+## 6. Key Differences from UltraHonk
+
+Keep in mind these differences:
+
+| Aspect                 | UltraPlonk           | UltraHonk        |
+| ---------------------- | -------------------- | ---------------- |
+| Verification structure | Linear (no sumcheck) | Sumcheck-based   |
+| Expected CUs           | ~500K-1M             | ~6.6M            |
+| **Expected TXs**       | **1 (single!)**      | 9-15             |
+| Proof size             | ~2-3 KB              | 16,224 bytes     |
+| Hash function          | Blake2s/Keccak       | Poseidon2/Keccak |
+
+### Single-TX Verification (Important!)
+
+UltraPlonk should fit in **1 transaction** - do not pre-build multi-TX infrastructure:
+
+- No sumcheck means ~3.8M CUs saved
+- Far fewer MSM points means ~2M CUs saved
+- Build simple single-instruction verifier first
+- Only add phases if profiling shows >1.4M CUs (unlikely)
+
+## 7. Debugging Tips (Critical!)
+
+The Solidity verifier instrumentation pattern was **essential** for UltraHonk success. Use it here!
+
+### Step 1: Generate and Instrument Solidity Verifier
+
+```bash
+# Generate Solidity verifier (GROUND TRUTH)
+bb contract --scheme ultra_plonk -k ./vk -o ./UltraPlonkVerifier.sol
+```
+
+### Step 2: Add Debug Emissions
+
+Edit the generated Solidity to emit internal values:
+
+```solidity
+event DebugChallenge(string name, uint256 value);
+event DebugG1(string name, uint256 x, uint256 y);
+
+// Add at key points:
+emit DebugChallenge("beta", beta);
+emit DebugChallenge("gamma", gamma);
+emit DebugG1("commitment_agg", point.x, point.y);
+```
+
+### Step 3: Run Solidity with Valid Proof
+
+Use Foundry or Hardhat to run the verifier and capture events.
+
+### Step 4: Add Matching Debug Prints in Rust
+
+```rust
+println!("beta: 0x{}", hex::encode(&beta));
+println!("gamma: 0x{}", hex::encode(&gamma));
+```
+
+### Step 5: Compare Hex Values
+
+First divergence = bug location. Common causes:
+
+- Transcript element order mismatch
+- G1 point encoding format (64 vs 128 bytes)
+- Challenge bit width (127 vs 128 bits)
+- Field element endianness
+
+### Useful commands:
+
+```bash
+# Check bb supports UltraPlonk
+bb --help | grep plonk
+
+# Debug output from bb
+bb verify -d --scheme ultra_plonk -p ./proof -k ./vk
+```
+
+## 8. Project Paths
+
+```
+# UltraPlonk project (implementation goes here)
+privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/
+├── knowledge.md         # Update with discoveries
+├── tasks.md             # Track progress
+├── README.md            # Project overview
+└── .cursor/rules/       # Local rules (also copied to solana-noir-verifier)
+
+# UltraHonk reference (study for patterns)
+solana-noir-verifier/
+├── crates/plonk-core/   # Field, ops, types
+├── programs/            # Multi-TX pattern (don't need for UltraPlonk)
+└── docs/
+    ├── knowledge.md     # UltraHonk learnings
+    └── suggested-optimizations.md  # Optimization techniques
+```
+
+
+

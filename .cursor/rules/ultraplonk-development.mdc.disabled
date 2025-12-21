@@ -1,0 +1,177 @@
+---
+description: Development rules for Solana UltraPlonk verifier
+globs:
+alwaysApply: true
+---
+
+# Development Rules
+
+## Solana BN254 Syscalls
+
+Use `solana-bn254` crate for all heavy curve operations (same as UltraHonk):
+
+- `alt_bn128_addition` - G1 point addition
+- `alt_bn128_multiplication` - G1 scalar multiplication
+- `alt_bn128_pairing` - Pairing check
+
+**Never** use pure Rust arkworks pairing in on-chain code - it will exceed compute limits.
+
+## Field/Curve Serialization
+
+**G1 Points:**
+
+- VK format: Typically 64 bytes (x, y) big-endian
+- Proof format: May vary - verify with zkVerify reference
+
+**Fr Scalars:**
+
+- 32 bytes, big-endian
+- Field modulus: BN254 scalar field (same as UltraHonk)
+
+## Learning from UltraHonk (Study, Don't Blindly Copy)
+
+**DO NOT blindly copy code** - this can inherit bugs and bad patterns. Instead:
+
+1. **Study** the UltraHonk implementation to understand techniques
+2. **Write fresh** code informed by what we learned
+3. **Only copy** if we're confident a file is exactly what we need as-is
+
+### Study `field.rs` for These Patterns
+
+```rust
+// FrLimbs type - ~20% overall savings
+pub struct FrLimbs(pub [u64; 4]); // Montgomery form, little-endian
+
+// Key techniques to implement:
+- FrLimbs::add(), sub(), mul() - field ops in Montgomery form
+- mont_mul() - Montgomery multiplication (7x faster than naive)
+- fr_inv() - Binary Extended GCD (much faster than Fermat)
+- batch_inv_limbs() - batch inversion (38% savings in hot paths)
+```
+
+### Study `ops.rs` for BN254 Syscall Patterns
+
+```rust
+// Solana BN254 syscalls - understand the API
+- alt_bn128_g1_addition_be() - G1 point addition
+- alt_bn128_g1_multiplication_be() - scalar multiplication
+- alt_bn128_pairing_be() - pairing check
+```
+
+### Study `types.rs` for Type Representations
+
+```rust
+// Simple byte-based types
+- G1Point, G2Point, Scalar as [u8; N]
+- Big-endian serialization for syscalls
+```
+
+**DO NOT use patterns from:**
+
+- `sumcheck.rs` - UltraHonk-specific (UltraPlonk has no sumcheck)
+- `shplemini.rs` - UltraHonk-specific batch opening
+- `relations.rs` - UltraHonk's 26 subrelations
+- `phased.rs` - Multi-TX infrastructure (UltraPlonk fits in single TX)
+
+## Transcript (Fiat-Shamir)
+
+UltraPlonk uses different transcript flow from UltraHonk:
+
+- Hash function: Likely Blake2s or Keccak (verify with reference)
+- Challenge order: Study zkVerify implementation
+- May include: circuit size, VK hash, public inputs, commitments, etc.
+
+**TODO:** Document exact transcript flow once research is complete.
+
+## UltraPlonk Verification Steps (Expected)
+
+Based on standard Plonk structure:
+
+1. **Parse proof and VK**
+2. **Compute public input contribution**
+3. **Generate challenges** (via transcript):
+   - β, γ (permutation)
+   - α (aggregation)
+   - ζ (evaluation point)
+   - v (opening aggregation)
+   - u (multipoint opening)
+4. **Verify linearization polynomial commitment**
+5. **Verify opening proofs** (KZG pairing check)
+
+## Compute Unit Targets
+
+UltraPlonk should be much cheaper than UltraHonk:
+
+| Target           | UltraPlonk      | UltraHonk |
+| ---------------- | --------------- | --------- |
+| Total CUs        | ~500K-1M        | ~6.6M CUs |
+| **Transactions** | **1 (single!)** | 9-15      |
+
+### Single-TX Verification ✅
+
+**DO NOT pre-build multi-TX infrastructure.** UltraPlonk should fit in 1 transaction:
+
+- No sumcheck (~3.8M CUs saved vs UltraHonk)
+- Far fewer MSM points (~2M CUs saved)
+- Build simple single `verify` instruction
+- Only add complexity if profiling shows >1.4M CUs (unlikely)
+
+## Testing Strategy (E2E from Day 1)
+
+### Test Circuits
+
+| Circuit             | log_n | PIs | Purpose                |
+| ------------------- | ----- | --- | ---------------------- |
+| `sapling_spend`     | 16    | 4   | Primary benchmark      |
+| `merkle_membership` | 18    | 32  | Larger circuit testing |
+
+### Testing Approach
+
+1. **Unit tests** with `#[cfg(test)]` - compare against Solidity debug output
+2. **Test vectors** from instrumented Solidity verifier (ground truth)
+3. **Integration tests** with `solana-program-test`
+4. **Always test both valid proofs AND tampered proofs**
+5. **Surfpool testing** - run on local Solana validator early and often
+
+### E2E Checkpoints
+
+Every implementation phase should end with a working E2E test:
+
+| Checkpoint | Test                                   |
+| ---------- | -------------------------------------- |
+| #1         | Parse proof/VK from real test circuit  |
+| #2         | All challenges match Solidity output   |
+| #3         | Full verification passes (valid proof) |
+| #4         | Deploy and verify on Surfpool          |
+
+### Surfpool Commands
+
+```bash
+# Start Surfpool (uses MCP tool)
+# Use: start_surfnet
+
+# Deploy program
+solana program deploy target/deploy/ultraplonk_verifier.so --url http://127.0.0.1:8899
+
+# Run verification test
+node scripts/test_verify.mjs
+```
+
+## Error Handling
+
+- Use custom error types, not panics
+- Return `ProgramError::Custom(code)` in Solana programs
+- Surface verification failures clearly
+
+## no_std Compatibility
+
+Core verification code must be `no_std` compatible for Solana BPF:
+
+```rust
+#![cfg_attr(not(feature = "std"), no_std)]
+extern crate alloc;
+use alloc::vec::Vec;
+```
+
+
+

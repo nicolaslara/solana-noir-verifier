@@ -17,13 +17,20 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RPC_URL = 'http://127.0.0.1:8899';
-const PROGRAM_ID = new PublicKey('2qH79axdgTbfuutaXvDJQ1e19HqTGzZKDrG73jT4UewK');
+const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
+// Web3.js defaults WS to +1 port (e.g. 8899 -> 8900). Surfnet uses this convention.
+// Only set wsEndpoint if explicitly provided via WS_URL env var.
+const WS_URL = process.env.WS_URL || null;
+const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID || '2qH79axdgTbfuutaXvDJQ1e19HqTGzZKDrG73jT4UewK');
 
-// Instruction codes
+// Instruction codes - Buffer management
 const IX_INIT_BUFFER = 0;
 const IX_UPLOAD_CHUNK = 1;
 const IX_SET_PUBLIC_INPUTS = 3;
+// VK account management
+const IX_INIT_VK_BUFFER = 4;
+const IX_UPLOAD_VK_CHUNK = 5;
+// Multi-TX phased verification (legacy, for debugging)
 const IX_PHASED_GENERATE_CHALLENGES = 10;
 const IX_PHASED_VERIFY_SUMCHECK = 11;
 const IX_PHASED_COMPUTE_MSM = 12;
@@ -52,7 +59,9 @@ const COMBINE_PHASE_3C_4 = process.env.COMBINE_PHASE_3C_4 !== '0';
 
 // Constants
 const PROOF_SIZE = 16224;
+const VK_SIZE = 1760;
 const BUFFER_HEADER_SIZE = 5;
+const VK_HEADER_SIZE = 3;
 const STATE_SIZE = 6376; // Updated for fold_pos storage
 const MAX_CHUNK_SIZE = 900;
 
@@ -60,6 +69,7 @@ const MAX_CHUNK_SIZE = 900;
 const CIRCUIT_NAME = process.env.CIRCUIT || 'simple_square';
 const proofPath = path.join(__dirname, `../../test-circuits/${CIRCUIT_NAME}/target/keccak/proof`);
 const piPath = path.join(__dirname, `../../test-circuits/${CIRCUIT_NAME}/target/keccak/public_inputs`);
+const vkPath = path.join(__dirname, `../../test-circuits/${CIRCUIT_NAME}/target/keccak/vk`);
 
 // Debug logging - set DEBUG=1 to enable verbose logs
 const DEBUG = process.env.DEBUG === '1';
@@ -136,133 +146,254 @@ async function main() {
     console.log(`Circuit: ${CIRCUIT_NAME}`);
     if (DEBUG) console.log('Debug logging: ENABLED');
     
-    // Check if proof file exists
+    // Check if proof and VK files exist
     if (!fs.existsSync(proofPath)) {
         console.error(`\n❌ Error: Proof file not found: ${proofPath}`);
         console.error(`   Run: cd test-circuits/${CIRCUIT_NAME} && nargo compile && nargo execute && bb prove ...`);
         process.exit(1);
     }
+    if (!fs.existsSync(vkPath)) {
+        console.error(`\n❌ Error: VK file not found: ${vkPath}`);
+        console.error(`   Run: cd test-circuits/${CIRCUIT_NAME} && bb write_vk ...`);
+        process.exit(1);
+    }
     
-    // Note about VK matching - the program must be built with the same CIRCUIT
-    console.log(`\n⚠️  IMPORTANT: Program must be deployed with matching VK!`);
-    console.log(`   Run: cd programs/ultrahonk-verifier && CIRCUIT=${CIRCUIT_NAME} cargo build-sbf`);
-    console.log(`   Then: solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc\n`);
+    // VK registry pattern: VK is loaded from an account, not embedded in program
+    console.log(`\n✅ VK Registry pattern: VK loaded from account (any circuit supported)`);
     
     const proof = fs.readFileSync(proofPath);
     const publicInputs = fs.readFileSync(piPath);
+    const vk = fs.readFileSync(vkPath);
     const numPi = publicInputs.length / 32;
     
     console.log(`Proof size: ${proof.length} bytes`);
+    console.log(`VK size: ${vk.length} bytes`);
     console.log(`Public inputs: ${numPi} (${publicInputs.length} bytes)`);
     
-    // Timing tracking
+    // Timing tracking - separate circuit deployment from proof verification
     const timing = {
-        setupStart: 0,
-        setupEnd: 0,
-        uploadStart: 0,
-        uploadEnd: 0,
+        // Circuit deployment (one-time per circuit)
+        circuitDeployStart: 0,
+        circuitDeployEnd: 0,
+        // Proof verification (per proof)
+        proofSetupStart: 0,
+        proofSetupEnd: 0,
+        proofUploadStart: 0,
+        proofUploadEnd: 0,
         verifyStart: 0,
         verifyEnd: 0,
     };
     
-    const connection = new Connection(RPC_URL, 'confirmed');
-    const payer = Keypair.generate();
-    const proofBuffer = Keypair.generate();
-    const stateBuffer = Keypair.generate();
+    // Configure connection with optional explicit WS endpoint
+    const connectionOptions = { commitment: 'confirmed' };
+    if (WS_URL) {
+        connectionOptions.wsEndpoint = WS_URL;
+    }
+    const connection = new Connection(RPC_URL, connectionOptions);
+    console.log(`RPC: ${RPC_URL}`);
+    console.log(`WS:  ${WS_URL || '(Web3.js default: HTTP port +1)'}`);
     
-    // Airdrop
-    console.log('\nSetting up accounts...');
-    timing.setupStart = Date.now();
+    const payer = Keypair.generate();
+    
+    // Airdrop SOL for all transactions
+    console.log('\nFunding payer account...');
     const airdropSig = await connection.requestAirdrop(payer.publicKey, 10_000_000_000);
     await connection.confirmTransaction(airdropSig);
     
-    // Create proof buffer
+    // =========================================================================
+    // PHASE A: CIRCUIT DEPLOYMENT (one-time per circuit)
+    // This creates a VK account that can be reused for all proofs from this circuit.
+    // In production, this would be done once when the circuit is first deployed.
+    // =========================================================================
+    console.log('\n╔══════════════════════════════════════════════════════════════╗');
+    console.log('║           CIRCUIT DEPLOYMENT (one-time per circuit)           ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝');
+    timing.circuitDeployStart = Date.now();
+    
+    const vkBuffer = Keypair.generate();  // VK account for this circuit
+    const vkBufferSize = VK_HEADER_SIZE + VK_SIZE;
+    const vkRent = await connection.getMinimumBalanceForRentExemption(vkBufferSize);
+    
+    // Create VK account + initialize
+    const initVkData = Buffer.alloc(1);
+    initVkData[0] = IX_INIT_VK_BUFFER;
+    const initVkIx = new TransactionInstruction({
+        keys: [{ pubkey: vkBuffer.publicKey, isSigner: false, isWritable: true }],
+        programId: PROGRAM_ID,
+        data: initVkData,
+    });
+    
+    const vkSetupTx = new Transaction()
+        .add(SystemProgram.createAccount({
+            fromPubkey: payer.publicKey,
+            newAccountPubkey: vkBuffer.publicKey,
+            lamports: vkRent,
+            space: vkBufferSize,
+            programId: PROGRAM_ID,
+        }))
+        .add(initVkIx);
+    
+    await sendAndConfirmTransaction(connection, vkSetupTx, [payer, vkBuffer]);
+    console.log(`  Created VK account: ${vkBuffer.publicKey.toBase58()}`);
+    
+    // Upload VK chunks
+    const vkBlockhash = await connection.getLatestBlockhash();
+    const vkUploadTxs = [];
+    let vkOffset = 0;
+    while (vkOffset < vk.length) {
+        const chunkSize = Math.min(MAX_CHUNK_SIZE, vk.length - vkOffset);
+        const chunk = vk.slice(vkOffset, vkOffset + chunkSize);
+        const uploadData = Buffer.alloc(3 + chunkSize);
+        uploadData[0] = IX_UPLOAD_VK_CHUNK;
+        uploadData.writeUInt16LE(vkOffset, 1);
+        chunk.copy(uploadData, 3);
+        
+        const tx = new Transaction().add(new TransactionInstruction({
+            keys: [{ pubkey: vkBuffer.publicKey, isSigner: false, isWritable: true }],
+            programId: PROGRAM_ID,
+            data: uploadData,
+        }));
+        tx.feePayer = payer.publicKey;
+        tx.recentBlockhash = vkBlockhash.blockhash;
+        
+        vkUploadTxs.push(tx);
+        vkOffset += chunkSize;
+    }
+    
+    // Upload VK chunks in parallel
+    const vkSigs = await Promise.all(vkUploadTxs.map(tx => 
+        connection.sendTransaction(tx, [payer], { skipPreflight: true })
+    ));
+    await Promise.all(vkSigs.map(sig => 
+        connection.confirmTransaction({ signature: sig, ...vkBlockhash }, 'confirmed')
+    ));
+    
+    timing.circuitDeployEnd = Date.now();
+    console.log(`  VK uploaded (${vkUploadTxs.length} chunks) ✓`);
+    console.log(`  Circuit deployment time: ${timing.circuitDeployEnd - timing.circuitDeployStart}ms`);
+    console.log(`  VK Account: ${vkBuffer.publicKey.toBase58()}`);
+    
+    // =========================================================================
+    // PHASE B: PROOF VERIFICATION (per proof)
+    // This is what proof submitters do. They reference the circuit's VK account.
+    // =========================================================================
+    console.log('\n╔══════════════════════════════════════════════════════════════╗');
+    console.log('║              PROOF VERIFICATION (per proof)                   ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝');
+    timing.proofSetupStart = Date.now();
+    
+    const proofBuffer = Keypair.generate();
+    const stateBuffer = Keypair.generate();
+    
+    // Calculate sizes and rent
     const proofBufferSize = BUFFER_HEADER_SIZE + publicInputs.length + PROOF_SIZE;
     const proofRent = await connection.getMinimumBalanceForRentExemption(proofBufferSize);
-    const createProofTx = new Transaction().add(
-        SystemProgram.createAccount({
+    const stateRent = await connection.getMinimumBalanceForRentExemption(STATE_SIZE);
+    
+    // Build init proof buffer instruction
+    const initData = Buffer.alloc(3);
+    initData[0] = IX_INIT_BUFFER;
+    initData.writeUInt16LE(numPi, 1);
+    const initIx = new TransactionInstruction({
+        keys: [{ pubkey: proofBuffer.publicKey, isSigner: false, isWritable: true }],
+        programId: PROGRAM_ID,
+        data: initData,
+    });
+    
+    // Build set public inputs instruction
+    const piData = Buffer.alloc(1 + publicInputs.length);
+    piData[0] = IX_SET_PUBLIC_INPUTS;
+    publicInputs.copy(piData, 1);
+    const piIx = new TransactionInstruction({
+        keys: [{ pubkey: proofBuffer.publicKey, isSigner: false, isWritable: true }],
+        programId: PROGRAM_ID,
+        data: piData,
+    });
+    
+    // Single TX: Create proof + state accounts, init buffer, set public inputs
+    const proofSetupTx = new Transaction()
+        .add(SystemProgram.createAccount({
             fromPubkey: payer.publicKey,
             newAccountPubkey: proofBuffer.publicKey,
             lamports: proofRent,
             space: proofBufferSize,
             programId: PROGRAM_ID,
-        })
-    );
-    await sendAndConfirmTransaction(connection, createProofTx, [payer, proofBuffer]);
-    
-    // Create state buffer
-    const stateRent = await connection.getMinimumBalanceForRentExemption(STATE_SIZE);
-    const createStateTx = new Transaction().add(
-        SystemProgram.createAccount({
+        }))
+        .add(SystemProgram.createAccount({
             fromPubkey: payer.publicKey,
             newAccountPubkey: stateBuffer.publicKey,
             lamports: stateRent,
             space: STATE_SIZE,
             programId: PROGRAM_ID,
-        })
-    );
-    await sendAndConfirmTransaction(connection, createStateTx, [payer, stateBuffer]);
+        }))
+        .add(initIx)
+        .add(piIx);
     
-    // Init proof buffer
-    const initData = Buffer.alloc(3);
-    initData[0] = IX_INIT_BUFFER;
-    initData.writeUInt16LE(numPi, 1);
-    const initTx = new Transaction().add(new TransactionInstruction({
-        keys: [{ pubkey: proofBuffer.publicKey, isSigner: false, isWritable: true }],
-        programId: PROGRAM_ID,
-        data: initData,
-    }));
-    await sendAndConfirmTransaction(connection, initTx, [payer]);
+    await sendAndConfirmTransaction(connection, proofSetupTx, [payer, proofBuffer, stateBuffer]);
+    console.log('  Created proof + state accounts (1 TX) ✓');
+    timing.proofSetupEnd = Date.now();
     
-    // Set public inputs
-    const piData = Buffer.alloc(1 + publicInputs.length);
-    piData[0] = IX_SET_PUBLIC_INPUTS;
-    publicInputs.copy(piData, 1);
-    const piTx = new Transaction().add(new TransactionInstruction({
-        keys: [{ pubkey: proofBuffer.publicKey, isSigner: false, isWritable: true }],
-        programId: PROGRAM_ID,
-        data: piData,
-    }));
-    await sendAndConfirmTransaction(connection, piTx, [payer]);
-    
-    timing.setupEnd = Date.now();
-    
-    // Upload proof in chunks (parallel)
-    timing.uploadStart = Date.now();
-    const uploadPromises = [];
-    let offset = 0;
-    while (offset < proof.length) {
-        const chunkSize = Math.min(MAX_CHUNK_SIZE, proof.length - offset);
-        const chunk = proof.slice(offset, offset + chunkSize);
+    // Upload proof chunks in parallel
+    timing.proofUploadStart = Date.now();
+    const proofBlockhash = await connection.getLatestBlockhash();
+    const proofUploadTxs = [];
+    let proofOffset = 0;
+    while (proofOffset < proof.length) {
+        const chunkSize = Math.min(MAX_CHUNK_SIZE, proof.length - proofOffset);
+        const chunk = proof.slice(proofOffset, proofOffset + chunkSize);
         const uploadData = Buffer.alloc(3 + chunkSize);
         uploadData[0] = IX_UPLOAD_CHUNK;
-        uploadData.writeUInt16LE(offset, 1);
+        uploadData.writeUInt16LE(proofOffset, 1);
         chunk.copy(uploadData, 3);
-        const uploadTx = new Transaction().add(new TransactionInstruction({
+        
+        const tx = new Transaction().add(new TransactionInstruction({
             keys: [{ pubkey: proofBuffer.publicKey, isSigner: false, isWritable: true }],
             programId: PROGRAM_ID,
             data: uploadData,
         }));
-        uploadPromises.push(sendAndConfirmTransaction(connection, uploadTx, [payer]));
-        offset += chunkSize;
+        tx.feePayer = payer.publicKey;
+        tx.recentBlockhash = proofBlockhash.blockhash;
+        
+        proofUploadTxs.push(tx);
+        proofOffset += chunkSize;
     }
-    await Promise.all(uploadPromises);
-    timing.uploadEnd = Date.now();
-    console.log(`Proof uploaded (${uploadPromises.length} chunks in parallel) ✓\n`);
+    
+    console.log(`  Uploading proof (${proofUploadTxs.length} chunks in parallel)...`);
+    const proofSigs = await Promise.all(proofUploadTxs.map(tx => 
+        connection.sendTransaction(tx, [payer], { skipPreflight: true })
+    ));
+    const proofConfirms = await Promise.all(proofSigs.map(sig => 
+        connection.confirmTransaction({ signature: sig, ...proofBlockhash }, 'confirmed')
+    ));
+    
+    // Check for failures
+    const proofFailures = proofConfirms.filter(r => r.value?.err);
+    if (proofFailures.length > 0) {
+        console.error(`  ❌ ${proofFailures.length} proof uploads failed`);
+        process.exit(1);
+    }
+    
+    timing.proofUploadEnd = Date.now();
+    console.log(`  Proof uploaded ✓\n`);
     
     // Start verification timing
     timing.verifyStart = Date.now();
     
     const results = {};
     
-    // Helper to create a phased TX
-    async function createPhaseTx(ixCode, description) {
+    // Helper to create a phased TX (with optional VK account)
+    async function createPhaseTx(ixCode, description, includeVk = false) {
         const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+        const keys = [
+            { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
+            { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
+        ];
+        // Add VK account for Phase 1 and Phase 3c+4 (they need VK for verification)
+        if (includeVk) {
+            keys.push({ pubkey: vkBuffer.publicKey, isSigner: false, isWritable: false });
+        }
         const ix = new TransactionInstruction({
-            keys: [
-                { pubkey: stateBuffer.publicKey, isSigner: false, isWritable: true },
-                { pubkey: proofBuffer.publicKey, isSigner: false, isWritable: false },
-            ],
+            keys,
             programId: PROGRAM_ID,
             data: Buffer.from([ixCode]),
         });
@@ -274,9 +405,10 @@ async function main() {
     
     // ===== PHASE 1: Challenge Generation (unified with zero-copy) =====
     // Zero-copy Proof struct saves ~16KB heap, enabling unified Phase 1
+    // VK loaded from account (VK registry pattern)
     console.log('=== PHASE 1: CHALLENGE GENERATION ===');
     
-    results.phase1 = await createPhaseTx(IX_PHASE1_FULL, 'Phase 1: All challenges (zero-copy)');
+    results.phase1 = await createPhaseTx(IX_PHASE1_FULL, 'Phase 1: All challenges (VK from account)', true);
     
     // Phase 2: Verify Sumcheck (split into many sub-phases: 2 rounds per TX)
     console.log('\n=== PHASE 2: SUMCHECK VERIFICATION ===');
@@ -364,13 +496,15 @@ async function main() {
         }
         
         // Phase 3c: MSM computation (or combined with Phase 4)
+        // VK needed for commitment keys
         if (results.phase3b2?.success) {
             if (COMBINE_PHASE_3C_4) {
-                // Combined Phase 3c + 4 (saves 1 TX!)
-                results.phase3c = await createPhaseTx(IX_PHASE3C_AND_PAIRING, 'Phase 3c+4: MSM + Pairing (combined)');
+                // Combined Phase 3c + 4 (saves 1 TX!) - needs VK
+                results.phase3c = await createPhaseTx(IX_PHASE3C_AND_PAIRING, 'Phase 3c+4: MSM + Pairing (VK from account)', true);
                 results.phase4 = { success: results.phase3c?.success, cus: 0, combined: true };
             } else {
-                results.phase3c = await createPhaseTx(IX_PHASE3C_MSM, 'Phase 3c: MSM');
+                // Separate Phase 3c - needs VK
+                results.phase3c = await createPhaseTx(IX_PHASE3C_MSM, 'Phase 3c: MSM (VK from account)', true);
             }
         } else {
             results.phase3c = { success: false, cus: 0 };
@@ -462,19 +596,24 @@ async function main() {
                        results.phase2.success && results.phase3.success && results.phase4.success;
     
     // Calculate timing
-    const setupTime = timing.setupEnd - timing.setupStart;
-    const uploadTime = timing.uploadEnd - timing.uploadStart;
+    const circuitDeployTime = timing.circuitDeployEnd - timing.circuitDeployStart;
+    const proofSetupTime = timing.proofSetupEnd - timing.proofSetupStart;
+    const proofUploadTime = timing.proofUploadEnd - timing.proofUploadStart;
     const verifyTime = timing.verifyEnd - timing.verifyStart;
-    const totalTime = timing.verifyEnd - timing.setupStart;
+    const proofVerifyTotal = timing.verifyEnd - timing.proofSetupStart;
     
     console.log('\n=== TIMING ===');
-    console.log(`Setup (accounts):    ${(setupTime / 1000).toFixed(2)}s`);
-    console.log(`Proof upload:        ${(uploadTime / 1000).toFixed(2)}s`);
-    console.log(`Verification:        ${(verifyTime / 1000).toFixed(2)}s`);
-    console.log(`Total:               ${(totalTime / 1000).toFixed(2)}s`);
+    console.log('Circuit Deployment (one-time per circuit):');
+    console.log(`  VK account setup:  ${(circuitDeployTime / 1000).toFixed(2)}s`);
+    console.log('Proof Verification (per proof):');
+    console.log(`  Account setup:     ${(proofSetupTime / 1000).toFixed(2)}s`);
+    console.log(`  Proof upload:      ${(proofUploadTime / 1000).toFixed(2)}s`);
+    console.log(`  Verification:      ${(verifyTime / 1000).toFixed(2)}s`);
+    console.log(`  Total (per proof): ${(proofVerifyTotal / 1000).toFixed(2)}s`);
     
     if (allSuccess) {
         console.log('\n🎉 All phases passed! Verification complete.');
+        console.log(`\nVK Account (reuse for future proofs): ${vkBuffer.publicKey.toBase58()}`);
     } else {
         console.log('\n⚠️  Some phases failed. Need further analysis.');
     }

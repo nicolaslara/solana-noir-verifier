@@ -78,13 +78,25 @@ entrypoint!(process_instruction);
 pub const PROOF_SIZE: usize = 16224;
 
 /// VK size for bb 0.87
-pub const VK_SIZE_NEW: usize = 1760;
+pub const VK_SIZE: usize = 1760;
 
 /// Maximum chunk size for uploads (to fit in tx)
 pub const MAX_CHUNK_SIZE: usize = 900;
 
 /// Header size in proof buffer: status (1) + proof_len (2) + pi_count (2)
 pub const BUFFER_HEADER_SIZE: usize = 5;
+
+/// Header size in VK buffer: status (1) + vk_len (2)
+pub const VK_HEADER_SIZE: usize = 3;
+
+/// VK buffer status values
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum VkBufferStatus {
+    Empty = 0,
+    Uploading = 1,
+    Ready = 2,
+}
 
 // ============================================================================
 // Embedded VK - loaded from file at compile time
@@ -126,6 +138,17 @@ pub enum Instruction {
     /// Accounts: [proof_buffer (writable)]
     /// Data: [instruction(1), public_inputs...]
     SetPublicInputs = 3,
+
+    // === VK Account Management ===
+    /// Initialize VK buffer account
+    /// Accounts: [vk_buffer (writable)]
+    /// Data: [instruction(1)]
+    InitVkBuffer = 4,
+
+    /// Upload chunk of VK data
+    /// Accounts: [vk_buffer (writable)]
+    /// Data: [instruction(1), offset(2), chunk_data(...)]
+    UploadVkChunk = 5,
 
     // === Multi-TX phased verification (original - exceeds CU) ===
     /// Phase 1: Initialize state + generate challenges (FAILS: >1.4M CUs)
@@ -244,6 +267,10 @@ pub fn process_instruction(
         1 => process_upload_chunk(program_id, accounts, &instruction_data[1..]),
         2 => process_verify(program_id, accounts),
         3 => process_set_public_inputs(program_id, accounts, &instruction_data[1..]),
+
+        // VK account management
+        4 => process_init_vk_buffer(program_id, accounts),
+        5 => process_upload_vk_chunk(program_id, accounts, &instruction_data[1..]),
 
         // Multi-TX phased verification (original - may exceed CU)
         10 => process_phased_generate_challenges(program_id, accounts),
@@ -554,6 +581,130 @@ fn process_set_public_inputs(
 
     msg!("Set {} public inputs ({} bytes)", num_pi, expected_size);
     Ok(())
+}
+
+// ============================================================================
+// VK Account Management
+// ============================================================================
+
+/// Initialize a VK buffer account
+/// The account must already be created with sufficient space
+fn process_init_vk_buffer(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("UltraHonk: InitVkBuffer");
+
+    let account_iter = &mut accounts.iter();
+    let vk_account = next_account_info(account_iter)?;
+
+    if !vk_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut vk_data = vk_account.try_borrow_mut_data()?;
+
+    // Verify account is large enough for VK
+    let required_size = VK_HEADER_SIZE + VK_SIZE;
+    if vk_data.len() < required_size {
+        msg!("VK buffer too small: {} < {}", vk_data.len(), required_size);
+        return Err(ProgramError::AccountDataTooSmall);
+    }
+
+    // Set header: status = Empty, vk_len = 0
+    vk_data[0] = VkBufferStatus::Empty as u8;
+    vk_data[1..3].copy_from_slice(&0u16.to_le_bytes());
+
+    msg!("VK buffer initialized");
+    Ok(())
+}
+
+/// Upload a chunk of VK data
+/// Data format: [offset (u16 LE), chunk_data...]
+fn process_upload_vk_chunk(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let account_iter = &mut accounts.iter();
+    let vk_account = next_account_info(account_iter)?;
+
+    if !vk_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    if data.len() < 2 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    let offset = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let chunk = &data[2..];
+
+    msg!(
+        "UltraHonk: UploadVkChunk offset={} len={}",
+        offset,
+        chunk.len()
+    );
+
+    let mut vk_data = vk_account.try_borrow_mut_data()?;
+
+    // Write chunk after header
+    let write_start = VK_HEADER_SIZE + offset;
+    let write_end = write_start + chunk.len();
+
+    if write_end > vk_data.len() {
+        msg!("VK chunk exceeds buffer: {} > {}", write_end, vk_data.len());
+        return Err(ProgramError::AccountDataTooSmall);
+    }
+
+    vk_data[write_start..write_end].copy_from_slice(chunk);
+
+    // Update status and length
+    vk_data[0] = VkBufferStatus::Uploading as u8;
+    let new_len = (offset + chunk.len()) as u16;
+    let current_len = u16::from_le_bytes([vk_data[1], vk_data[2]]);
+    if new_len > current_len {
+        vk_data[1..3].copy_from_slice(&new_len.to_le_bytes());
+    }
+
+    // Mark ready if full VK uploaded
+    let vk_len = u16::from_le_bytes([vk_data[1], vk_data[2]]) as usize;
+    if vk_len >= VK_SIZE {
+        vk_data[0] = VkBufferStatus::Ready as u8;
+        msg!("VK upload complete: {} bytes", vk_len);
+    }
+
+    Ok(())
+}
+
+/// Parse VK from a VK account (REQUIRED - no embedded fallback for security)
+///
+/// VK account is mandatory to ensure:
+/// - Circuit deployers explicitly upload their VK
+/// - No accidental use of wrong embedded VK  
+/// - Program is truly circuit-agnostic
+fn parse_vk(
+    vk_account: &AccountInfo,
+) -> Result<plonk_solana_core::key::VerificationKey, ProgramError> {
+    let vk_data = vk_account.try_borrow_data()?;
+
+    // Check status
+    if vk_data[0] != VkBufferStatus::Ready as u8 {
+        msg!("VK buffer not ready, status={}", vk_data[0]);
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Check length
+    let vk_len = u16::from_le_bytes([vk_data[1], vk_data[2]]) as usize;
+    if vk_len < VK_SIZE {
+        msg!("VK incomplete: {} < {}", vk_len, VK_SIZE);
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Parse VK from account data
+    let vk_bytes = &vk_data[VK_HEADER_SIZE..VK_HEADER_SIZE + VK_SIZE];
+    msg!("Using VK from account: {}", vk_account.key);
+    plonk_solana_core::key::VerificationKey::from_bytes(vk_bytes).map_err(|e| {
+        msg!("VK parse error: {:?}", e);
+        ProgramError::InvalidAccountData
+    })
 }
 
 // ============================================================================
@@ -902,6 +1053,11 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
 /// Phase 1 Full: Unified challenge generation with incremental state storage
 /// Uses account as "external memory" - writes results immediately, drops heap data
 /// This avoids the 32KB heap limit by not keeping everything in memory at once
+/// Phase 1 Full: All challenges (incremental)
+/// Accounts:
+///   [0] state (writable) - verification state account
+///   [1] proof_data (readonly) - proof buffer account
+///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
 fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 1 Full: All challenges (incremental)");
     sol_log_compute_units();
@@ -909,6 +1065,7 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     let account_iter = &mut accounts.iter();
     let state_account = next_account_info(account_iter)?;
     let proof_account = next_account_info(account_iter)?;
+    let vk_account = next_account_info(account_iter)?; // REQUIRED
 
     if !state_account.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -933,9 +1090,8 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         public_inputs.push(arr);
     }
 
-    // Parse VK (we need it for multiple phases)
-    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
-        .map_err(|_| ProgramError::InvalidAccountData)?;
+    // Parse VK (from account if provided, otherwise embedded)
+    let vk = parse_vk(vk_account)?;
     let log_n = vk.log2_circuit_size as usize;
     let is_zk = true;
 
@@ -1992,6 +2148,11 @@ fn process_phase3b2_gemini(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
 }
 
 /// Phase 3c: MSM computation (~500K CUs)
+/// Phase 3c: Compute MSM
+/// Accounts:
+///   [0] state (writable) - verification state account
+///   [1] proof_data (readonly) - proof buffer account  
+///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
 fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 3c: MSM");
     sol_log_compute_units();
@@ -1999,6 +2160,7 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     let account_iter = &mut accounts.iter();
     let state_account = next_account_info(account_iter)?;
     let proof_account = next_account_info(account_iter)?;
+    let vk_account = next_account_info(account_iter)?; // REQUIRED
 
     if !state_account.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -2023,9 +2185,8 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
 
-    // Parse VK and proof
-    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
-        .map_err(|_| ProgramError::InvalidAccountData)?;
+    // Parse VK (from account if provided, otherwise embedded) and proof
+    let vk = parse_vk(vk_account)?;
     let proof = plonk_solana_core::proof::Proof::from_bytes(
         proof_bytes,
         state.log_n as usize,
@@ -2139,6 +2300,11 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
 }
 
 /// Phase 3c + 4: Combined MSM + Pairing (~790K CUs, saves 1 TX)
+/// Phase 3c+4: MSM + Pairing (combined)
+/// Accounts:
+///   [0] state (writable) - verification state account
+///   [1] proof_data (readonly) - proof buffer account  
+///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
 fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 3c+4: MSM + Pairing (combined)");
     sol_log_compute_units();
@@ -2146,6 +2312,7 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
     let account_iter = &mut accounts.iter();
     let state_account = next_account_info(account_iter)?;
     let proof_account = next_account_info(account_iter)?;
+    let vk_account = next_account_info(account_iter)?; // REQUIRED
 
     if !state_account.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -2170,9 +2337,8 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
 
-    // Parse VK and proof
-    let vk = plonk_solana_core::key::VerificationKey::from_bytes(VK_BYTES)
-        .map_err(|_| ProgramError::InvalidAccountData)?;
+    // Parse VK (from account if provided, otherwise embedded) and proof
+    let vk = parse_vk(vk_account)?;
     let proof = plonk_solana_core::proof::Proof::from_bytes(
         proof_bytes,
         state.log_n as usize,
@@ -2300,12 +2466,7 @@ mod tests {
 
     #[test]
     fn test_vk_loaded() {
-        assert_eq!(
-            VK_BYTES.len(),
-            VK_SIZE_NEW,
-            "VK should be {} bytes",
-            VK_SIZE_NEW
-        );
+        assert_eq!(VK_BYTES.len(), VK_SIZE, "VK should be {} bytes", VK_SIZE);
     }
 
     #[test]

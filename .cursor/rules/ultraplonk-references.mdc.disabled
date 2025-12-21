@@ -1,0 +1,190 @@
+---
+description: External references and resources for UltraPlonk implementation
+globs:
+alwaysApply: true
+---
+
+# Key External References
+
+When implementing features, consult these resources:
+
+## Primary References
+
+### Barretenberg Solidity Verifier (GROUND TRUTH) ⭐
+
+- **Source**: Generated via `bb contract --scheme ultra_plonk -k ./vk -o ./UltraPlonkVerifier.sol`
+- **Ground truth** for challenge generation, polynomial evaluations, pairing inputs
+- Use `-d` flag with `bb verify` for debug output showing internal values
+- **CRITICAL**: Instrument the Solidity verifier to compare internal values!
+
+**Debugging workflow (proven in UltraHonk):**
+
+1. Generate Solidity verifier
+2. Add `emit` statements at key points (challenges, commitments, pairing inputs)
+3. Run with Foundry/Hardhat against a valid proof
+4. Compare hex values with our Rust implementation
+5. Trace divergence to find bugs
+
+### zkVerify ultraplonk_verifier (Rust Reference)
+
+- **GitHub**: https://github.com/zkVerify/ultraplonk_verifier
+- **Purpose**: Substrate-based UltraPlonk verification
+- **Key files to study**:
+  - Proof/VK parsing
+  - Transcript/Fiat-Shamir implementation
+  - Verification logic
+- Use as algorithm reference and Rust patterns
+
+### Barretenberg (older versions)
+
+- **GitHub**: https://github.com/AztecProtocol/barretenberg
+- Look for UltraPlonk code in `cpp/src/barretenberg/plonk/` and `ultra_plonk/`
+- For proof generation: use bb versions <0.80 for UltraPlonk output
+- **Note**: Modern bb (0.80+) defaults to UltraHonk
+
+### Barretenberg C++ Source (Algorithm Details)
+
+- **GitHub**: https://github.com/AztecProtocol/barretenberg
+- **Key paths**:
+  - `cpp/src/barretenberg/plonk/` - Core Plonk implementation
+  - `cpp/src/barretenberg/ultra_plonk/` - UltraPlonk specifics
+  - `cpp/src/barretenberg/transcript/` - Transcript/Fiat-Shamir
+- Use to understand details not clear from generated Solidity
+
+### Solana UltraHonk Verifier (Learn Patterns, Don't Blindly Copy)
+
+- **Path**: `./` (this repo - solana-noir-verifier)
+- **Knowledge base**: `./docs/knowledge.md`
+- **Optimizations doc**: `./docs/suggested-optimizations.md`
+
+**Study these files for patterns (implement fresh, don't copy blindly):**
+
+1. `crates/plonk-core/src/field.rs` - FrLimbs, Montgomery, batch_inv techniques
+2. `crates/plonk-core/src/ops.rs` - BN254 syscall usage patterns
+3. `crates/plonk-core/src/types.rs` - G1, G2, Scalar representations
+
+**Reference for tooling:**
+
+4. `programs/ultrahonk-verifier/build.rs` - CIRCUIT env var pattern
+5. Test scripts in `scripts/solana/` - Surfpool testing patterns
+
+**DO NOT use (UltraPlonk doesn't need these):**
+
+- `phased.rs` - Multi-TX infrastructure (UltraPlonk fits in single TX)
+- `sumcheck.rs` - UltraPlonk has no sumcheck
+- `shplemini.rs` - UltraHonk-specific batch opening
+- `relations.rs` - UltraHonk's 26 subrelations
+
+### groth16-solana (Syscall Patterns)
+
+- **GitHub**: https://github.com/Lightprotocol/groth16-solana
+- Reference for Solana BN254 syscall usage
+- ~81k CUs for Groth16 verification
+
+### Solana BN254 Syscalls
+
+- `solana-bn254` crate
+- Active on mainnet since Solana 1.18.x
+- Operations: addition, multiplication, pairing
+- All operations use big-endian byte format
+
+## UltraPlonk vs UltraHonk
+
+| Aspect       | UltraPlonk     | UltraHonk        |
+| ------------ | -------------- | ---------------- |
+| Proof size   | ~2-3 KB        | 16,224 bytes     |
+| Verification | Direct KZG     | Sumcheck + KZG   |
+| Subrelations | ~20            | 26               |
+| Transcript   | Blake2s/Keccak | Poseidon2/Keccak |
+| bb version   | <0.80          | 0.80+            |
+| Noir version | <1.0           | 1.0+             |
+
+## Toolchain Notes
+
+### For UltraPlonk proof generation
+
+```bash
+# Install older bb version for UltraPlonk
+# (Research needed: exact version compatibility)
+bbup -v <old-version>
+
+# Generate UltraPlonk proof (flags TBD)
+bb prove --scheme ultra_plonk ...
+```
+
+### For Reference/Testing
+
+```bash
+# Current toolchain (for UltraHonk reference)
+nargo --version  # 1.0.0-beta.8
+bb --version     # 0.87.x
+```
+
+## Test Resources
+
+Test vectors need to be created. Possible sources:
+
+1. zkVerify ultraplonk_verifier test vectors
+2. Generate from old bb version
+3. Cross-reference with Barretenberg C++ tests
+
+## Debugging Tips
+
+### Generate and Instrument Solidity Verifier
+
+```bash
+# Generate Solidity verifier (GROUND TRUTH)
+bb contract --scheme ultra_plonk -k ./vk -o ./UltraPlonkVerifier.sol
+
+# Debug output from bb
+bb verify -d --scheme ultra_plonk -p ./proof -k ./vk
+```
+
+### Instrument Solidity for Debugging
+
+Add debug emissions to the generated Solidity verifier:
+
+```solidity
+// Add events
+event DebugChallenge(string name, uint256 value);
+event DebugG1(string name, uint256 x, uint256 y);
+
+// Emit at key points
+emit DebugChallenge("beta", beta);
+emit DebugChallenge("gamma", gamma);
+emit DebugChallenge("alpha", alpha);
+emit DebugG1("aggregated_commitment", agg.x, agg.y);
+```
+
+### Compare Rust vs Solidity
+
+```rust
+// In Rust, add debug prints at same points
+println!("beta: 0x{}", hex::encode(&beta));
+println!("gamma: 0x{}", hex::encode(&gamma));
+```
+
+Run both and compare hex values. First divergence = bug location.
+
+## Test Circuits
+
+Use these circuits for testing (same as UltraHonk benchmarks):
+
+| Circuit             | log_n | PIs | Purpose                |
+| ------------------- | ----- | --- | ---------------------- |
+| `sapling_spend`     | 16    | 4   | Primary benchmark      |
+| `merkle_membership` | 18    | 32  | Larger circuit testing |
+
+Circuit sources in `solana-noir-verifier/test-circuits/`. Need to generate UltraPlonk proofs with older bb version.
+
+## Cross-Project References
+
+When stuck, consult:
+
+- **UltraPlonk tasks**: `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/tasks.md`
+- **UltraPlonk knowledge**: `../privacy-infrastructure-sandbox/spikes/solana-ultraplonk-verifier/knowledge.md`
+- UltraHonk knowledge: `./docs/knowledge.md`
+- UltraHonk optimizations: `./docs/suggested-optimizations.md`
+
+
+

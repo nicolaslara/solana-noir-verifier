@@ -1,7 +1,7 @@
 ---
-description: External references and resources for implementation
+description: "[ULTRAHONK - DEACTIVATED] External references and resources for implementation"
 globs:
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Key External References

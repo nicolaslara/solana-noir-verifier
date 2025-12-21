@@ -1,7 +1,7 @@
 ---
-description: Main development workflow for Solana Noir Verifier
+description: "[ULTRAHONK - DEACTIVATED] Main development workflow for Solana Noir Verifier"
 globs:
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Solana Noir Verifier Workflow

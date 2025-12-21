@@ -1,7 +1,7 @@
 ---
-description: Development patterns for Rust/Solana BN254 verification
+description: "[ULTRAHONK - DEACTIVATED] Development patterns for Rust/Solana BN254 verification"
 globs: crates/**/*.rs, programs/**/*.rs
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Development Rules

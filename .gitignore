@@ -3,8 +3,9 @@ target/
 Cargo.lock
 
 # Solana
-/test-ledger/
+**/test-ledger/
 *.so
+solana-install-init.sh
 
 # IDE
 .idea/
