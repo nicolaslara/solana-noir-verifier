@@ -39,7 +39,7 @@ const IX_SET_PUBLIC_INPUTS = 3;
 // Constants matching the program
 const PROOF_SIZE = 16224;
 const BUFFER_HEADER_SIZE = 5;
-const MAX_CHUNK_SIZE = 900;
+const MAX_CHUNK_SIZE = 1020;
 
 // Load test artifacts
 const proofPath = path.join(__dirname, '../../test-circuits/simple_square/target/keccak/proof');

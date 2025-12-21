@@ -52,10 +52,9 @@ As we iterate toward production, maintain these standards:
   - Implemented: 1 TX creates both accounts + init buffer + set public inputs
   - Previous: 4 separate TXs → Now: 1 TX
 
-- [ ] **Optimize chunk sizing**
-  - Current: 900 bytes per chunk (conservative)
-  - Research: Max instruction data size, versioned TX benefits
-  - Goal: Minimize number of chunks while staying under limits
+- [x] **Optimize chunk sizing** ✅
+  - Changed: 900 → 1020 bytes per chunk (near TX size limit of 1232)
+  - Result: 19 → 16 chunks for proof upload (16% fewer TXs)
 
 ### 1.2 Production-Grade Abstractions (Research Required)
 

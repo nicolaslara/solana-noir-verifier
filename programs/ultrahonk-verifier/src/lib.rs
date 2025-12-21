@@ -81,7 +81,7 @@ pub const PROOF_SIZE: usize = 16224;
 pub const VK_SIZE: usize = 1760;
 
 /// Maximum chunk size for uploads (to fit in tx)
-pub const MAX_CHUNK_SIZE: usize = 900;
+pub const MAX_CHUNK_SIZE: usize = 1020;
 
 /// Header size in proof buffer: status (1) + proof_len (2) + pi_count (2)
 pub const BUFFER_HEADER_SIZE: usize = 5;

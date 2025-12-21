@@ -63,7 +63,7 @@ const VK_SIZE = 1760;
 const BUFFER_HEADER_SIZE = 5;
 const VK_HEADER_SIZE = 3;
 const STATE_SIZE = 6376; // Updated for fold_pos storage
-const MAX_CHUNK_SIZE = 900;
+const MAX_CHUNK_SIZE = 1020;
 
 // Get circuit name from environment or default to simple_square
 const CIRCUIT_NAME = process.env.CIRCUIT || 'simple_square';
