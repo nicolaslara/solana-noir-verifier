@@ -1,0 +1,10 @@
+[package]
+name = "solana-noir-verifier-cpi"
+version = "0.1.0"
+edition = "2021"
+description = "CPI utilities for verifying Noir proof receipts on Solana"
+license = "MIT"
+repository = "https://github.com/..."
+
+[dependencies]
+solana-program = "3.0"

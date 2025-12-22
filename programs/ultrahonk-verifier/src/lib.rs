@@ -62,6 +62,7 @@ use solana_program::{
     msg,
     program_error::ProgramError,
     pubkey::Pubkey,
+    sysvar::Sysvar,
 };
 
 extern crate alloc;
@@ -227,6 +228,12 @@ pub enum Instruction {
     /// Phase 3c + 4: Combined MSM + Pairing (~790K CUs, saves 1 TX)
     /// Accounts: [state (writable), proof_data (readonly)]
     Phase3cAndPairing = 54,
+
+    // === Verification Receipt ===
+    /// Create verification receipt PDA after successful verification
+    /// Accounts: [state (readonly), proof_buffer (readonly), vk_account (readonly),
+    ///            receipt_pda (writable), payer (signer), system_program]
+    CreateReceipt = 60,
 }
 
 // ============================================================================
@@ -299,6 +306,9 @@ pub fn process_instruction(
         52 => process_phase3b2_gemini(program_id, accounts),
         53 => process_phase3c_msm(program_id, accounts),
         54 => process_phase3c_and_pairing(program_id, accounts),
+
+        // Verification receipt
+        60 => process_create_receipt(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -2409,6 +2419,113 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
     sol_log_compute_units();
     Ok(())
 }
+
+// ============================================================================
+// Verification Receipt Instructions
+// ============================================================================
+
+/// Create a verification receipt PDA after successful verification
+///
+/// Accounts:
+/// 0. state_account (readonly) - Must be in Complete phase with verified=1
+/// 1. proof_account (readonly) - For extracting public inputs hash
+/// 2. vk_account (readonly) - For PDA derivation
+/// 3. receipt_pda (writable) - PDA to create
+/// 4. payer (signer) - Pays for account creation
+/// 5. system_program - For CPI
+fn process_create_receipt(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("CreateReceipt");
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+    let vk_account = next_account_info(account_iter)?;
+    let receipt_pda = next_account_info(account_iter)?;
+    let payer = next_account_info(account_iter)?;
+    let system_program = next_account_info(account_iter)?;
+
+    // Verify state account shows successful verification
+    let state_data = state_account.try_borrow_data()?;
+    let state = phased::VerificationState::from_bytes(&state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    if state.get_phase() != phased::Phase::Complete || state.verified != 1 {
+        msg!("Verification not complete or failed");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Compute public inputs hash from proof buffer
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
+    let pi_start = BUFFER_HEADER_SIZE;
+    let pi_end = pi_start + (num_pi * 32);
+    let public_inputs = &proof_data[pi_start..pi_end];
+
+    // Hash public inputs using Keccak256
+    let pi_hash = solana_program::keccak::hash(public_inputs).to_bytes();
+
+    // Derive PDA and verify
+    let seeds: &[&[u8]] = &[phased::RECEIPT_SEED, vk_account.key.as_ref(), &pi_hash];
+    let (expected_pda, bump) = Pubkey::find_program_address(seeds, program_id);
+
+    if expected_pda != *receipt_pda.key {
+        msg!("Invalid receipt PDA");
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    // Create the PDA account
+    let rent = solana_program::rent::Rent::default();
+    let space = phased::VerificationReceipt::SIZE;
+    let lamports = rent.minimum_balance(space);
+
+    let signer_seeds: &[&[u8]] = &[
+        phased::RECEIPT_SEED,
+        vk_account.key.as_ref(),
+        &pi_hash,
+        &[bump],
+    ];
+
+    // Build CreateAccount instruction manually (system program instruction 0)
+    // Layout: [instruction_type(4 bytes LE), lamports(8 bytes LE), space(8 bytes LE), owner(32 bytes)]
+    let mut create_account_data = Vec::with_capacity(4 + 8 + 8 + 32);
+    create_account_data.extend_from_slice(&0u32.to_le_bytes()); // SystemInstruction::CreateAccount = 0
+    create_account_data.extend_from_slice(&lamports.to_le_bytes());
+    create_account_data.extend_from_slice(&(space as u64).to_le_bytes());
+    create_account_data.extend_from_slice(program_id.as_ref());
+
+    let create_account_ix = solana_program::instruction::Instruction {
+        // System program ID (11111111111111111111111111111111)
+        program_id: Pubkey::new_from_array([0u8; 32]),
+        accounts: vec![
+            solana_program::instruction::AccountMeta::new(*payer.key, true),
+            solana_program::instruction::AccountMeta::new(*receipt_pda.key, true),
+        ],
+        data: create_account_data,
+    };
+
+    solana_program::program::invoke_signed(
+        &create_account_ix,
+        &[payer.clone(), receipt_pda.clone(), system_program.clone()],
+        &[signer_seeds],
+    )?;
+
+    // Initialize the receipt with timing data
+    let mut receipt_data = receipt_pda.try_borrow_mut_data()?;
+    let receipt = phased::VerificationReceipt::from_bytes_mut(&mut receipt_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    let clock = solana_program::clock::Clock::get()?;
+    receipt.verified_slot = clock.slot;
+    receipt.verified_timestamp = clock.unix_timestamp;
+
+    msg!("✅ Receipt created at slot {}", clock.slot);
+
+    Ok(())
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
 /// Reconstruct SumcheckChallenges from state account
 fn reconstruct_sumcheck_challenges(

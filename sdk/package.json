@@ -1,0 +1,46 @@
+{
+  "name": "@solana-noir-verifier/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for verifying Noir UltraHonk proofs on Solana",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "solana",
+    "noir",
+    "zk",
+    "zero-knowledge",
+    "ultrahonk",
+    "proof",
+    "verifier"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.90.0",
+    "js-sha3": "^0.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "peerDependencies": {
+    "@solana/web3.js": "^1.90.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -60,26 +60,23 @@ As we iterate toward production, maintain these standards:
 
 The current implementation is proof-of-concept. For production, we need cleaner abstractions:
 
-- [ ] **Proof identification scheme**
-  - **Decision: PDA derived from VK account + PI hash**
+- [x] **Proof identification scheme** ✅
+  - **Implemented: PDA derived from VK account + PI hash**
     ```
-    VerificationReceipt PDA = seeds([vk_account_pubkey, hash(public_inputs)], program_id)
+    VerificationReceipt PDA = seeds(["receipt", vk_account, keccak(public_inputs)], program_id)
     ```
-  - Rationale:
-    - VK already lives in its own account, no need to duplicate in identifier
-    - PI hash commits to what was proven (the statement)
-    - Proof hash not needed - downstream cares "was X proven?" not "were these bytes verified?"
-    - PDA is deterministic - anyone can compute it to look up verification status
-  - Receipt account structure:
+  - Receipt account (16 bytes - minimal):
     ```rust
     pub struct VerificationReceipt {
-        pub vk_account: Pubkey,      // 32 bytes - which circuit
-        pub pi_hash: [u8; 32],       // 32 bytes - what was proven  
-        pub verified_slot: u64,      // 8 bytes - when verified
-        pub verified: bool,          // 1 byte
-        // Total: 73 bytes (+ discriminator if using Anchor)
+        pub verified_slot: u64,       // When verified
+        pub verified_timestamp: i64,  // Unix timestamp
     }
     ```
+  - The VK and PI hash are encoded in the PDA address itself (no duplication)
+  - Instruction: `CreateReceipt (60)`
+  - SDK methods: `deriveReceiptPda()`, `createReceipt()`, `getReceipt()`
+  - For Solana programs: `solana-noir-verifier-cpi` crate with `is_verified()` ✅
+  - Sample integrator program: `examples/sample-integrator/`
 
 - [ ] **Upload integrity verification**
   - Problem: How do we know all chunks were uploaded correctly?
@@ -108,53 +105,25 @@ The current implementation is proof-of-concept. For production, we need cleaner 
   - Include trade-offs considered
   - Reference implementations studied
 
-### 1.3 TypeScript/JavaScript SDK
+### 1.3 TypeScript/JavaScript SDK ✅
 
-Create `@solana-noir-verifier/sdk` package:
+Created `@solana-noir-verifier/sdk` package in `sdk/`:
 
-- [ ] **Core SDK structure**
-  ```
-  sdk/
-  ├── package.json
-  ├── tsconfig.json
-  ├── src/
-  │   ├── index.ts           # Main exports
-  │   ├── client.ts          # SolanaNoirVerifier class
-  │   ├── instructions.ts    # Instruction builders
-  │   ├── accounts.ts        # Account parsing/creation
-  │   ├── types.ts           # TypeScript interfaces
-  │   └── utils.ts           # Helpers
-  └── tests/
-  ```
+- [x] **Core SDK structure** ✅
+  - `sdk/src/index.ts` - Main exports
+  - `sdk/src/client.ts` - SolanaNoirVerifier class
+  - `sdk/src/instructions.ts` - Instruction builders
+  - `sdk/src/types.ts` - TypeScript interfaces + constants
 
-- [ ] **SolanaNoirVerifier class API**
-  ```typescript
-  class SolanaNoirVerifier {
-    // Upload VK to on-chain account (one-time per circuit)
-    async uploadVK(vk: Buffer): Promise<PublicKey>;
-    
-    // Verify a proof (multi-tx flow)
-    async verify(
-      proof: Buffer, 
-      publicInputs: Buffer[],
-      vkAccount: PublicKey
-    ): Promise<VerificationResult>;
-    
-    // Get verification status
-    async getStatus(stateAccount: PublicKey): Promise<VerificationStatus>;
-    
-    // Check if proof was verified (for CPI callers)
-    async wasVerified(
-      proofId: ProofIdentifier
-    ): Promise<VerificationReceipt | null>;
-  }
-  ```
+- [x] **SolanaNoirVerifier class API** ✅
+  - `uploadVK(payer, vk)` - Upload VK to chain
+  - `verify(payer, proof, publicInputs, vkAccount)` - Full verification
+  - `getVerificationState(stateAccount)` - Read state from account
 
-- [ ] **Robust transaction handling**
-  - True parallel sends with batch confirmation
-  - Handle blockhash expiration for long upload sequences
-  - Retry logic for transient failures
+- [x] **Robust transaction handling** ✅
+  - Parallel sends with batch confirmation
   - Progress callbacks for UI integration
+  - Automatic phase orchestration
 
 ### 1.4 Rust CLI Tool
 

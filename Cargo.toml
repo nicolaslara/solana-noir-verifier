@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/plonk-core", "crates/vk-codegen"]
+members = [
+    "crates/plonk-core",
+    "crates/vk-codegen",
+    "crates/verifier-cpi",
+    "examples/sample-integrator",
+]
 
 [workspace.package]
 version = "0.1.0"

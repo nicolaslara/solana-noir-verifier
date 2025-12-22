@@ -359,3 +359,50 @@ pub mod accounts {
     /// VK account (read-only) - optional if VK is embedded
     pub const VK: usize = 2;
 }
+
+// ============================================================================
+// Verification Receipt (PDA for proof identification)
+// ============================================================================
+
+/// Verification Receipt - persistent record that a proof was verified
+///
+/// PDA derivation: `["receipt", vk_account, keccak(public_inputs)]`
+///
+/// The VK account and PI hash are encoded in the PDA address itself,
+/// so we only store timing information in the account data.
+///
+/// To check if a proof was verified:
+/// 1. Compute the expected PDA from (vk_account, pi_hash)
+/// 2. Check if the account exists at that address
+/// 3. Read the timing data if needed
+#[repr(C)]
+pub struct VerificationReceipt {
+    /// Slot when verification completed
+    pub verified_slot: u64,
+    /// Unix timestamp when verification completed
+    pub verified_timestamp: i64,
+}
+
+impl VerificationReceipt {
+    /// Size of the receipt account in bytes (16 bytes)
+    pub const SIZE: usize = 8 + 8; // slot + timestamp
+
+    /// Initialize from account data
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        if data.len() < Self::SIZE {
+            return None;
+        }
+        Some(unsafe { &*(data.as_ptr() as *const Self) })
+    }
+
+    /// Get mutable reference from account data
+    pub fn from_bytes_mut(data: &mut [u8]) -> Option<&mut Self> {
+        if data.len() < Self::SIZE {
+            return None;
+        }
+        Some(unsafe { &mut *(data.as_mut_ptr() as *mut Self) })
+    }
+}
+
+// Verify the size at compile time
+const _: () = assert!(VerificationReceipt::SIZE == 16);

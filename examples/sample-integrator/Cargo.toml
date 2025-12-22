@@ -1,0 +1,16 @@
+[package]
+name = "sample-integrator"
+version = "0.1.0"
+edition = "2021"
+description = "Example Solana program that integrates with solana-noir-verifier"
+
+[features]
+default = []
+no-entrypoint = []
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "3.0"
+solana-noir-verifier-cpi = { path = "../../crates/verifier-cpi" }
