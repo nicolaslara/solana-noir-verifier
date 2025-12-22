@@ -42,6 +42,8 @@ export interface VerificationResult {
   numSteps: number;
   /** All transaction signatures */
   signatures: TransactionSignature[];
+  /** Per-phase CU breakdown (only if verbose: true) */
+  phases?: PhaseResult[];
 }
 
 /**
@@ -52,6 +54,14 @@ export interface ProgressCallback {
 }
 
 /**
+ * Per-phase CU breakdown
+ */
+export interface PhaseResult {
+  name: string;
+  cus: number;
+}
+
+/**
  * Options for proof verification
  */
 export interface VerifyOptions {
@@ -59,6 +69,8 @@ export interface VerifyOptions {
   onProgress?: ProgressCallback;
   /** Skip preflight simulation (faster but less safe) */
   skipPreflight?: boolean;
+  /** Enable verbose mode - returns detailed per-phase CU breakdown */
+  verbose?: boolean;
 }
 
 /**

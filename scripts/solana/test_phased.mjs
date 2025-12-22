@@ -93,7 +93,9 @@ async function main() {
     const verifyStart = Date.now();
     let lastPhase = '';
     
+    const verbose = process.env.VERBOSE === '1';
     const result = await verifier.verify(payer, proof, publicInputs, vkResult.vkAccount, {
+        verbose,
         onProgress: (phase, current, total) => {
             if (phase !== lastPhase) {
                 if (lastPhase) console.log('  ✅ Done');
@@ -109,7 +111,15 @@ async function main() {
     console.log(`\n  Verified: ${result.verified ? '✅ YES' : '❌ NO'}`);
     console.log(`  Total CUs: ${result.totalCUs.toLocaleString()}`);
     console.log(`  Transactions: ${result.numTransactions} (${result.numSteps} sequential steps)`);
-    console.log(`  Time: ${(verifyTime / 1000).toFixed(2)}s\n`);
+    console.log(`  Time: ${(verifyTime / 1000).toFixed(2)}s`);
+    
+    if (result.phases) {
+        console.log('\n  Phase Breakdown:');
+        for (const phase of result.phases) {
+            console.log(`    ${phase.name.padEnd(25)} ${phase.cus.toLocaleString().padStart(10)} CUs`);
+        }
+    }
+    console.log('');
     
     if (!result.verified) {
         console.error('❌ Verification failed!');

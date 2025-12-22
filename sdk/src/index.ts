@@ -43,6 +43,7 @@ export type {
   VerifyOptions,
   ProgressCallback,
   VerificationState,
+  PhaseResult,
 } from './types.js';
 
 export {

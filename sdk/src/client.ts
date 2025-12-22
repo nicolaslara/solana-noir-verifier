@@ -14,6 +14,7 @@ import {
   VerifyOptions,
   VerificationState,
   VerificationPhase,
+  PhaseResult,
   PROOF_SIZE,
   VK_SIZE,
   BUFFER_HEADER_SIZE,
@@ -159,6 +160,7 @@ export class SolanaNoirVerifier {
     const signatures: TransactionSignature[] = [];
     let totalCUs = 0;
     let numSteps = 0; // Sequential steps (parallel uploads = 1 step)
+    const phases: PhaseResult[] = []; // Per-phase CU tracking
 
     // Concatenate public inputs
     const piBuffer = Buffer.concat(publicInputs);
@@ -249,6 +251,7 @@ export class SolanaNoirVerifier {
     signatures.push(phase1Result.signature);
     totalCUs += phase1Result.cus;
     numSteps++;
+    phases.push({ name: 'Phase 1: Challenges', cus: phase1Result.cus });
 
     // Get log_n from state for sumcheck rounds
     const logN = await this.getLogN(stateAccount.publicKey);
@@ -268,6 +271,7 @@ export class SolanaNoirVerifier {
       signatures.push(result.signature);
       totalCUs += result.cus;
       numSteps++;
+      phases.push({ name: `Phase 2: Rounds ${r}-${endRound - 1}`, cus: result.cus });
       roundTx++;
     }
 
@@ -281,6 +285,7 @@ export class SolanaNoirVerifier {
     signatures.push(relationsResult.signature);
     totalCUs += relationsResult.cus;
     numSteps++;
+    phases.push({ name: 'Phase 2d: Relations', cus: relationsResult.cus });
 
     // Phase 3a: Weights
     options?.onProgress?.('phase3a', 0, 1);
@@ -292,6 +297,7 @@ export class SolanaNoirVerifier {
     signatures.push(p3aResult.signature);
     totalCUs += p3aResult.cus;
     numSteps++;
+    phases.push({ name: 'Phase 3a: Weights', cus: p3aResult.cus });
 
     // Phase 3b1: Folding
     options?.onProgress?.('phase3b1', 0, 1);
@@ -303,6 +309,7 @@ export class SolanaNoirVerifier {
     signatures.push(p3b1Result.signature);
     totalCUs += p3b1Result.cus;
     numSteps++;
+    phases.push({ name: 'Phase 3b1: Folding', cus: p3b1Result.cus });
 
     // Phase 3b2: Gemini
     options?.onProgress?.('phase3b2', 0, 1);
@@ -314,6 +321,7 @@ export class SolanaNoirVerifier {
     signatures.push(p3b2Result.signature);
     totalCUs += p3b2Result.cus;
     numSteps++;
+    phases.push({ name: 'Phase 3b2: Gemini', cus: p3b2Result.cus });
 
     // Phase 3c + 4: MSM + Pairing
     options?.onProgress?.('phase3c_pairing', 0, 1);
@@ -325,6 +333,7 @@ export class SolanaNoirVerifier {
     signatures.push(finalResult.signature);
     totalCUs += finalResult.cus;
     numSteps++;
+    phases.push({ name: 'Phase 3c+4: MSM+Pairing', cus: finalResult.cus });
 
     // Read final state
     const state = await this.getVerificationState(stateAccount.publicKey);
@@ -337,6 +346,7 @@ export class SolanaNoirVerifier {
       numTransactions: signatures.length,
       numSteps,
       signatures,
+      phases: options?.verbose ? phases : undefined,
     };
   }
 
