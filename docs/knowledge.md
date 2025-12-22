@@ -756,3 +756,56 @@ For CU reduction strategies, see **[`docs/suggested-optimizations.md`](./suggest
 - Transaction count reduction: 17 → 9 (**-47%**)
 
 Remaining optimizations: FrLimbs in relations, more constant precomputation.
+
+---
+
+## Future Enhancement: Integrator-Funded Verification (Pattern 2)
+
+For use cases where an integrator program wants to fund verification on behalf of users:
+
+### Problem
+- Current design: User pays for proof/state accounts (~0.16 SOL rent deposit)
+- User-funded means users need SOL upfront
+- Integrators may want to subsidize verification costs
+
+### Proposed Solution: CPI with PDA Accounts
+
+The integrator program would:
+1. Derive PDAs for proof/state accounts using `[user_pubkey, nonce]` seeds
+2. Create and fund accounts via CPI to verifier program
+3. Control account lifecycle (prevents user from extracting rent)
+4. Close accounts after verification to reclaim rent
+
+```rust
+// Integrator program creates verification accounts for user
+// PDA seeds: ["verify", user.key, nonce]
+let (proof_pda, proof_bump) = Pubkey::find_program_address(
+    &[b"verify", user.key.as_ref(), &nonce.to_le_bytes()],
+    &integrator_program_id
+);
+
+// Integrator creates account, pays rent
+invoke_signed(
+    &system_instruction::create_account(...),
+    &[integrator.clone(), proof_pda_info.clone()],
+    &[&[b"verify", user.key.as_ref(), &nonce.to_le_bytes(), &[proof_bump]]]
+)?;
+
+// After verification, integrator closes and reclaims
+invoke(
+    &verifier::close_accounts(state, proof, integrator),
+    accounts
+)?;
+```
+
+### Required Changes
+1. Add `CreateAccountsForUser` instruction to verifier (IX ~71)
+2. Accept optional owner override in close accounts
+3. SDK support for CPI account creation
+
+### Use Cases
+- Pay-per-verify SaaS
+- Protocol-subsidized proving
+- Gasless UX (meta-transactions)
+
+This is documented for future implementation when demand arises.
