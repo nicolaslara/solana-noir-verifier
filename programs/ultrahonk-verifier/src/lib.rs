@@ -307,8 +307,15 @@ pub fn process_instruction(
         53 => process_phase3c_msm(program_id, accounts),
         54 => process_phase3c_and_pairing(program_id, accounts),
 
+        // Combined phases (fewer TXs)
+        55 => process_phase2d_and_3a(program_id, accounts), // Relations + Weights (~1.1M CUs)
+        56 => process_phase3b_combined(program_id, accounts), // Folding + Gemini (~800K CUs)
+
         // Verification receipt
         60 => process_create_receipt(program_id, accounts),
+
+        // Account management
+        70 => process_close_accounts(program_id, accounts),
 
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -2157,6 +2164,235 @@ fn process_phase3b2_gemini(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
     Ok(())
 }
 
+// ============================================================================
+// Combined Phase Handlers (fewer TXs)
+// ============================================================================
+
+/// Combined Phase 2d + 3a: Relations + Weights (~1.1M CUs)
+/// Saves 1 TX by running both in sequence
+fn process_phase2d_and_3a(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Combined Phase 2d+3a: relations + weights");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check we're in SumcheckInProgress with all rounds done
+    if state.get_phase() != phased::Phase::SumcheckInProgress {
+        msg!("Invalid phase: expected SumcheckInProgress");
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let log_n = state.log_n as usize;
+    if (state.sumcheck_rounds_completed as usize) < log_n {
+        msg!(
+            "Not all rounds completed: {} < {}",
+            state.sumcheck_rounds_completed,
+            log_n
+        );
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // === PHASE 2d: RELATIONS ===
+    let sumcheck_state = SumcheckRoundsState {
+        target: state.sumcheck_target,
+        pow_partial: state.sumcheck_pow_partial,
+        rounds_completed: state.sumcheck_rounds_completed as usize,
+    };
+
+    let relation_params = plonk_solana_core::RelationParameters {
+        eta: state.eta,
+        eta_two: state.eta_two,
+        eta_three: state.eta_three,
+        beta: state.beta,
+        gamma: state.gamma,
+        public_input_delta: state.public_input_delta,
+    };
+
+    let libra_challenge = if state.libra_challenge == [0u8; 32] {
+        None
+    } else {
+        Some(state.libra_challenge)
+    };
+
+    msg!("Running relations...");
+    sol_log_compute_units();
+
+    let sumcheck_u_challenges: Vec<Fr> = state.sumcheck_challenges.to_vec();
+    verify_sumcheck_relations(
+        &proof,
+        &relation_params,
+        &state.alphas,
+        &sumcheck_u_challenges,
+        &sumcheck_state,
+        libra_challenge.as_ref(),
+    )
+    .map_err(|e| {
+        msg!("Relations failed: {}", e);
+        ProgramError::InvalidAccountData
+    })?;
+
+    state.sumcheck_passed = 1;
+
+    // === PHASE 3a: WEIGHTS ===
+    let challenges = reconstruct_challenges(state);
+
+    msg!("Computing shplemini phase 3a...");
+    sol_log_compute_units();
+
+    let result = shplemini_phase3a(&proof, &challenges, state.log_n as usize).map_err(|e| {
+        msg!("Phase 3a failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save intermediate state
+    for (i, r) in result.r_pows.iter().enumerate() {
+        if i < 28 {
+            state.shplemini_r_pows[i] = r.to_raw_bytes();
+        }
+    }
+    state.shplemini_pos0 = result.pos0.to_raw_bytes();
+    state.shplemini_neg0 = result.neg0.to_raw_bytes();
+    state.shplemini_unshifted = result.unshifted.to_raw_bytes();
+    state.shplemini_shifted = result.shifted.to_raw_bytes();
+    state.shplemini_eval_acc = result.eval_acc.to_raw_bytes();
+
+    state.set_sumcheck_sub_phase(phased::SumcheckSubPhase::RelationsDone);
+    state.set_phase(phased::Phase::MsmInProgress);
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3aDone);
+
+    msg!("Combined Phase 2d+3a complete!");
+    sol_log_compute_units();
+    Ok(())
+}
+
+/// Combined Phase 3b1 + 3b2: Folding + Gemini (~800K CUs)
+/// Saves 1 TX by running both in sequence
+fn process_phase3b_combined(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Combined Phase 3b: folding + gemini");
+    sol_log_compute_units();
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+
+    if !state_account.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    let state = phased::VerificationState::from_bytes_mut(&mut state_data)
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+    // Check phase
+    if state.get_phase() != phased::Phase::MsmInProgress
+        || state.get_shplemini_sub_phase() != phased::ShpleminiSubPhase::Phase3aDone
+    {
+        msg!("Invalid phase: expected MsmInProgress(Phase3aDone)");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Read proof data
+    let proof_data = proof_account.try_borrow_data()?;
+    let num_pi = state.num_public_inputs as usize;
+    let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);
+    let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
+    let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
+
+    let proof = plonk_solana_core::proof::Proof::from_bytes(
+        proof_bytes,
+        state.log_n as usize,
+        state.is_zk != 0,
+    )
+    .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    let challenges = reconstruct_challenges(state);
+    let phase3a_result = ShpleminiPhase3aResult {
+        r_pows: state
+            .shplemini_r_pows
+            .iter()
+            .map(|b| FrLimbs::from_raw_bytes(b))
+            .collect(),
+        pos0: FrLimbs::from_raw_bytes(&state.shplemini_pos0),
+        neg0: FrLimbs::from_raw_bytes(&state.shplemini_neg0),
+        unshifted: FrLimbs::from_raw_bytes(&state.shplemini_unshifted),
+        shifted: FrLimbs::from_raw_bytes(&state.shplemini_shifted),
+        eval_acc: FrLimbs::from_raw_bytes(&state.shplemini_eval_acc),
+    };
+
+    // === PHASE 3b1: FOLDING ===
+    msg!("Computing folding...");
+    sol_log_compute_units();
+
+    let fold_result =
+        shplemini_phase3b1(&proof, &challenges, &phase3a_result, state.log_n as usize).map_err(
+            |e| {
+                msg!("Phase 3b1 failed: {}", e);
+                state.set_phase(phased::Phase::Failed);
+                ProgramError::InvalidAccountData
+            },
+        )?;
+
+    // === PHASE 3b2: GEMINI ===
+    msg!("Computing gemini + libra...");
+    sol_log_compute_units();
+
+    let result = shplemini_phase3b2(
+        &proof,
+        &challenges,
+        &phase3a_result,
+        &fold_result,
+        state.log_n as usize,
+    )
+    .map_err(|e| {
+        msg!("Phase 3b2 failed: {}", e);
+        state.set_phase(phased::Phase::Failed);
+        ProgramError::InvalidAccountData
+    })?;
+
+    // Save intermediate state
+    state.shplemini_const_acc = result.const_acc.to_raw_bytes();
+    for (i, s) in result.gemini_scalars.iter().enumerate() {
+        if i < 27 {
+            state.shplemini_gemini_scalars[i] = s.to_raw_bytes();
+        }
+    }
+    for (i, s) in result.libra_scalars.iter().enumerate() {
+        if i < 3 {
+            state.shplemini_libra_scalars[i] = s.to_raw_bytes();
+        }
+    }
+
+    state.set_shplemini_sub_phase(phased::ShpleminiSubPhase::Phase3b2Done);
+
+    msg!("Combined Phase 3b complete!");
+    sol_log_compute_units();
+    Ok(())
+}
+
 /// Phase 3c: MSM computation (~500K CUs)
 /// Phase 3c: Compute MSM
 /// Accounts:
@@ -2565,6 +2801,80 @@ fn reconstruct_challenges(state: &phased::VerificationState) -> Challenges {
         shplonk_nu: state.shplonk_nu,
         shplonk_z: state.shplonk_z,
     }
+}
+
+// ============================================================================
+// Account Management
+// ============================================================================
+
+/// Close proof and state accounts, recovering rent to payer
+///
+/// Accounts:
+/// 0. state_account (writable) - State account to close (must be Complete or Failed)
+/// 1. proof_account (writable) - Proof buffer account to close
+/// 2. payer (signer, writable) - Receives the lamports
+///
+/// Only closes if verification is complete or failed.
+/// VK and Receipt accounts are NOT closed (they should persist).
+fn process_close_accounts(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    msg!("Closing verification accounts");
+
+    let account_iter = &mut accounts.iter();
+    let state_account = next_account_info(account_iter)?;
+    let proof_account = next_account_info(account_iter)?;
+    let payer = next_account_info(account_iter)?;
+
+    // Verify payer is signer
+    if !payer.is_signer {
+        msg!("Payer must be signer");
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Check state phase - only close if Complete or Failed
+    let state_data = state_account.try_borrow_data()?;
+    if state_data.len() >= 1 {
+        let phase = state_data[0];
+        // Phase::Complete = 7, Phase::Failed = 255
+        if phase != 7 && phase != 255 {
+            msg!(
+                "Can only close after verification complete or failed (phase={})",
+                phase
+            );
+            return Err(ProgramError::InvalidAccountData);
+        }
+    }
+    drop(state_data);
+
+    // Transfer lamports from state account to payer
+    let state_lamports = state_account.lamports();
+    **state_account.try_borrow_mut_lamports()? = 0;
+    **payer.try_borrow_mut_lamports()? = payer
+        .lamports()
+        .checked_add(state_lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    // Zero out state account data
+    let mut state_data = state_account.try_borrow_mut_data()?;
+    state_data.fill(0);
+    drop(state_data);
+
+    // Transfer lamports from proof account to payer
+    let proof_lamports = proof_account.lamports();
+    **proof_account.try_borrow_mut_lamports()? = 0;
+    **payer.try_borrow_mut_lamports()? = payer
+        .lamports()
+        .checked_add(proof_lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    // Zero out proof account data
+    let mut proof_data = proof_account.try_borrow_mut_data()?;
+    proof_data.fill(0);
+
+    msg!(
+        "Accounts closed, {} lamports recovered",
+        state_lamports + proof_lamports
+    );
+    Ok(())
 }
 
 // ============================================================================

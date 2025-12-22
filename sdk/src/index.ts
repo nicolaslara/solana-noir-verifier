@@ -72,7 +72,10 @@ export {
   IX_PHASE3B1_FOLDING,
   IX_PHASE3B2_GEMINI,
   IX_PHASE3C_AND_PAIRING,
+  IX_PHASE2D_AND_3A,
+  IX_PHASE3B_COMBINED,
   IX_CREATE_RECEIPT,
+  IX_CLOSE_ACCOUNTS,
 } from './types.js';
 
 export {
@@ -89,8 +92,12 @@ export {
   createPhase3b1Instruction,
   createPhase3b2Instruction,
   createPhase3cAndPairingInstruction,
+  createPhase2dAnd3aInstruction,
+  createPhase3bCombinedInstruction,
   createAccountInstruction,
   // Receipt instructions
   createReceiptInstruction,
+  // Account management
+  createCloseAccountsInstruction,
 } from './instructions.js';
 

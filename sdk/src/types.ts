@@ -117,7 +117,10 @@ export const IX_PHASE3A_WEIGHTS = 50;
 export const IX_PHASE3B1_FOLDING = 51;
 export const IX_PHASE3B2_GEMINI = 52;
 export const IX_PHASE3C_AND_PAIRING = 54;
+export const IX_PHASE2D_AND_3A = 55; // Combined: Relations + Weights
+export const IX_PHASE3B_COMBINED = 56; // Combined: Folding + Gemini
 export const IX_CREATE_RECEIPT = 60;
+export const IX_CLOSE_ACCOUNTS = 70;
 
 // Receipt PDA constants
 export const RECEIPT_SEED = 'receipt';

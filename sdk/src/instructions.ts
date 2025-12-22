@@ -16,7 +16,10 @@ import {
   IX_PHASE3B1_FOLDING,
   IX_PHASE3B2_GEMINI,
   IX_PHASE3C_AND_PAIRING,
+  IX_PHASE2D_AND_3A,
+  IX_PHASE3B_COMBINED,
   IX_CREATE_RECEIPT,
+  IX_CLOSE_ACCOUNTS,
 } from './types.js';
 
 /**
@@ -246,6 +249,44 @@ export function createPhase3cAndPairingInstruction(
 }
 
 /**
+ * Create combined Phase 2d+3a instruction (Relations + Weights)
+ * Saves 1 TX by combining relations check with weight computation
+ */
+export function createPhase2dAnd3aInstruction(
+  programId: PublicKey,
+  stateAccount: PublicKey,
+  proofAccount: PublicKey
+): TransactionInstruction {
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: stateAccount, isSigner: false, isWritable: true },
+      { pubkey: proofAccount, isSigner: false, isWritable: false },
+    ],
+    programId,
+    data: Buffer.from([IX_PHASE2D_AND_3A]),
+  });
+}
+
+/**
+ * Create combined Phase 3b instruction (Folding + Gemini)
+ * Saves 1 TX by combining folding with gemini computation
+ */
+export function createPhase3bCombinedInstruction(
+  programId: PublicKey,
+  stateAccount: PublicKey,
+  proofAccount: PublicKey
+): TransactionInstruction {
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: stateAccount, isSigner: false, isWritable: true },
+      { pubkey: proofAccount, isSigner: false, isWritable: false },
+    ],
+    programId,
+    data: Buffer.from([IX_PHASE3B_COMBINED]),
+  });
+}
+
+/**
  * Create account with rent exemption
  */
 export function createAccountInstruction(
@@ -294,6 +335,31 @@ export function createReceiptInstruction(
     ],
     programId,
     data: Buffer.from([IX_CREATE_RECEIPT]),
+  });
+}
+
+/**
+ * Create close accounts instruction to recover rent
+ * 
+ * Accounts:
+ * 0. state_account (writable) - Must be Complete or Failed
+ * 1. proof_account (writable) - Proof buffer to close
+ * 2. payer (signer, writable) - Receives recovered lamports
+ */
+export function createCloseAccountsInstruction(
+  programId: PublicKey,
+  stateAccount: PublicKey,
+  proofAccount: PublicKey,
+  payer: PublicKey
+): TransactionInstruction {
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: stateAccount, isSigner: false, isWritable: true },
+      { pubkey: proofAccount, isSigner: false, isWritable: true },
+      { pubkey: payer, isSigner: true, isWritable: true },
+    ],
+    programId,
+    data: Buffer.from([IX_CLOSE_ACCOUNTS]),
   });
 }
 

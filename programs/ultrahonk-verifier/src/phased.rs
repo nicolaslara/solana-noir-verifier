@@ -364,6 +364,9 @@ pub mod accounts {
 // Verification Receipt (PDA for proof identification)
 // ============================================================================
 
+/// PDA seed for verification receipts
+pub const RECEIPT_SEED: &[u8] = b"receipt";
+
 /// Verification Receipt - persistent record that a proof was verified
 ///
 /// PDA derivation: `["receipt", vk_account, keccak(public_inputs)]`

@@ -33,13 +33,12 @@ import {
   createSetPublicInputsInstruction,
   createPhase1Instruction,
   createPhase2RoundsInstruction,
-  createPhase2RelationsInstruction,
-  createPhase3aInstruction,
-  createPhase3b1Instruction,
-  createPhase3b2Instruction,
+  createPhase2dAnd3aInstruction,
+  createPhase3bCombinedInstruction,
   createPhase3cAndPairingInstruction,
   createAccountInstruction,
   createReceiptInstruction,
+  createCloseAccountsInstruction,
 } from './instructions.js';
 // @ts-ignore - no types available
 import { keccak256 } from 'js-sha3';
@@ -275,53 +274,29 @@ export class SolanaNoirVerifier {
       roundTx++;
     }
 
-    // Phase 2d: Relations
-    options?.onProgress?.('phase2_relations', 0, 1);
-    const relationsResult = await this.executePhase(
+    // Combined Phase 2d+3a: Relations + Weights (~1.1M CUs, saves 1 TX)
+    options?.onProgress?.('phase2d_and_3a', 0, 1);
+    const relationsAnd3aResult = await this.executePhase(
       payer,
-      createPhase2RelationsInstruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
+      createPhase2dAnd3aInstruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
       true
     );
-    signatures.push(relationsResult.signature);
-    totalCUs += relationsResult.cus;
+    signatures.push(relationsAnd3aResult.signature);
+    totalCUs += relationsAnd3aResult.cus;
     numSteps++;
-    phases.push({ name: 'Phase 2d: Relations', cus: relationsResult.cus });
+    phases.push({ name: 'Phase 2d+3a: Relations+Weights', cus: relationsAnd3aResult.cus });
 
-    // Phase 3a: Weights
-    options?.onProgress?.('phase3a', 0, 1);
-    const p3aResult = await this.executePhase(
+    // Combined Phase 3b: Folding + Gemini (~800K CUs, saves 1 TX)
+    options?.onProgress?.('phase3b_combined', 0, 1);
+    const p3bResult = await this.executePhase(
       payer,
-      createPhase3aInstruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
+      createPhase3bCombinedInstruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
       true
     );
-    signatures.push(p3aResult.signature);
-    totalCUs += p3aResult.cus;
+    signatures.push(p3bResult.signature);
+    totalCUs += p3bResult.cus;
     numSteps++;
-    phases.push({ name: 'Phase 3a: Weights', cus: p3aResult.cus });
-
-    // Phase 3b1: Folding
-    options?.onProgress?.('phase3b1', 0, 1);
-    const p3b1Result = await this.executePhase(
-      payer,
-      createPhase3b1Instruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
-      true
-    );
-    signatures.push(p3b1Result.signature);
-    totalCUs += p3b1Result.cus;
-    numSteps++;
-    phases.push({ name: 'Phase 3b1: Folding', cus: p3b1Result.cus });
-
-    // Phase 3b2: Gemini
-    options?.onProgress?.('phase3b2', 0, 1);
-    const p3b2Result = await this.executePhase(
-      payer,
-      createPhase3b2Instruction(this.programId, stateAccount.publicKey, proofAccount.publicKey),
-      true
-    );
-    signatures.push(p3b2Result.signature);
-    totalCUs += p3b2Result.cus;
-    numSteps++;
-    phases.push({ name: 'Phase 3b2: Gemini', cus: p3b2Result.cus });
+    phases.push({ name: 'Phase 3b: Folding+Gemini', cus: p3bResult.cus });
 
     // Phase 3c + 4: MSM + Pairing
     options?.onProgress?.('phase3c_pairing', 0, 1);
@@ -457,6 +432,38 @@ export class SolanaNoirVerifier {
     const verifiedTimestamp = accountInfo.data.readBigInt64LE(8);
 
     return { receiptPda, verifiedSlot, verifiedTimestamp };
+  }
+
+  /**
+   * Close proof and state accounts to recover rent
+   * 
+   * @param payer - The keypair that receives the recovered lamports
+   * @param stateAccount - The state account to close
+   * @param proofAccount - The proof buffer account to close
+   * @returns The recovered lamports amount and transaction signature
+   */
+  async closeAccounts(
+    payer: Keypair,
+    stateAccount: PublicKey,
+    proofAccount: PublicKey
+  ): Promise<{ recoveredLamports: number; signature: TransactionSignature }> {
+    // Get current balances
+    const stateInfo = await this.connection.getAccountInfo(stateAccount);
+    const proofInfo = await this.connection.getAccountInfo(proofAccount);
+    const recoveredLamports = (stateInfo?.lamports ?? 0) + (proofInfo?.lamports ?? 0);
+
+    const tx = new Transaction().add(
+      createCloseAccountsInstruction(
+        this.programId,
+        stateAccount,
+        proofAccount,
+        payer.publicKey
+      )
+    );
+
+    const signature = await this.sendAndConfirm(tx, [payer], true);
+
+    return { recoveredLamports, signature };
   }
 
   private async getLogN(stateAccount: PublicKey): Promise<number> {
