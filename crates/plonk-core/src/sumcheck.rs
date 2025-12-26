@@ -15,7 +15,9 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::field::{batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_sub, FrLimbs};
+use crate::field::{
+    batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_sub, FrLimbs,
+};
 use crate::proof::Proof;
 use crate::types::{Fr, SCALAR_ONE, SCALAR_ZERO};
 
@@ -311,6 +313,7 @@ fn check_round_sum(univariate: &[Fr], target: &Fr) -> bool {
 
 /// FrLimbs version: check if u[0] + u[1] == target
 #[inline]
+#[allow(dead_code)]
 fn check_round_sum_l(u0: &FrLimbs, u1: &FrLimbs, target: &FrLimbs) -> bool {
     let sum = u0.add(u1);
     sum == *target
@@ -426,6 +429,7 @@ fn next_target_batch_limbs(univariate: &[Fr], chi: &Fr, is_zk: bool) -> Result<F
 
 /// Fully FrLimbs-native version: takes FrLimbs inputs, returns FrLimbs
 /// For use in loops where state is kept in FrLimbs throughout
+#[allow(dead_code)]
 fn next_target_l(
     univariate: &[FrLimbs],
     chi: &FrLimbs,
@@ -552,6 +556,7 @@ fn update_pow(pow: &Fr, gate_challenge: &Fr, chi: &Fr) -> Fr {
 /// pow = pow * (1 + χ * (gate_challenge - 1))
 /// For use when caller maintains state in FrLimbs
 #[inline]
+#[allow(dead_code)]
 fn update_pow_l(pow: &FrLimbs, gate_challenge: &FrLimbs, chi: &FrLimbs) -> FrLimbs {
     // gate_challenge - 1
     let gc_minus_one = gate_challenge.sub(&FrLimbs::ONE);
@@ -609,7 +614,7 @@ fn verify_sumcheck_rounds(
         let univariate = proof.sumcheck_univariates_for_round(round);
 
         // Check round sum: u[0] + u[1] == target
-        let sum = fr_add(&univariate[0], &univariate[1]);
+        let _sum = fr_add(&univariate[0], &univariate[1]);
         if round < 3 {
             crate::trace!("--- Round {} ---", round);
             crate::dbg_fr!(&alloc::format!("u[{}][0]", round), &univariate[0]);
@@ -906,9 +911,9 @@ pub fn verify_sumcheck(
             // target = grand * (1-eval) + libra_term
             // grand = (target - libra_term) / (1-eval)
             let numerator = fr_sub(&target, &libra_term);
-            if let Some(expected_grand) = crate::field::fr_div(&numerator, &one_minus_eval) {
+            if let Some(_expected_grand) = crate::field::fr_div(&numerator, &one_minus_eval) {
                 crate::trace!("===== EXPECTED VS ACTUAL =====");
-                crate::dbg_fr!("expected grand_before_ZK (from target)", &expected_grand);
+                crate::dbg_fr!("expected grand_before_ZK (from target)", &_expected_grand);
                 crate::dbg_fr!(
                     "actual grand_before_ZK",
                     &accumulate_relations(proof, relation_params, &challenges.alphas, &pow_partial)
