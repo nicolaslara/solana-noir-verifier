@@ -34,7 +34,7 @@ jobs:
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: stable
+        toolchain: 1.91.1
 
     - name: Install Solana CLI
       run: |

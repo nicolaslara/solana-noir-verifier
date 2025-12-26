@@ -22,7 +22,7 @@ jobs:
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: stable
+        toolchain: 1.91.1
         components: rustfmt, clippy
 
     - name: Cache cargo registry
@@ -69,23 +69,20 @@ jobs:
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: stable
+        toolchain: 1.91.1
 
     - name: Install Solana CLI
       run: |
         sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
         echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
 
     - name: Verify Solana installation
       run: |
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         solana --version
         cargo build-sbf --version
 
     - name: Build BPF programs
       run: |
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         cd programs/ultrahonk-verifier
         CIRCUIT=simple_square cargo build-sbf
 
@@ -105,7 +102,7 @@ jobs:
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: stable
+        toolchain: 1.91.1
 
     - name: Check for compilation warnings
       run: |
