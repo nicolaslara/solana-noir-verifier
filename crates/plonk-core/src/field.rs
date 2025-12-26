@@ -237,6 +237,7 @@ fn mont_mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         let m = t[0].wrapping_mul(INV);
 
         // t += m * r
+        carry = 0;
         let (_, hi) = mac(t[0], m, R[0], 0);
         carry = hi;
 
@@ -631,7 +632,6 @@ pub fn fr_from_hex(hex: &str) -> Fr {
 // --- Internal functions for limb arithmetic ---
 
 /// r - 2 (for computing inverse via Fermat's little theorem)
-#[allow(dead_code)]
 const R_MINUS_2: [u64; 4] = [
     0x43e1f593efffffff, // limb 0 (least significant)
     0x2833e84879b97091, // limb 1
@@ -661,7 +661,6 @@ fn sub_mod(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 }
 
 /// Multiply two 256-bit numbers mod r using widening multiplication
-#[allow(dead_code)]
 fn mul_mod_wide(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     // First compute full 512-bit product
     let mut wide = [0u64; 8];
@@ -682,7 +681,6 @@ fn mul_mod_wide(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 
 /// 2^256 mod r
 /// r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
-#[allow(dead_code)]
 const TWO_256_MOD_R: [u64; 4] = [
     0xac96341c4ffffffb, // limb 0 (least significant)
     0x36fc76959f60cd29, // limb 1
@@ -691,7 +689,6 @@ const TWO_256_MOD_R: [u64; 4] = [
 ];
 
 /// Reduce a 512-bit number mod r
-#[allow(dead_code)]
 fn reduce_512(wide: &[u64; 8]) -> [u64; 4] {
     // Split into low (256 bits) and high (256 bits)
     let mut low = [wide[0], wide[1], wide[2], wide[3]];
@@ -726,7 +723,6 @@ fn reduce_512(wide: &[u64; 8]) -> [u64; 4] {
     low
 }
 
-#[allow(dead_code)]
 fn is_zero_4(a: &[u64; 4]) -> bool {
     a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0
 }
@@ -734,7 +730,6 @@ fn is_zero_4(a: &[u64; 4]) -> bool {
 /// Multiply two 256-bit numbers to get 512-bit result (no reduction)
 /// Karatsuba multiplication for 4x4 limbs -> 8 limbs
 /// Reduces from 16 64-bit multiplications to ~12 (25% fewer)
-#[allow(dead_code)]
 fn mul_wide_4x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
     // Split into high and low 128-bit halves (2 limbs each)
     // a = a_hi * 2^128 + a_lo
@@ -816,7 +811,6 @@ fn mul_wide_4x4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
 
 /// Multiply two 2-limb (128-bit) numbers -> 4 limbs (256 bits)
 /// Uses schoolbook for the base case (4 64-bit multiplications)
-#[allow(dead_code)]
 #[inline(always)]
 fn mul_2x2(a: &[u64; 2], b: &[u64; 2]) -> [u64; 4] {
     let mut result = [0u64; 4];
@@ -836,7 +830,6 @@ fn mul_2x2(a: &[u64; 2], b: &[u64; 2]) -> [u64; 4] {
 }
 
 /// Multiply two u64 with accumulator and carry: a*b + c + carry -> (lo, hi)
-#[allow(dead_code)]
 #[inline(always)]
 fn mul64(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
     let product = (a as u128) * (b as u128) + (c as u128) + (carry as u128);
@@ -844,7 +837,6 @@ fn mul64(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
 }
 
 /// Add two 2-limb numbers, return result and carry
-#[allow(dead_code)]
 #[inline(always)]
 fn add_2x2(a: &[u64; 2], b: &[u64; 2]) -> ([u64; 2], bool) {
     let (r0, c0) = a[0].overflowing_add(b[0]);
@@ -854,7 +846,6 @@ fn add_2x2(a: &[u64; 2], b: &[u64; 2]) -> ([u64; 2], bool) {
 }
 
 /// Add two 4-limb numbers without overflow tracking
-#[allow(dead_code)]
 #[inline(always)]
 fn add_4x4_no_overflow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let (r0, c0) = a[0].overflowing_add(b[0]);
@@ -868,7 +859,6 @@ fn add_4x4_no_overflow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 }
 
 /// Subtract two 4-limb numbers (a - b), assumes a >= b or wraps
-#[allow(dead_code)]
 #[inline(always)]
 fn sub_4x4_with_borrow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let (r0, borrow0) = a[0].overflowing_sub(b[0]);
@@ -882,7 +872,6 @@ fn sub_4x4_with_borrow(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 }
 
 /// Compute a^exp mod r using square-and-multiply
-#[allow(dead_code)]
 fn pow_mod(base: &[u64; 4], exp: &[u64; 4]) -> [u64; 4] {
     let mut result = [0u64; 4];
     result[0] = 1; // result = 1
@@ -947,7 +936,6 @@ fn gte(a: &[u64; 4], b: &[u64; 4]) -> bool {
 }
 
 /// Multiply two u64 with carry: (a * b + c + carry) = (hi, lo)
-#[allow(dead_code)]
 fn mul_with_carry(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
     let product = (a as u128) * (b as u128) + (c as u128) + (carry as u128);
     (product as u64, (product >> 64) as u64)
