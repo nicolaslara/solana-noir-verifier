@@ -260,6 +260,51 @@ pub enum BufferStatus {
 // Instruction Processing
 // ============================================================================
 
+/// Validate that all proof chunks have been uploaded
+fn validate_proof_chunks_complete(proof_data: &[u8]) -> ProgramResult {
+    // Check buffer status
+    if proof_data[0] != BufferStatus::Ready as u8 {
+        msg!("ERROR: Proof buffer not ready. Upload all chunks before verification.");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Validate chunk bitmap
+    let bitmap = u32::from_le_bytes([
+        proof_data[5],
+        proof_data[6],
+        proof_data[7],
+        proof_data[8],
+    ]);
+
+    let num_chunks = (PROOF_SIZE + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+    let expected_bitmap = if num_chunks >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << num_chunks) - 1
+    };
+
+    if bitmap != expected_bitmap {
+        let uploaded = bitmap.count_ones();
+        msg!(
+            "ERROR: Incomplete proof upload. Expected {} chunks, only {} uploaded.",
+            num_chunks,
+            uploaded
+        );
+        msg!(
+            "Bitmap: {:#034b} (uploaded chunks marked as 1)",
+            bitmap
+        );
+        msg!(
+            "Expected: {:#034b}",
+            expected_bitmap
+        );
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    msg!("✓ All {} proof chunks validated", num_chunks);
+    Ok(())
+}
+
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -790,12 +835,8 @@ fn process_phased_generate_challenges(
     // Read proof data from proof account
     let proof_data = proof_account.try_borrow_data()?;
 
-    // Parse proof buffer header
-    let status = proof_data[0];
-    if status != BufferStatus::Ready as u8 {
-        msg!("Proof buffer not ready");
-        return Err(ProgramError::InvalidAccountData);
-    }
+    // Validate all chunks are uploaded
+    validate_proof_chunks_complete(&proof_data)?;
 
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
@@ -1120,32 +1161,9 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
 
     // Read proof buffer header
     let proof_data = proof_account.try_borrow_data()?;
-    if proof_data[0] != BufferStatus::Ready as u8 {
-        msg!("Proof buffer not ready");
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // Validate all chunks are uploaded
-    let bitmap = u32::from_le_bytes([
-        proof_data[5],
-        proof_data[6],
-        proof_data[7],
-        proof_data[8],
-    ]);
-    let num_chunks = (PROOF_SIZE + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
-    let expected_bitmap = if num_chunks >= 32 {
-        u32::MAX
-    } else {
-        (1u32 << num_chunks) - 1
-    };
-    if bitmap != expected_bitmap {
-        msg!(
-            "Incomplete proof upload: bitmap={:#034b}, expected={:#034b}",
-            bitmap,
-            expected_bitmap
-        );
-        return Err(ProgramError::InvalidAccountData);
-    }
+    validate_proof_chunks_complete(&proof_data)?;
 
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
@@ -1337,10 +1355,9 @@ fn process_phase1a_eta_beta_gamma(_program_id: &Pubkey, accounts: &[AccountInfo]
 
     // Read proof data
     let proof_data = proof_account.try_borrow_data()?;
-    if proof_data[0] != BufferStatus::Ready as u8 {
-        msg!("Proof buffer not ready");
-        return Err(ProgramError::InvalidAccountData);
-    }
+
+    // Validate all chunks are uploaded
+    validate_proof_chunks_complete(&proof_data)?;
 
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
