@@ -160,6 +160,9 @@ export class SolanaNoirVerifier {
     let totalCUs = 0;
     let numSteps = 0; // Sequential steps (parallel uploads = 1 step)
     const phases: PhaseResult[] = []; // Per-phase CU tracking
+    const autoClose = options?.autoClose ?? true; // Default to true
+    let recoveredLamports = 0;
+    let accountsClosed = false;
 
     // Concatenate public inputs
     const piBuffer = Buffer.concat(publicInputs);
@@ -187,34 +190,37 @@ export class SolanaNoirVerifier {
       );
     }
 
-    if (piBuffer.length <= PI_BUNDLE_THRESHOLD) {
-      // Create accounts + init + set public inputs in one TX
-      const setupTx = new Transaction()
-        .add(createAccountInstruction(payer.publicKey, proofAccount.publicKey, proofRent, proofBufferSize, this.programId))
-        .add(createAccountInstruction(payer.publicKey, stateAccount.publicKey, stateRent, STATE_SIZE, this.programId))
-        .add(createInitBufferInstruction(this.programId, proofAccount.publicKey, numPi))
-        .add(createSetPublicInputsInstruction(this.programId, proofAccount.publicKey, piBuffer));
+    try {
+      // --- Verification logic wrapped in try-finally for cleanup ---
 
-      const setupSig = await this.sendAndConfirm(setupTx, [payer, proofAccount, stateAccount]);
-      signatures.push(setupSig);
-      numSteps++;
-    } else {
-      // Split: accounts + init in one TX, PI in another
-      const accountsTx = new Transaction()
-        .add(createAccountInstruction(payer.publicKey, proofAccount.publicKey, proofRent, proofBufferSize, this.programId))
-        .add(createAccountInstruction(payer.publicKey, stateAccount.publicKey, stateRent, STATE_SIZE, this.programId))
-        .add(createInitBufferInstruction(this.programId, proofAccount.publicKey, numPi));
+      if (piBuffer.length <= PI_BUNDLE_THRESHOLD) {
+        // Create accounts + init + set public inputs in one TX
+        const setupTx = new Transaction()
+          .add(createAccountInstruction(payer.publicKey, proofAccount.publicKey, proofRent, proofBufferSize, this.programId))
+          .add(createAccountInstruction(payer.publicKey, stateAccount.publicKey, stateRent, STATE_SIZE, this.programId))
+          .add(createInitBufferInstruction(this.programId, proofAccount.publicKey, numPi))
+          .add(createSetPublicInputsInstruction(this.programId, proofAccount.publicKey, piBuffer));
 
-      const accountsSig = await this.sendAndConfirm(accountsTx, [payer, proofAccount, stateAccount]);
-      signatures.push(accountsSig);
+        const setupSig = await this.sendAndConfirm(setupTx, [payer, proofAccount, stateAccount]);
+        signatures.push(setupSig);
+        numSteps++;
+      } else {
+        // Split: accounts + init in one TX, PI in another
+        const accountsTx = new Transaction()
+          .add(createAccountInstruction(payer.publicKey, proofAccount.publicKey, proofRent, proofBufferSize, this.programId))
+          .add(createAccountInstruction(payer.publicKey, stateAccount.publicKey, stateRent, STATE_SIZE, this.programId))
+          .add(createInitBufferInstruction(this.programId, proofAccount.publicKey, numPi));
 
-      const piTx = new Transaction()
-        .add(createSetPublicInputsInstruction(this.programId, proofAccount.publicKey, piBuffer));
+        const accountsSig = await this.sendAndConfirm(accountsTx, [payer, proofAccount, stateAccount]);
+        signatures.push(accountsSig);
 
-      const piSig = await this.sendAndConfirm(piTx, [payer]);
-      signatures.push(piSig);
-      numSteps += 2;
-    }
+        const piTx = new Transaction()
+          .add(createSetPublicInputsInstruction(this.programId, proofAccount.publicKey, piBuffer));
+
+        const piSig = await this.sendAndConfirm(piTx, [payer]);
+        signatures.push(piSig);
+        numSteps += 2;
+      }
 
     // Upload proof chunks in parallel
     options?.onProgress?.('upload', 0, 1);
@@ -310,19 +316,35 @@ export class SolanaNoirVerifier {
     numSteps++;
     phases.push({ name: 'Phase 3c+4: MSM+Pairing', cus: finalResult.cus });
 
-    // Read final state
-    const state = await this.getVerificationState(stateAccount.publicKey);
+      // Read final state
+      const state = await this.getVerificationState(stateAccount.publicKey);
 
-    return {
-      verified: state.verified,
-      stateAccount: stateAccount.publicKey,
-      proofAccount: proofAccount.publicKey,
-      totalCUs,
-      numTransactions: signatures.length,
-      numSteps,
-      signatures,
-      phases: options?.verbose ? phases : undefined,
-    };
+      return {
+        verified: state.verified,
+        stateAccount: stateAccount.publicKey,
+        proofAccount: proofAccount.publicKey,
+        totalCUs,
+        numTransactions: signatures.length,
+        numSteps,
+        signatures,
+        phases: options?.verbose ? phases : undefined,
+        recoveredLamports: accountsClosed ? recoveredLamports : undefined,
+        accountsClosed: accountsClosed ? true : undefined,
+      };
+    } finally {
+      // Clean up accounts to reclaim rent (on both success and failure)
+      if (autoClose) {
+        try {
+          const closeResult = await this.closeAccounts(payer, stateAccount.publicKey, proofAccount.publicKey);
+          recoveredLamports = closeResult.recoveredLamports;
+          accountsClosed = true;
+          signatures.push(closeResult.signature);
+        } catch (closeError) {
+          // Log but don't throw - cleanup is best-effort
+          console.warn('Failed to close accounts:', closeError);
+        }
+      }
+    }
   }
 
   /**

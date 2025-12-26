@@ -84,8 +84,8 @@ pub const VK_SIZE: usize = 1760;
 /// Maximum chunk size for uploads (to fit in tx)
 pub const MAX_CHUNK_SIZE: usize = 1020;
 
-/// Header size in proof buffer: status (1) + proof_len (2) + pi_count (2)
-pub const BUFFER_HEADER_SIZE: usize = 5;
+/// Header size in proof buffer: status (1) + proof_len (2) + pi_count (2) + chunk_bitmap (4)
+pub const BUFFER_HEADER_SIZE: usize = 9;
 
 /// Header size in VK buffer: status (1) + vk_len (2)
 pub const VK_HEADER_SIZE: usize = 3;
@@ -244,8 +244,9 @@ pub enum Instruction {
 /// [0]:       status (0=empty, 1=uploading, 2=ready)
 /// [1..3]:    proof_length (u16 LE)
 /// [3..5]:    public_inputs_count (u16 LE)
-/// [5..5+PI]: public inputs (32 bytes each)
-/// [5+PI..]:  proof data
+/// [5..9]:    chunk_bitmap (u32 LE) - tracks which chunks have been uploaded (supports up to 32 chunks)
+/// [9..9+PI]: public inputs (32 bytes each)
+/// [9+PI..]:  proof data
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq)]
@@ -361,6 +362,7 @@ fn process_init_buffer(
     buffer_data[0] = BufferStatus::Empty as u8;
     buffer_data[1..3].copy_from_slice(&0u16.to_le_bytes()); // proof_len = 0
     buffer_data[3..5].copy_from_slice(&num_pi.to_le_bytes());
+    buffer_data[5..9].copy_from_slice(&0u32.to_le_bytes()); // chunk_bitmap = 0
 
     msg!("Buffer initialized for {} public inputs", num_pi);
     Ok(())
@@ -422,11 +424,39 @@ fn process_upload_chunk(
         buffer_data[1..3].copy_from_slice(&new_len.to_le_bytes());
     }
 
-    // Mark ready if full proof uploaded
-    let proof_len = u16::from_le_bytes([buffer_data[1], buffer_data[2]]) as usize;
-    if proof_len >= PROOF_SIZE {
+    // Mark this chunk as uploaded in the bitmap
+    let chunk_num = offset / MAX_CHUNK_SIZE;
+    if chunk_num >= 32 {
+        msg!("Chunk number exceeds bitmap size: {}", chunk_num);
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let mut bitmap = u32::from_le_bytes([
+        buffer_data[5],
+        buffer_data[6],
+        buffer_data[7],
+        buffer_data[8],
+    ]);
+    bitmap |= 1u32 << chunk_num;
+    buffer_data[5..9].copy_from_slice(&bitmap.to_le_bytes());
+
+    // Check if all chunks are uploaded
+    let num_chunks = (PROOF_SIZE + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+    let expected_bitmap = if num_chunks >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << num_chunks) - 1
+    };
+
+    if bitmap == expected_bitmap {
         buffer_data[0] = BufferStatus::Ready as u8;
-        msg!("Proof upload complete: {} bytes", proof_len);
+        msg!("Proof upload complete: all {} chunks received", num_chunks);
+    } else {
+        msg!(
+            "Chunk {} uploaded ({}/{})",
+            chunk_num,
+            bitmap.count_ones(),
+            num_chunks
+        );
     }
 
     Ok(())
@@ -1091,8 +1121,32 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     // Read proof buffer header
     let proof_data = proof_account.try_borrow_data()?;
     if proof_data[0] != BufferStatus::Ready as u8 {
+        msg!("Proof buffer not ready");
         return Err(ProgramError::InvalidAccountData);
     }
+
+    // Validate all chunks are uploaded
+    let bitmap = u32::from_le_bytes([
+        proof_data[5],
+        proof_data[6],
+        proof_data[7],
+        proof_data[8],
+    ]);
+    let num_chunks = (PROOF_SIZE + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+    let expected_bitmap = if num_chunks >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << num_chunks) - 1
+    };
+    if bitmap != expected_bitmap {
+        msg!(
+            "Incomplete proof upload: bitmap={:#034b}, expected={:#034b}",
+            bitmap,
+            expected_bitmap
+        );
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let num_pi = u16::from_le_bytes([proof_data[3], proof_data[4]]) as usize;
     let pi_end = BUFFER_HEADER_SIZE + (num_pi * 32);

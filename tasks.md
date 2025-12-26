@@ -78,13 +78,13 @@ The current implementation is proof-of-concept. For production, we need cleaner 
   - For Solana programs: `solana-noir-verifier-cpi` crate with `is_verified()` ✅
   - Sample integrator program: `examples/sample-integrator/`
 
-- [ ] **Upload integrity verification**
-  - Problem: How do we know all chunks were uploaded correctly?
-  - Research approaches:
-    - Option A: Merkle root of chunks stored in header, verified on-chain
-    - Option B: Final hash check before verification phase
-    - Option C: Chunk bitmap + total hash in account header
-  - Must handle: Out-of-order uploads, partial uploads, retries
+- [x] **Upload integrity verification** ✅
+  - **Implemented: Chunk bitmap tracking**
+  - Added 4-byte chunk bitmap to proof buffer header (supports up to 32 chunks)
+  - Each chunk upload marks its bit in the bitmap
+  - Phase 1 validates all required chunks are present before verification
+  - Bitmap automatically calculated based on PROOF_SIZE / MAX_CHUNK_SIZE
+  - Handles: Out-of-order uploads, missing chunks detection
 
 - [ ] **Verification status tracking**
   - Current: Simple `verified` bool in state account
@@ -95,10 +95,12 @@ The current implementation is proof-of-concept. For production, we need cleaner 
     - Expiration for time-sensitive use cases
   - Research: What do other on-chain verifiers (groth16-solana) do?
 
-- [ ] **Error handling and recovery**
-  - What happens if verification fails mid-way?
-  - Can we resume from a failed phase?
-  - How to clean up failed verification accounts?
+- [x] **Error handling and recovery** ✅
+  - **Decision: Failed verification is terminal (no recovery)**
+  - Rationale: UltraHonk is deterministic - retrying won't help unless proof changes
+  - Account cleanup: SDK automatically closes accounts to reclaim rent
+  - `verify()` option `autoClose: true` (default) cleans up on success AND failure
+  - CLI must always enable `autoClose` to recover rent
 
 - [ ] **Document findings and decisions**
   - Create `docs/design-decisions.md` with research findings
@@ -124,6 +126,8 @@ Created `@solana-noir-verifier/sdk` package in `sdk/`:
   - Parallel sends with batch confirmation
   - Progress callbacks for UI integration
   - Automatic phase orchestration
+  - Automatic account cleanup (`autoClose` option, default: true)
+  - Rent reclaimed on both success and failure
 
 ### 1.4 Rust CLI Tool
 
