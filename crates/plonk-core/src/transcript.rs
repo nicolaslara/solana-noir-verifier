@@ -7,7 +7,7 @@
 //! Off-chain, uses pure Rust sha3 implementation.
 
 use crate::field::limbs_to_fr;
-use crate::types::{Fr, G1, SCALAR_ZERO};
+use crate::types::{Fr, G1};
 
 extern crate alloc;
 use alloc::vec::Vec;
