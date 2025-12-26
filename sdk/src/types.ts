@@ -44,6 +44,10 @@ export interface VerificationResult {
   signatures: TransactionSignature[];
   /** Per-phase CU breakdown (only if verbose: true) */
   phases?: PhaseResult[];
+  /** Lamports recovered from closing accounts (if autoClose was enabled) */
+  recoveredLamports?: number;
+  /** Whether accounts were closed (if autoClose was enabled) */
+  accountsClosed?: boolean;
 }
 
 /**
@@ -71,6 +75,8 @@ export interface VerifyOptions {
   skipPreflight?: boolean;
   /** Enable verbose mode - returns detailed per-phase CU breakdown */
   verbose?: boolean;
+  /** Automatically close accounts after verification to reclaim rent (default: true) */
+  autoClose?: boolean;
 }
 
 /**
@@ -98,7 +104,7 @@ export interface VerificationState {
 // Constants matching the on-chain program
 export const PROOF_SIZE = 16224;
 export const VK_SIZE = 1760;
-export const BUFFER_HEADER_SIZE = 5;
+export const BUFFER_HEADER_SIZE = 9; // status(1) + proof_len(2) + pi_count(2) + chunk_bitmap(4)
 export const VK_HEADER_SIZE = 3;
 export const STATE_SIZE = 6376;
 export const DEFAULT_CHUNK_SIZE = 1020;
