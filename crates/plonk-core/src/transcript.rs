@@ -251,6 +251,7 @@ pub fn split_challenge(challenge: &Fr) -> (Fr, Fr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SCALAR_ZERO;
 
     #[test]
     fn test_reduce_hash_to_fr() {

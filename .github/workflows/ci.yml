@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Build (debug)
+      run: cargo build --workspace --all-targets
+
+    - name: Build (release)
+      run: cargo build --workspace --release
+
+    - name: Run tests
+      run: cargo test --workspace --all-targets
+
+    - name: Run clippy (lib only)
+      run: cargo clippy --workspace --lib --all-features -- -D warnings
+
+  build-sbf:
+    name: Build Solana BPF Programs
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Install Solana CLI
+      run: |
+        sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+    - name: Verify Solana installation
+      run: |
+        solana --version
+        cargo build-sbf --version
+
+    - name: Build BPF programs
+      run: |
+        cd programs/ultrahonk-verifier
+        CIRCUIT=simple_square cargo build-sbf
+
+    - name: Verify BPF artifact
+      run: |
+        ls -lh programs/ultrahonk-verifier/target/deploy/
+        test -f programs/ultrahonk-verifier/target/deploy/ultrahonk_verifier.so
+
+  check-warnings:
+    name: Check for Warnings
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Check for compilation warnings
+      run: |
+        output=$(cargo build --workspace 2>&1)
+        echo "$output"
+        if echo "$output" | grep -q "warning:"; then
+          echo "::error::Compilation warnings found"
+          exit 1
+        fi
+
+    - name: Check for clippy warnings (lib)
+      run: |
+        output=$(cargo clippy --workspace --lib --all-features 2>&1)
+        echo "$output"
+        # Note: We allow some clippy warnings in test code
+        if echo "$output" | grep -E "error:|could not compile" | grep -v "test"; then
+          echo "::error::Clippy errors found in library code"
+          exit 1
+        fi

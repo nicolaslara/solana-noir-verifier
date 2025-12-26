@@ -980,6 +980,7 @@ fn accumulate_relations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::field::fr_from_u64;
 
     #[test]
     fn test_bary_constants() {

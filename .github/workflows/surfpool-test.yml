@@ -1,0 +1,81 @@
+name: Surfpool Integration Tests
+
+# This workflow tests the verifier on a local Solana validator
+# Run manually or on release tags
+on:
+  workflow_dispatch:
+    inputs:
+      circuit:
+        description: 'Circuit to test'
+        required: false
+        default: 'simple_square'
+        type: choice
+        options:
+          - simple_square
+          - iterated_square_100
+          - iterated_square_1000
+          - hash_batch
+          - merkle_membership
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  surfpool-test:
+    name: Test on Surfpool
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Install Solana CLI
+      run: |
+        sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+    - name: Install Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Surfpool
+      run: |
+        npm install -g @txtx/surfpool
+
+    - name: Start Surfpool
+      run: |
+        surfpool start &
+        sleep 10
+
+    - name: Build BPF program
+      env:
+        CIRCUIT: ${{ github.event.inputs.circuit || 'simple_square' }}
+      run: |
+        cd programs/ultrahonk-verifier
+        cargo build-sbf
+
+    - name: Deploy program
+      run: |
+        cd programs/ultrahonk-verifier
+        solana program deploy target/deploy/ultrahonk_verifier.so \
+          --url http://127.0.0.1:8899 \
+          --use-rpc
+
+    - name: Run verification test
+      env:
+        CIRCUIT: ${{ github.event.inputs.circuit || 'simple_square' }}
+      run: |
+        node scripts/solana/test_phased.mjs
+
+    - name: Stop Surfpool
+      if: always()
+      run: |
+        surfpool stop || true
