@@ -2,6 +2,27 @@
 
 This file contains essential context and rules for working on the Solana Noir Verifier project.
 
+## ⚠️ IMPORTANT: Always Check Cursor Rules
+
+**Before starting any work**, you MUST:
+
+1. **Read the active Cursor rules** in `.cursor/rules/`:
+   - `ultrahonk-development.mdc` - Development patterns for Rust/Solana BN254
+   - `ultrahonk-workflow.mdc` - Main development workflow
+   - `ultrahonk-references.mdc` - External references and resources
+
+2. **Follow the patterns** defined in those rules for:
+   - VK registry pattern (load from account, not embedded)
+   - Account structure and sizes
+   - BN254 syscall usage
+   - Field/curve serialization formats
+   - Phased verification workflow
+   - Instruction codes
+
+3. **Note**: Files ending in `.mdc.disabled` are inactive (UltraPlonk rules are disabled)
+
+The sections below consolidate key information from those rules for quick reference, but you should always verify against the source `.cursor/rules/` files when making changes.
+
 ## Project Overview
 
 A circuit-specific verifier for Noir zero-knowledge proofs on Solana, using UltraHonk proving system with Solana's native BN254 syscalls.
