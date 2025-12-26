@@ -78,11 +78,13 @@ jobs:
 
     - name: Verify Solana installation
       run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         solana --version
         cargo build-sbf --version
 
     - name: Build BPF programs
       run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         cd programs/ultrahonk-verifier
         CIRCUIT=simple_square cargo build-sbf
 
