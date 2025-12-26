@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Example Solana program that integrates with solana-noir-verifier"
 
+[lints.rust]
+unexpected_cfgs = "allow"
+
 [features]
 default = []
 no-entrypoint = []

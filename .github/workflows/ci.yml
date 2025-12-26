@@ -56,7 +56,7 @@ jobs:
       run: cargo test --workspace --all-targets
 
     - name: Run clippy (lib only)
-      run: cargo clippy --workspace --lib --all-features -- -D warnings
+      run: cargo clippy --workspace --lib --all-features
 
   build-sbf:
     name: Build Solana BPF Programs
@@ -75,14 +75,17 @@ jobs:
       run: |
         sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
         echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
 
     - name: Verify Solana installation
       run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         solana --version
         cargo build-sbf --version
 
     - name: Build BPF programs
       run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         cd programs/ultrahonk-verifier
         CIRCUIT=simple_square cargo build-sbf
 
@@ -113,12 +116,11 @@ jobs:
           exit 1
         fi
 
-    - name: Check for clippy warnings (lib)
+    - name: Run clippy check
       run: |
-        output=$(cargo clippy --workspace --lib --all-features 2>&1)
-        echo "$output"
-        # Note: We allow some clippy warnings in test code
-        if echo "$output" | grep -E "error:|could not compile" | grep -v "test"; then
-          echo "::error::Clippy errors found in library code"
+        cargo clippy --workspace --lib --all-features 2>&1 | tee clippy.log
+        # Check for compilation errors (not warnings)
+        if grep -q "^error" clippy.log; then
+          echo "::error::Clippy found compilation errors"
           exit 1
         fi

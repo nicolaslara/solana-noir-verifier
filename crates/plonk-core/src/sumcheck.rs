@@ -15,9 +15,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::field::{
-    batch_inv, batch_inv_limbs, fr_add, fr_from_u64, fr_inv, fr_mul, fr_sub, FrLimbs,
-};
+use crate::field::{batch_inv, batch_inv_limbs, fr_add, fr_inv, fr_mul, fr_sub, FrLimbs};
 use crate::proof::Proof;
 use crate::types::{Fr, SCALAR_ONE, SCALAR_ZERO};
 

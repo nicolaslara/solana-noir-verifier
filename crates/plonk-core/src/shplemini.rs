@@ -247,10 +247,7 @@ pub fn shplemini_phase3b1(
     // Only convert values from proof and challenges (still in Fr format)
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_a_evals = proof.gemini_a_evaluations();
-    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
-        .iter()
-        .map(|e| FrLimbs::from_bytes(e))
-        .collect();
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals.iter().map(FrLimbs::from_bytes).collect();
     let sumcheck_u_l: Vec<FrLimbs> = challenges
         .sumcheck_challenges
         .iter()
@@ -352,10 +349,7 @@ pub fn shplemini_phase3b2(
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_r_l = FrLimbs::from_bytes(&challenges.gemini_r);
     let gemini_a_evals = proof.gemini_a_evaluations();
-    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
-        .iter()
-        .map(|e| FrLimbs::from_bytes(e))
-        .collect();
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals.iter().map(FrLimbs::from_bytes).collect();
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
     // Note: Using Vec here because SmallFrArray<64> would be 2KB, causing stack overflow
@@ -431,8 +425,7 @@ pub fn shplemini_phase3b2(
         v_pow_l = v_pow_l.mul(&nu_sq_l);
 
         let libra_evals = proof.libra_poly_evals();
-        let libra_evals_l: Vec<FrLimbs> =
-            libra_evals.iter().map(|e| FrLimbs::from_bytes(e)).collect();
+        let libra_evals_l: Vec<FrLimbs> = libra_evals.iter().map(FrLimbs::from_bytes).collect();
         let denominators_l = [denom0_l, denom1_l, denom0_l, denom0_l];
         let mut batching_scalars_l = [FrLimbs::ZERO; 4];
 
