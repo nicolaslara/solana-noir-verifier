@@ -85,12 +85,14 @@ const L_SEVENTEEN: FrLimbs = FrLimbs::from_mont_limbs([
     0xec17c38cfa08479d,
     0x2d20ba0fb5bf517e,
 ]);
+#[allow(dead_code)]
 const L_NEG_TWO: FrLimbs = FrLimbs::from_mont_limbs([
     0xeab58d5b5000000b,
     0xba3afb1d3af7d63d,
     0xeb72fed7908ecc00,
     0x144f5eefad21e1ca,
 ]);
+#[allow(dead_code)]
 const L_NEG_THREE: FrLimbs = FrLimbs::from_mont_limbs([
     0x3e1f593f00000010,
     0x833e84879b970914,
@@ -1530,8 +1532,8 @@ fn batch_subrelations(evals: &[Fr], alphas: &[Fr]) -> Fr {
         );
         crate::trace!("Expected: 26 subrels, 25 alphas (bb 0.87)");
         // Verify first term computation
-        let first_two = fr_add(&evals[0], &fr_mul(&evals[1], &alphas[0]));
-        crate::dbg_fr!("verify: evals[0] + evals[1]*alpha[0]", &first_two);
+        let _first_two = fr_add(&evals[0], &fr_mul(&evals[1], &alphas[0]));
+        crate::dbg_fr!("verify: evals[0] + evals[1]*alpha[0]", &_first_two);
     }
 
     let mut acc = evals[0];
@@ -1576,9 +1578,9 @@ pub fn accumulate_relation_evaluations(
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== ALL {} SUMCHECK EVALS =====", evals.len());
-        for (i, e) in evals.iter().enumerate() {
+        for (i, _e) in evals.iter().enumerate() {
             if i < 15 {
-                crate::dbg_fr!(&format!("eval[{:2}]", i), e);
+                crate::dbg_fr!(&format!("eval[{:2}]", i), _e);
             }
         }
     }
@@ -1599,8 +1601,10 @@ pub fn accumulate_relation_evaluations(
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== RUST SUBRELATION VALUES =====");
-        for (i, v) in out.iter().enumerate() {
-            crate::dbg_fr!(&format!("subrel[{:2}]", i), v);
+        for (i, _v) in out.iter().enumerate() {
+            if i < out.len() {
+                crate::dbg_fr!(&format!("subrel[{:2}]", i), _v);
+            }
         }
     }
 

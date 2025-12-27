@@ -719,8 +719,8 @@ fn generate_challenges(
     );
 
     // Add user public inputs (actual user inputs, not pairing points)
-    for (i, pi) in public_inputs.iter().enumerate() {
-        crate::dbg_fr!(&alloc::format!("public_input[{}]", i), pi);
+    for (_i, pi) in public_inputs.iter().enumerate() {
+        crate::dbg_fr!(&alloc::format!("public_input[{}]", _i), pi);
         transcript.append_scalar(pi);
     }
 
@@ -823,7 +823,7 @@ fn generate_challenges(
     alphas.push(alpha1);
 
     // Loop to generate remaining alphas (pairs)
-    for i in 1..(NUMBER_OF_ALPHAS / 2) {
+    for _i in 1..(NUMBER_OF_ALPHAS / 2) {
         let (a0, a1) = transcript.challenge_split();
         alphas.push(a0);
         alphas.push(a1);
@@ -839,8 +839,8 @@ fn generate_challenges(
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== ALL {} ALPHA CHALLENGES =====", alphas.len());
-        for (i, a) in alphas.iter().enumerate() {
-            crate::dbg_fr!(&alloc::format!("alpha[{:2}]", i), a);
+        for (_i, _a) in alphas.iter().enumerate() {
+            crate::dbg_fr!(&alloc::format!("alpha[{:2}]", _i), _a);
         }
     }
 
@@ -1052,6 +1052,7 @@ fn generate_challenges(
 /// Compute the VK hash for the transcript
 /// This matches bb's `vk->hash_with_origin_tagging` behavior
 /// For Keccak (U256Codec): each field/commitment is raw uint256_t
+#[allow(dead_code)]
 fn compute_vk_hash(vk: &VerificationKey) -> Fr {
     use sha3::{Digest, Keccak256};
 
@@ -1060,15 +1061,15 @@ fn compute_vk_hash(vk: &VerificationKey) -> Fr {
     // Add VK header fields as uint256_t (32 bytes each, big-endian padded)
     let mut buf = [0u8; 32];
     buf[28..32].copy_from_slice(&vk.log2_circuit_size.to_be_bytes());
-    hasher.update(&buf);
+    hasher.update(buf);
 
     buf = [0u8; 32];
     buf[28..32].copy_from_slice(&vk.log2_domain_size.to_be_bytes());
-    hasher.update(&buf);
+    hasher.update(buf);
 
     buf = [0u8; 32];
     buf[28..32].copy_from_slice(&vk.num_public_inputs.to_be_bytes());
-    hasher.update(&buf);
+    hasher.update(buf);
 
     // Add all VK commitments as 64 bytes each (x || y)
     for commitment in &vk.commitments {
@@ -1269,6 +1270,7 @@ fn g2_generator() -> crate::types::G2 {
 /// - lhs.y = limbs[4..7]
 /// - rhs.x = limbs[8..11]
 /// - rhs.y = limbs[12..15]
+#[allow(dead_code)]
 fn convert_pairing_points_to_g1(ppo: &[Fr]) -> Result<(G1, G1), VerifyError> {
     if ppo.len() != 16 {
         return Err(VerifyError::PublicInput(alloc::format!(
@@ -1379,6 +1381,7 @@ fn convert_pairing_points_to_g1(ppo: &[Fr]) -> Result<(G1, G1), VerifyError> {
 /// Generate recursion separator by hashing pairing points
 ///
 /// Hashes: proofLhs, proofRhs, accLhs, accRhs -> keccak256 -> Fr (mod r)
+#[allow(dead_code)]
 fn generate_recursion_separator(
     proof_lhs: &G1,
     proof_rhs: &G1,
@@ -2026,7 +2029,7 @@ mod tests {
 
             // Check proof size to determine if ZK or non-ZK
             let expected_zk_size = crate::proof::Proof::expected_size_bytes(true);
-            let expected_non_zk_size = crate::proof::Proof::expected_size_bytes(false);
+            let _expected_non_zk_size = crate::proof::Proof::expected_size_bytes(false);
             let actual_is_zk = proof_bytes.len() == expected_zk_size;
 
             if actual_is_zk != is_zk {
