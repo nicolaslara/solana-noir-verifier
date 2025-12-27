@@ -72,21 +72,21 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: 1.91.1
+        # Don't set RUSTFLAGS for BPF builds
+        rustflags: ""
 
-    - name: Install Solana CLI
-      run: |
-        sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+    - name: Setup Solana CLI
+      uses: metadaoproject/setup-solana@v1.0
+      with:
+        solana-cli-version: '2.1.21'
 
     - name: Verify Solana installation
       run: |
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         solana --version
         cargo build-sbf --version
 
     - name: Build BPF programs
       run: |
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
         cd programs/ultrahonk-verifier
         CIRCUIT=simple_square cargo build-sbf
 
