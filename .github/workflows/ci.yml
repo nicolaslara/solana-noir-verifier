@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Don't turn warnings into errors globally - we handle this per-job
+  RUSTFLAGS: ""
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: 1.91.1
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Build (debug)
+      run: cargo build --workspace --all-targets
+
+    - name: Build (release)
+      run: cargo build --workspace --release
+
+    - name: Run tests
+      run: cargo test --workspace --all-targets
+
+    - name: Run clippy (lib only)
+      run: cargo clippy --workspace --lib --all-features
+
+  build-sbf:
+    name: Build Solana BPF Programs
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: 1.91.1
+        # Don't set RUSTFLAGS for BPF builds
+        rustflags: ""
+
+    - name: Install Solana CLI
+      run: |
+        # Use Anza's release URL (Solana's new home)
+        # v3.1.4 ships with rustc 1.81+ needed by our dependencies
+        sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.4/install)"
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+    - name: Verify Solana installation
+      run: |
+        solana --version
+        cargo build-sbf --version
+
+    - name: Build BPF programs
+      run: |
+        cd programs/ultrahonk-verifier
+        CIRCUIT=simple_square cargo build-sbf
+
+    - name: Verify BPF artifact
+      run: |
+        ls -lh programs/ultrahonk-verifier/target/deploy/
+        test -f programs/ultrahonk-verifier/target/deploy/ultrahonk_verifier.so
+
+  check-warnings:
+    name: Check for Warnings
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: 1.91.1
+        components: clippy
+        # Don't set RUSTFLAGS=-D warnings (we check warnings ourselves)
+        rustflags: ""
+
+    - name: Check for compilation warnings
+      run: |
+        # Build and check for warnings (but allow clippy-style warnings)
+        output=$(cargo build --workspace 2>&1)
+        echo "$output"
+        # Only fail on actual compilation warnings, not notes or suggestions
+        if echo "$output" | grep -E "^warning\[" | grep -v "clippy::" | head -1 | grep -q .; then
+          echo "::error::Compilation warnings found"
+          exit 1
+        fi
+
+    - name: Run clippy (advisory)
+      run: |
+        # Run clippy and show warnings, but only fail on errors
+        cargo clippy --workspace --lib --all-features 2>&1 | tee clippy.log || true
+        if grep -q "^error\[" clippy.log; then
+          echo "::error::Clippy found errors"
+          exit 1
+        fi
+        echo "Clippy completed (warnings are advisory)"

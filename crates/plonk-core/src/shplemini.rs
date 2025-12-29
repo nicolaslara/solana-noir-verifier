@@ -24,6 +24,7 @@ use crate::verifier::Challenges;
 pub const NUMBER_UNSHIFTED: usize = 35;
 
 /// Toggle for FrLimbs optimization (for A/B testing)
+#[allow(dead_code)]
 const USE_FR_LIMBS: bool = true;
 
 // ============================================================================
@@ -59,7 +60,7 @@ pub struct ShpleminiPhase3bResult {
 pub fn shplemini_phase3a(
     proof: &Proof,
     challenges: &Challenges,
-    log_n: usize,
+    _log_n: usize,
 ) -> Result<ShpleminiPhase3aResult, &'static str> {
     #[cfg(feature = "solana")]
     {
@@ -247,15 +248,12 @@ pub fn shplemini_phase3b1(
     // Only convert values from proof and challenges (still in Fr format)
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_a_evals = proof.gemini_a_evaluations();
-    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
-        .iter()
-        .map(|e| FrLimbs::from_bytes(e))
-        .collect();
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals.iter().map(FrLimbs::from_bytes).collect();
     let sumcheck_u_l: Vec<FrLimbs> = challenges
         .sumcheck_challenges
         .iter()
         .take(log_n)
-        .map(|u| FrLimbs::from_bytes(u))
+        .map(FrLimbs::from_bytes)
         .collect();
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
@@ -352,14 +350,11 @@ pub fn shplemini_phase3b2(
     let shplonk_nu_l = FrLimbs::from_bytes(&challenges.shplonk_nu);
     let gemini_r_l = FrLimbs::from_bytes(&challenges.gemini_r);
     let gemini_a_evals = proof.gemini_a_evaluations();
-    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals
-        .iter()
-        .map(|e| FrLimbs::from_bytes(e))
-        .collect();
+    let gemini_a_l: Vec<FrLimbs> = gemini_a_evals.iter().map(FrLimbs::from_bytes).collect();
 
     // BATCH INVERSION OPTIMIZATION with FrLimbs:
     // Note: Using Vec here because SmallFrArray<64> would be 2KB, causing stack overflow
-    let num_non_dummy = if log_n > 1 { log_n - 1 } else { 0 };
+    let num_non_dummy = log_n.saturating_sub(1);
     let mut all_denoms_l: Vec<FrLimbs> = Vec::with_capacity(num_non_dummy * 2 + 4);
 
     // Gemini denominators: z - r^j and z + r^j for j = 1..log_n-1
@@ -431,8 +426,7 @@ pub fn shplemini_phase3b2(
         v_pow_l = v_pow_l.mul(&nu_sq_l);
 
         let libra_evals = proof.libra_poly_evals();
-        let libra_evals_l: Vec<FrLimbs> =
-            libra_evals.iter().map(|e| FrLimbs::from_bytes(e)).collect();
+        let libra_evals_l: Vec<FrLimbs> = libra_evals.iter().map(FrLimbs::from_bytes).collect();
         let denominators_l = [denom0_l, denom1_l, denom0_l, denom0_l];
         let mut batching_scalars_l = [FrLimbs::ZERO; 4];
 
@@ -669,8 +663,8 @@ pub fn compute_shplemini_pairing_points(
     #[cfg(feature = "debug")]
     {
         crate::trace!("===== GEMINI A EVALUATIONS =====");
-        for (idx, eval) in gemini_a_evals.iter().enumerate() {
-            crate::dbg_fr!(&format!("geminiAEvaluations[{}]", idx), eval);
+        for (_idx, _eval) in gemini_a_evals.iter().enumerate() {
+            crate::dbg_fr!(&format!("geminiAEvaluations[{}]", _idx), _eval);
         }
         crate::trace!("===== FOLD POS COMPUTATION =====");
     }
@@ -833,8 +827,8 @@ pub fn compute_shplemini_pairing_points(
         #[cfg(feature = "debug")]
         {
             crate::trace!("===== LIBRA POLY EVALS =====");
-            for (idx, eval) in libra_evals.iter().enumerate() {
-                crate::dbg_fr!(&format!("libraPolyEvals[{}]", idx), eval);
+            for (_idx, _eval) in libra_evals.iter().enumerate() {
+                crate::dbg_fr!(&format!("libraPolyEvals[{}]", _idx), _eval);
             }
         }
 
@@ -915,11 +909,11 @@ fn compute_p0_full(
     const_acc: &Fr,
     unshifted_scalar: &Fr,
     shifted_scalar: &Fr,
-    r_pows: &[Fr],
+    _r_pows: &[Fr],
     gemini_scalars: &[Fr],
     libra_scalars: &[Fr],
 ) -> Result<G1, &'static str> {
-    let log_n = vk.log2_circuit_size as usize;
+    let _log_n = vk.log2_circuit_size as usize;
 
     // OPTIMIZATION: Precompute all rho powers to avoid O(n²) loop
     // We need rho^1 through rho^42 (for shifted contributions rho^37-41 plus some buffer)

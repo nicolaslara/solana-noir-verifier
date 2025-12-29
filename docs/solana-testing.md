@@ -113,6 +113,76 @@ solana-noir-verifier/
     └── solana-testing.md      # This file
 ```
 
+## Running CI Locally
+
+Before pushing, you can run the exact same CI checks locally using [act](https://github.com/nektos/act), which runs GitHub Actions in Docker containers.
+
+### Install act
+
+```bash
+# macOS
+brew install act
+
+# Linux
+curl -s https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
+```
+
+### Prerequisites
+
+- Docker must be running
+- On Apple Silicon (M1/M2/M3), use `--container-architecture linux/amd64`
+
+### Run All CI Jobs
+
+```bash
+cd /path/to/solana-noir-verifier
+
+# Run all jobs triggered by push
+act push --container-architecture linux/amd64
+```
+
+### Run Specific Jobs
+
+```bash
+# List available jobs
+act -l
+
+# Run only the build-and-test job
+act push --container-architecture linux/amd64 -j build-and-test
+
+# Run only the check-warnings job
+act push --container-architecture linux/amd64 -j check-warnings
+
+# Run only the Solana BPF build
+act push --container-architecture linux/amd64 -j build-sbf
+```
+
+### Quick Local Checks (without Docker)
+
+For faster iteration, run the key checks directly:
+
+```bash
+# Format check
+cargo fmt --all -- --check
+
+# Build
+cargo build --workspace
+
+# Tests
+cargo test --workspace
+
+# Clippy (advisory - warnings don't fail CI)
+cargo clippy --workspace --lib --all-features
+```
+
+### Troubleshooting
+
+**act is slow on first run**: It downloads Docker images. Subsequent runs are faster.
+
+**Permission denied**: Make sure Docker is running and your user has access.
+
+**Timeouts**: Some jobs (especially Solana BPF builds) can take 5-10 minutes. Use `-v` for verbose output.
+
 ## Comparison with Groth16
 
 | Metric        | UltraHonk          | Groth16     |

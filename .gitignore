@@ -2,6 +2,13 @@
 target/
 Cargo.lock
 
+# Exception: keep test circuit artifacts needed for CI
+!test-circuits/*/target/
+!test-circuits/*/target/keccak/
+!test-circuits/*/target/keccak/vk
+!test-circuits/*/target/keccak/proof
+!test-circuits/*/target/keccak/public_inputs
+
 # Solana
 **/test-ledger/
 *.so

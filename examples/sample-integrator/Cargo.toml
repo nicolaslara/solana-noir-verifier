@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Example Solana program that integrates with solana-noir-verifier"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("custom-heap", "custom-panic"))',
+] }
+
 [features]
 default = []
 no-entrypoint = []

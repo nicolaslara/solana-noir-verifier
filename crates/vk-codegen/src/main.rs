@@ -151,7 +151,7 @@ pub const VK_BYTES: [u8; {}] = [
             code.push('\n');
         }
     }
-    if vk.len() % 16 != 0 {
+    if !vk.len().is_multiple_of(16) {
         code.push('\n');
     }
     code.push_str("];\n");
