@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/plonk-core",
+    "crates/rust-sdk",
     "crates/vk-codegen",
     "crates/verifier-cpi",
     "examples/sample-integrator",
