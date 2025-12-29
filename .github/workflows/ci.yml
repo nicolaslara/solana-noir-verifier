@@ -48,14 +48,16 @@ jobs:
     - name: Install Noir toolchain
       run: |
         curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
-        source $HOME/.nargo/env
+        source $HOME/.bashrc || true
+        export PATH="$HOME/.nargo/bin:$PATH"
         noirup
         echo "$HOME/.nargo/bin" >> $GITHUB_PATH
 
     - name: Install Barretenberg CLI
       run: |
         curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
-        source $HOME/.bb/env
+        source $HOME/.bashrc || true
+        export PATH="$HOME/.bb:$PATH"
         bbup
         echo "$HOME/.bb" >> $GITHUB_PATH
 
