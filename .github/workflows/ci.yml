@@ -75,10 +75,12 @@ jobs:
         # Don't set RUSTFLAGS for BPF builds
         rustflags: ""
 
-    - name: Setup Solana CLI
-      uses: metadaoproject/setup-solana@v1.0
-      with:
-        solana-cli-version: '2.1.21'
+    - name: Install Solana CLI
+      run: |
+        # Use Anza's release URL (Solana's new home)
+        # v3.1.4 ships with rustc 1.81+ needed by our dependencies
+        sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.4/install)"
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
     - name: Verify Solana installation
       run: |

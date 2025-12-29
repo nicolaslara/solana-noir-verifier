@@ -183,13 +183,6 @@ cargo clippy --workspace --lib --all-features
 
 **Timeouts**: Some jobs (especially Solana BPF builds) can take 5-10 minutes. Use `-v` for verbose output.
 
-**build-sbf job fails in act**: The Solana installation may fail due to Docker network issues. This job works correctly on GitHub but may not work locally with `act`. For local BPF builds, run directly:
-
-```bash
-cd programs/ultrahonk-verifier
-CIRCUIT=simple_square cargo build-sbf
-```
-
 ## Comparison with Groth16
 
 | Metric        | UltraHonk          | Groth16     |
