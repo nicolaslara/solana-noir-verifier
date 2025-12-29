@@ -100,18 +100,19 @@ pub enum VkBufferStatus {
 }
 
 // ============================================================================
-// Embedded VK - loaded from file at compile time
+// Embedded VK - FOR UNIT TESTS ONLY
 // ============================================================================
 
-// TODO: Support loading VK from an account for production use.
-// Currently the VK is embedded at compile time for simplicity.
+// PRODUCTION: Use VK accounts! Phase 1 and Phase 3c+Pairing require a VK account
+// parameter. The embedded VK is ONLY used by deprecated test instructions.
 //
-// To use a different circuit, set CIRCUIT environment variable:
+// TESTING: Set CIRCUIT environment variable to embed a test VK:
 //   CIRCUIT=simple_square cargo build-sbf          # default
 //   CIRCUIT=iterated_square_100 cargo build-sbf
 //   CIRCUIT=hash_batch cargo build-sbf
 //
 // See build.rs for the full list of available circuits.
+#[allow(dead_code)] // Only used by deprecated test instructions
 const VK_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vk.bin"));
 
 // ============================================================================
@@ -772,9 +773,25 @@ fn process_upload_vk_chunk(
 /// - Circuit deployers explicitly upload their VK
 /// - No accidental use of wrong embedded VK  
 /// - Program is truly circuit-agnostic
+///
+/// Validates:
+/// - VK account is owned by this program
+/// - VK buffer status is Ready
+/// - VK data is complete and parseable
 fn parse_vk(
     vk_account: &AccountInfo,
+    program_id: &Pubkey,
 ) -> Result<plonk_solana_core::key::VerificationKey, ProgramError> {
+    // Validate ownership - VK must have been created by this program
+    if vk_account.owner != program_id {
+        msg!(
+            "VK account owner mismatch: expected {}, got {}",
+            program_id,
+            vk_account.owner
+        );
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let vk_data = vk_account.try_borrow_data()?;
 
     // Check status
@@ -1146,7 +1163,7 @@ fn process_phased_final_check(_program_id: &Pubkey, accounts: &[AccountInfo]) ->
 ///   [0] state (writable) - verification state account
 ///   [1] proof_data (readonly) - proof buffer account
 ///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
-fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_phase1_full(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 1 Full: All challenges (incremental)");
     sol_log_compute_units();
 
@@ -1179,8 +1196,8 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         public_inputs.push(arr);
     }
 
-    // Parse VK (from account if provided, otherwise embedded)
-    let vk = parse_vk(vk_account)?;
+    // Parse VK from account (validates ownership)
+    let vk = parse_vk(vk_account, program_id)?;
     let log_n = vk.log2_circuit_size as usize;
     let is_zk = true;
 
@@ -1200,6 +1217,10 @@ fn process_phase1_full(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         let mut state_data = state_account.try_borrow_mut_data()?;
         let state = phased::VerificationState::from_bytes_mut(&mut state_data)
             .ok_or(ProgramError::InvalidAccountData)?;
+        
+        // SECURITY: Store VK account to prevent using different VK in later phases
+        state.vk_account = vk_account.key.to_bytes();
+        
         state.log_n = log_n as u8;
         state.is_zk = 1;
         state.num_public_inputs = num_pi as u8;
@@ -2470,7 +2491,7 @@ fn process_phase3b_combined(_program_id: &Pubkey, accounts: &[AccountInfo]) -> P
 ///   [0] state (writable) - verification state account
 ///   [1] proof_data (readonly) - proof buffer account  
 ///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
-fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_phase3c_msm(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 3c: MSM");
     sol_log_compute_units();
 
@@ -2495,6 +2516,17 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // SECURITY: Validate VK account matches the one used in Phase 1
+    // This prevents attacks where different VKs are used across phases
+    if state.vk_account != vk_account.key.to_bytes() {
+        msg!(
+            "VK account mismatch! Phase 1 used {}, but this phase received {}",
+            Pubkey::from(state.vk_account),
+            vk_account.key
+        );
+        return Err(ProgramError::InvalidArgument);
+    }
+
     // Read proof data
     let proof_data = proof_account.try_borrow_data()?;
     let num_pi = state.num_public_inputs as usize;
@@ -2502,8 +2534,8 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
 
-    // Parse VK (from account if provided, otherwise embedded) and proof
-    let vk = parse_vk(vk_account)?;
+    // Parse VK from account (validates ownership) and proof
+    let vk = parse_vk(vk_account, program_id)?;
     let proof = plonk_solana_core::proof::Proof::from_bytes(
         proof_bytes,
         state.log_n as usize,
@@ -2622,7 +2654,7 @@ fn process_phase3c_msm(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
 ///   [0] state (writable) - verification state account
 ///   [1] proof_data (readonly) - proof buffer account  
 ///   [2] vk_account (REQUIRED, readonly) - VK account for the circuit
-fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_phase3c_and_pairing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     msg!("Phase 3c+4: MSM + Pairing (combined)");
     sol_log_compute_units();
 
@@ -2647,6 +2679,17 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // SECURITY: Validate VK account matches the one used in Phase 1
+    // This prevents attacks where different VKs are used across phases
+    if state.vk_account != vk_account.key.to_bytes() {
+        msg!(
+            "VK account mismatch! Phase 1 used {}, but this phase received {}",
+            Pubkey::from(state.vk_account),
+            vk_account.key
+        );
+        return Err(ProgramError::InvalidArgument);
+    }
+
     // Read proof data
     let proof_data = proof_account.try_borrow_data()?;
     let num_pi = state.num_public_inputs as usize;
@@ -2654,8 +2697,8 @@ fn process_phase3c_and_pairing(_program_id: &Pubkey, accounts: &[AccountInfo]) -
     let proof_len = u16::from_le_bytes([proof_data[1], proof_data[2]]) as usize;
     let proof_bytes = &proof_data[pi_end..pi_end + proof_len];
 
-    // Parse VK (from account if provided, otherwise embedded) and proof
-    let vk = parse_vk(vk_account)?;
+    // Parse VK from account (validates ownership) and proof
+    let vk = parse_vk(vk_account, program_id)?;
     let proof = plonk_solana_core::proof::Proof::from_bytes(
         proof_bytes,
         state.log_n as usize,

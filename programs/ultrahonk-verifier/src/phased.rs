@@ -148,7 +148,7 @@ impl From<u8> for SumcheckSubPhase {
 
 /// State account layout for phased verification
 ///
-/// Total size: ~4 KB
+/// Total size: ~6.4 KB
 #[repr(C)]
 pub struct VerificationState {
     /// Current phase (1 byte)
@@ -171,6 +171,10 @@ pub struct VerificationState {
 
     /// Reserved (2 bytes)
     pub _reserved: u16,
+
+    /// VK account pubkey - stored in Phase 1, validated in Phase 3c
+    /// This prevents using different VKs across phases (security critical!)
+    pub vk_account: [u8; 32],
 
     /// Transcript state - the "previous challenge" from Fiat-Shamir chain (32 bytes)
     /// This allows resuming challenge generation across transactions
@@ -260,6 +264,7 @@ pub struct VerificationState {
 impl VerificationState {
     /// Size of the state account in bytes
     pub const SIZE: usize = 8 +           // header (phase, challenge_sub_phase, sumcheck_sub_phase, log_n, is_zk, num_pi, reserved)
+        32 +          // vk_account (stored in Phase 1, validated in Phase 3c)
         32 +          // transcript_state
         192 +         // relation_params (eta, eta_two, eta_three, beta, gamma, public_input_delta)
         800 +         // alphas (25 × 32)
@@ -286,7 +291,7 @@ impl VerificationState {
         // Final outputs:
         128 +         // P0 + P1
         32; // verified + padding
-            // Total: 6376 bytes
+            // Total: 6408 bytes
 
     /// Initialize state from account data
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
@@ -348,7 +353,7 @@ impl VerificationState {
 }
 
 // Verify the size at compile time
-const _: () = assert!(VerificationState::SIZE == 6376);
+const _: () = assert!(VerificationState::SIZE == 6408);
 
 /// Account indices for phased verification instructions
 pub mod accounts {
