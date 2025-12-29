@@ -40,6 +40,28 @@ As we iterate toward production, maintain these standards:
 
 ---
 
+## 🔧 Toolchain Requirements
+
+| Tool              | Version        | Notes                              |
+| ----------------- | -------------- | ---------------------------------- |
+| Noir (nargo)      | 1.0.0-beta.8   | UltraHonk/Keccak support           |
+| Barretenberg (bb) | 0.87.x         | Auto-detected by `bbup` from nargo |
+| Rust              | 1.75+          | Stable                             |
+| Solana SDK        | 3.0+           | BN254 syscalls                     |
+
+**Important:** `bbup` automatically detects your nargo version and installs the compatible bb version.
+To get bb 0.87.x, install nargo 1.0.0-beta.8 first:
+
+```bash
+# Install specific Noir version
+noirup -v 1.0.0-beta.8
+
+# bbup will auto-detect and install bb 0.87.x
+bbup
+```
+
+---
+
 ## 🚀 Phase 1: SDK & CLI Development (Current Priority)
 
 ### 1.1 Client Library Optimization
@@ -130,49 +152,137 @@ Created `@solana-noir-verifier/sdk` package in `sdk/`:
   - Automatic account cleanup (`autoClose` option, default: true)
   - Rent reclaimed on both success and failure
 
-### 1.4 Rust CLI Tool
+### 1.4 Rust SDK & CLI ✅ (SDK) / 🚧 (CLI)
 
-Create `noir-solana-verify` CLI:
+Created `solana-noir-verifier-sdk` crate in `crates/rust-sdk/`:
 
-- [ ] **CLI structure**
+#### Rust SDK (Complete ✅)
+
+- [x] **Core SDK structure** ✅
+  - `crates/rust-sdk/src/lib.rs` - Main exports
+  - `crates/rust-sdk/src/client.rs` - SolanaNoirVerifier client
+  - `crates/rust-sdk/src/instructions.rs` - Instruction builders
+  - `crates/rust-sdk/src/types.rs` - Types + constants
+  - `crates/rust-sdk/src/error.rs` - Error types
+
+- [x] **SolanaNoirVerifier class API** ✅
+  - `upload_vk(payer, vk_bytes)` - Upload VK to chain
+  - `verify(payer, proof, public_inputs, vk_account, options)` - Full verification
+  - `get_verification_state(state_account)` - Read state from account
+  - `derive_receipt_pda(vk_account, public_inputs)` - Derive receipt PDA
+  - `create_receipt(payer, state, proof, vk, public_inputs)` - Create verification receipt
+  - `get_receipt(vk_account, public_inputs)` - Check if proof was verified
+  - `close_accounts(payer, state, proof)` - Close accounts to reclaim rent
+
+- [x] **Robust transaction handling** ✅
+  - Parallel sends with batch confirmation
+  - Automatic phase orchestration (9 TXs)
+  - Automatic account cleanup (`auto_close` option, default: true)
+  - Rent reclaimed on both success and failure
+
+#### CLI Tool (In Progress 🚧)
+
+Add CLI binary to the Rust SDK crate (`cargo install solana-noir-verifier-sdk`):
+
+- [ ] **CLI binary in SDK crate**
+  ```toml
+  # crates/rust-sdk/Cargo.toml
+  [[bin]]
+  name = "noir-solana"
+  path = "src/bin/main.rs"
   ```
-  cli/
-  ├── Cargo.toml
-  └── src/
-      ├── main.rs
-      ├── commands/
-      │   ├── deploy.rs       # Deploy verifier program
-      │   ├── upload_vk.rs    # Upload VK to account
-      │   ├── verify.rs       # Submit and verify proof
-      │   └── status.rs       # Check verification status
-      └── config.rs           # RPC/keypair config
+  Structure:
+  ```
+  crates/rust-sdk/src/bin/
+  ├── main.rs           # Entry point + clap setup
+  ├── commands/
+  │   ├── mod.rs
+  │   ├── deploy.rs     # Deploy verifier program
+  │   ├── upload_vk.rs  # Upload VK to account
+  │   ├── verify.rs     # Submit and verify proof
+  │   ├── status.rs     # Check verification status
+  │   └── receipt.rs    # Create/check receipts
+  └── config.rs         # RPC/keypair config
   ```
 
-- [ ] **Commands**
+- [ ] **Core commands**
   ```bash
-  # Deploy the verifier program
-  noir-solana-verify deploy --network devnet
-  
-  # Upload a VK (returns VK account address)
-  noir-solana-verify upload-vk \
-    --vk ./target/keccak/vk \
+  # Deploy the verifier program (returns program ID)
+  noir-solana deploy \
+    --keypair ~/.config/solana/id.json \
     --network devnet
   
-  # Verify a proof
-  noir-solana-verify verify \
+  # Upload a VK (returns VK account address)
+  noir-solana upload-vk \
+    --vk ./target/keccak/vk \
+    --program-id <pubkey> \
+    --network devnet
+  
+  # Verify a proof (full E2E workflow: upload + 9 TXs)
+  noir-solana verify \
     --proof ./target/keccak/proof \
     --public-inputs ./target/keccak/public_inputs \
     --vk-account <pubkey> \
+    --program-id <pubkey> \
     --network devnet
   
-  # Check verification status
-  noir-solana-verify status --account <state_pubkey>
+  # Check verification state (during or after verification)
+  noir-solana status \
+    --state-account <pubkey> \
+    --program-id <pubkey>
+  
+  # Create verification receipt (after successful verification)
+  noir-solana receipt create \
+    --state-account <pubkey> \
+    --vk-account <pubkey> \
+    --public-inputs ./target/keccak/public_inputs \
+    --program-id <pubkey>
+  
+  # Check if a receipt exists
+  noir-solana receipt check \
+    --vk-account <pubkey> \
+    --public-inputs ./target/keccak/public_inputs \
+    --program-id <pubkey>
+  
+  # Close accounts and reclaim rent
+  noir-solana close \
+    --state-account <pubkey> \
+    --proof-account <pubkey> \
+    --program-id <pubkey>
   ```
+  
+  **Note:** We don't include `prove` commands - use `nargo` and `bb` directly for proof generation.
+  This CLI focuses on **Solana-specific** operations (deploy, upload, verify, receipts).
 
 - [ ] **Configuration**
-  - Support `~/.config/noir-solana-verify/config.toml`
-  - RPC endpoints for mainnet/devnet/localnet
-  - Keypair path
+  - Support `~/.config/noir-solana/config.toml`
+  - Example config:
+    ```toml
+    [default]
+    network = "devnet"
+    keypair = "~/.config/solana/id.json"
+    
+    [networks.devnet]
+    rpc_url = "https://api.devnet.solana.com"
+    program_id = "7sfMWfVs6P1ACjouyvRwWHjiAj6AsFkYARP2v9RBSSoe"
+    
+    [networks.localnet]
+    rpc_url = "http://127.0.0.1:8899"
+    # program_id = <set after deploy>
+    ```
+  - Environment variable fallbacks: `SOLANA_RPC_URL`, `KEYPAIR_PATH`, `VERIFIER_PROGRAM_ID`
+  - CLI flags override config file which overrides env vars
+
+- [ ] **Output formats**
+  - Human-readable (default)
+  - JSON (`--output json`) for scripting
+  - Quiet mode (`-q`) for CI pipelines
+
+- [ ] **Dependencies**
+  - `clap` for argument parsing
+  - `indicatif` for progress bars
+  - `console` for colored output
+  - `dirs` for config file locations
 
 ### 1.5 VK Account Support ✅
 
@@ -449,11 +559,11 @@ nargo execute
 
 # 3. Prove (USE KECCAK + ZK!)
 ~/.bb/bb prove -b ./target/circuit.json -w ./target/circuit.gz \
-    --scheme ultra_honk --oracle_hash keccak --zk -o ./target/keccak
+    --oracle_hash keccak --zk -o ./target/keccak
 
 # 4. Write VK
 ~/.bb/bb write_vk -b ./target/circuit.json \
-    --scheme ultra_honk --oracle_hash keccak -o ./target/keccak
+    --oracle_hash keccak -o ./target/keccak
 
 # 5. Verify externally
 ~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk \
@@ -543,6 +653,18 @@ solana-noir-verifier/
 │   │   ├── shplemini.rs         # Batch opening ✅
 │   │   ├── constants.rs         # Field constants ✅
 │   │   └── errors.rs            # Error types ✅
+│   ├── rust-sdk/                # Rust SDK + CLI ✅
+│   │   ├── src/
+│   │   │   ├── lib.rs           # SDK exports ✅
+│   │   │   ├── client.rs        # SolanaNoirVerifier ✅
+│   │   │   ├── instructions.rs  # Instruction builders ✅
+│   │   │   ├── types.rs         # Types + constants ✅
+│   │   │   ├── error.rs         # Error types ✅
+│   │   │   └── bin/             # CLI binary (TODO)
+│   │   │       └── main.rs
+│   │   └── examples/
+│   │       └── test_phased.rs   # E2E example ✅
+│   ├── verifier-cpi/            # CPI helper for integrators ✅
 │   └── vk-codegen/              # CLI for VK → Rust constants
 ├── programs/
 │   └── ultrahonk-verifier/      # Solana program
@@ -551,6 +673,15 @@ solana-noir-verifier/
 │       │   └── phased.rs        # Verification state ✅
 │       └── tests/
 │           └── integration_test.rs  # E2E test ✅
+├── sdk/                         # TypeScript SDK ✅
+│   ├── src/
+│   │   ├── index.ts             # Main exports
+│   │   ├── client.ts            # SolanaNoirVerifier class
+│   │   ├── instructions.ts      # Instruction builders
+│   │   └── types.ts             # TypeScript interfaces
+│   └── package.json
+├── examples/
+│   └── sample-integrator/       # Sample CPI integration ✅
 ├── test-circuits/               # Noir circuits for testing
 │   ├── simple_square/
 │   ├── hash_batch/
