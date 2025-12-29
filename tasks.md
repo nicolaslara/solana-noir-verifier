@@ -56,9 +56,9 @@ As we iterate toward production, maintain these standards:
   - Changed: 900 → 1020 bytes per chunk (near TX size limit of 1232)
   - Result: 19 → 16 chunks for proof upload (16% fewer TXs)
 
-### 1.2 Production-Grade Abstractions (Research Required)
+### 1.2 Production-Grade Abstractions ✅
 
-The current implementation is proof-of-concept. For production, we need cleaner abstractions:
+Production-grade abstractions are now implemented:
 
 - [x] **Proof identification scheme** ✅
   - **Implemented: PDA derived from VK account + PI hash**
@@ -86,14 +86,12 @@ The current implementation is proof-of-concept. For production, we need cleaner 
   - Bitmap automatically calculated based on PROOF_SIZE / MAX_CHUNK_SIZE
   - Handles: Out-of-order uploads, missing chunks detection
 
-- [ ] **Verification status tracking**
-  - Current: Simple `verified` bool in state account
-  - Needed for production:
-    - Verification timestamp (slot)
-    - VK identifier (hash or account)
-    - Public inputs commitment
-    - Expiration for time-sensitive use cases
-  - Research: What do other on-chain verifiers (groth16-solana) do?
+- [x] **Verification status tracking** ✅
+  - **Implemented: Receipt PDA encodes all status information**
+  - VK account key + PI hash are encoded in the PDA address itself
+  - Receipt stores `verified_slot` and `verified_timestamp`
+  - Integrators can implement expiration logic using `verified_slot` if needed
+  - CPI crate: `solana-noir-verifier-cpi` with `is_verified()`, `get_verified_slot()`
 
 - [x] **Error handling and recovery** ✅
   - **Decision: Failed verification is terminal (no recovery)**
@@ -102,10 +100,13 @@ The current implementation is proof-of-concept. For production, we need cleaner 
   - `verify()` option `autoClose: true` (default) cleans up on success AND failure
   - CLI must always enable `autoClose` to recover rent
 
-- [ ] **Document findings and decisions**
-  - Create `docs/design-decisions.md` with research findings
-  - Include trade-offs considered
-  - Reference implementations studied
+- [x] **Document findings and decisions** ✅
+  - Decisions documented inline in code and tasks.md
+  - Key decisions:
+    - Receipt PDA = `["receipt", vk_account, keccak(public_inputs)]`
+    - Minimal 16-byte receipt (slot + timestamp only)
+    - VK/PI encoded in PDA address, no duplication
+    - Failed verification is terminal (no retry mechanism needed)
 
 ### 1.3 TypeScript/JavaScript SDK ✅
 
@@ -173,21 +174,27 @@ Create `noir-solana-verify` CLI:
   - RPC endpoints for mainnet/devnet/localnet
   - Keypair path
 
-### 1.5 VK Account Support
+### 1.5 VK Account Support ✅
 
-Currently VK is embedded at compile time. For production:
+VK is now loaded from an account at runtime (program is circuit-agnostic):
 
-- [ ] **Add VK account instruction**
-  - New instruction: `UploadVK` (or use chunked upload pattern)
-  - VK account structure: `[owner][vk_data]`
+- [x] **Add VK account instruction** ✅
+  - `InitVkBuffer (4)` - Initialize VK buffer account
+  - `UploadVkChunk (5)` - Upload VK data in chunks
+  - VK account structure: `[status(1), vk_len(2), vk_data(1760)]`
+  - SDK method: `uploadVK(payer, vkBytes)` → returns VK account pubkey
   
-- [ ] **Update all phases to accept VK account**
-  - Add optional `vk_account` to instruction account lists
-  - Fall back to embedded VK if not provided (backwards compat)
+- [x] **Update phases to require VK account** ✅
+  - Phase 1 (30) and Phase 3c+Pairing (54) require VK account parameter
+  - These are the only phases that need VK (challenge gen + final pairing)
+  - Embedded VK only used for deprecated test instructions
 
-- [ ] **VK account validation**
-  - Verify VK account owner matches expected authority
-  - Cache parsed VK to avoid re-parsing each phase
+- [x] **VK account validation** ✅
+  - `parse_vk()` validates account is owned by verifier program
+  - Validates status is Ready and data is complete
+  - **Cross-phase VK consistency**: Phase 1 stores VK account pubkey in state,
+    Phase 3c validates it matches (prevents using different VKs across phases)
+  - State size increased: 6376 → 6408 bytes (+32 for VK pubkey)
 
 ### 1.6 Code Cleanup (Ongoing)
 

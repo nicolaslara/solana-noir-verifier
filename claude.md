@@ -78,7 +78,7 @@ let vk = parse_vk(vk_account)?;
 |---------|------|---------|
 | VK Buffer | 1,763 bytes | Header (3) + VK (1,760) |
 | Proof Buffer | ~16,261 bytes | Header (5) + PI (32×n) + Proof (16,224) |
-| State Buffer | 6,376 bytes | Verification state between TXs |
+| State Buffer | 6,408 bytes | Verification state between TXs |
 
 ### 3. Solana BN254 Syscalls
 
