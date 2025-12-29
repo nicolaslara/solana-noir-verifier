@@ -54,7 +54,7 @@ build_circuit() {
     fi
     
     $BB prove -b "$json_file" -w "$witness_file" -o target/keccak \
-        --scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields --zk
+        --scheme ultra_honk --oracle_hash keccak --zk
     
     # 4. Generate VK
     echo "  [4/4] Writing VK..."
