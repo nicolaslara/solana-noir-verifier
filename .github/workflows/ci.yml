@@ -108,6 +108,27 @@ jobs:
         solana --version
         cargo build-sbf --version
 
+    - name: Install Noir toolchain
+      run: |
+        curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+        source $HOME/.bashrc || true
+        export PATH="$HOME/.nargo/bin:$PATH"
+        noirup -v 1.0.0-beta.8
+        echo "$HOME/.nargo/bin" >> $GITHUB_PATH
+
+    - name: Install Barretenberg CLI
+      run: |
+        curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
+        source $HOME/.bashrc || true
+        export PATH="$HOME/.bb:$PATH"
+        bbup
+        echo "$HOME/.bb" >> $GITHUB_PATH
+
+    - name: Build test circuits
+      run: |
+        cd test-circuits
+        ./build_all.sh simple_square
+
     - name: Build BPF programs
       run: |
         cd programs/ultrahonk-verifier
