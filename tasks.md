@@ -7,7 +7,7 @@
 | Metric        | Value                    |
 | ------------- | ------------------------ |
 | Unit Tests    | 56 passing               |
-| Test Circuits | 7 verified               |
+| Test Circuits | 9 verified               |
 | Circuit Sizes | log_n 12-18              |
 | Proof Size    | 16,224 bytes (fixed, ZK) |
 | VK Size       | 1,760 bytes              |
@@ -152,7 +152,7 @@ Created `@solana-noir-verifier/sdk` package in `sdk/`:
   - Automatic account cleanup (`autoClose` option, default: true)
   - Rent reclaimed on both success and failure
 
-### 1.4 Rust SDK & CLI ✅ (SDK) / 🚧 (CLI)
+### 1.4 Rust SDK & CLI ✅
 
 Created `solana-noir-verifier-sdk` crate in `crates/rust-sdk/`:
 
@@ -180,7 +180,7 @@ Created `solana-noir-verifier-sdk` crate in `crates/rust-sdk/`:
   - Automatic account cleanup (`auto_close` option, default: true)
   - Rent reclaimed on both success and failure
 
-#### CLI Tool ✅
+#### CLI Tool (`noir-solana`) ✅
 
 CLI binary added to the Rust SDK crate. Install with:
 ```bash
@@ -622,17 +622,19 @@ Solana has a **1.4M CU per-transaction limit**. UltraHonk verification requires 
 
 ### Test Circuit Suite
 
-All circuits verified with `bb 0.87` (ZK proofs):
+All 9 circuits verified with `bb 0.87` (ZK proofs):
 
 | Circuit                | ACIR Opcodes | log_n | Proof Size | Status |
 | ---------------------- | ------------ | ----- | ---------- | ------ |
 | `simple_square`        | 1            | 12    | 16,224     | ✅     |
+| `fib_chain_100`        | 1            | 12    | 16,224     | ✅     |
 | `iterated_square_100`  | 100          | 12    | 16,224     | ✅     |
 | `iterated_square_1000` | 1,000        | 13    | 16,224     | ✅     |
 | `iterated_square_10k`  | 10,000       | 14    | 16,224     | ✅     |
+| `iterated_square_100k` | 100,000      | 16    | 16,224     | ✅     |
 | `hash_batch`           | 2,112        | 17    | 16,224     | ✅     |
 | `merkle_membership`    | 2,688        | 18    | 16,224     | ✅     |
-| `fib_chain_100`        | 1            | 12    | 16,224     | ✅     |
+| `sapling_spend`        | ~15,000      | 16    | 16,224     | ✅     |
 
 ---
 

@@ -1,6 +1,6 @@
 # Solana Noir Verifier
 
-A circuit-specific verifier for [Noir](https://noir-lang.org/) proofs on Solana, using Solana's native BN254 syscalls.
+A **circuit-agnostic** verifier for [Noir](https://noir-lang.org/) proofs on Solana, using Solana's native BN254 syscalls.
 
 ## 🎯 Overview
 
@@ -8,416 +8,384 @@ This project enables verification of Noir zero-knowledge proofs on Solana. It ta
 
 ### Key Features
 
-- **Per-circuit verifiers**: Each circuit gets its own Solana program with embedded VK
-- **Single code path**: Same verification code runs on-chain and in tests
+- **Circuit-agnostic**: One deployed verifier supports ANY UltraHonk circuit
+- **VK as account**: Upload your VK once, reuse for all proofs
+- **CLI & SDKs**: Easy integration via Rust CLI, TypeScript SDK, or Rust SDK
+- **Verification receipts**: On-chain proof that verification succeeded (for CPI)
 - **Native syscalls**: Uses `solana-bn254` for BN254 curve operations
-- **Keccak transcript**: Optimized for external verification (~5KB proofs)
+
+---
+
+## 📋 Version Compatibility
+
+| Tool              | Version        | Notes                        |
+| ----------------- | -------------- | ---------------------------- |
+| Noir (nargo)      | 1.0.0-beta.8   | UltraHonk/Keccak support     |
+| Barretenberg (bb) | 0.87.x         | Auto-installed by `bbup`     |
+| Rust              | 1.75+          | Stable                       |
+| Solana SDK        | 3.0+           | BN254 syscalls               |
+
+**Important:** `bbup` auto-detects your nargo version and installs the compatible bb. Install nargo first:
+
+```bash
+# Install Noir (pinned version)
+curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+noirup -v 1.0.0-beta.8
+
+# Install Barretenberg (auto-detects compatible version)
+curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
+bbup
+
+# Install Solana CLI
+sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+```
+
+---
+
+## 🚀 Quick Start with CLI
+
+### Install
+
+```bash
+cargo install --path crates/rust-sdk --features cli
+```
+
+### Deploy & Verify
+
+```bash
+# 1. Start local validator
+surfpool  # or: solana-test-validator
+
+# 2. Deploy verifier (one-time, circuit-agnostic)
+noir-solana deploy --network localnet
+# → Program ID: 7sfMWfVs6P1ACjouyvRwWHjiAj6AsFkYARP2v9RBSSoe
+
+# 3. Upload your circuit's VK
+noir-solana upload-vk \
+    --vk ./target/keccak/vk \
+    --program-id <PROGRAM_ID> \
+    --network localnet
+# → VK Account: 3WzRvunVbZMFwroHGSi9kEcwPhWyreFM4FNrdmF9TAmd
+
+# 4. Verify a proof
+noir-solana verify \
+    --proof ./target/keccak/proof \
+    --public-inputs ./target/keccak/public_inputs \
+    --vk-account <VK_ACCOUNT> \
+    --program-id <PROGRAM_ID> \
+    --network localnet
+# → ✅ Proof verified successfully!
+```
+
+### CLI Commands
+
+```bash
+noir-solana deploy          # Deploy verifier program
+noir-solana upload-vk       # Upload VK to account
+noir-solana verify          # Verify a proof (full E2E)
+noir-solana status          # Check verification state
+noir-solana receipt create  # Create verification receipt
+noir-solana receipt check   # Check if receipt exists
+noir-solana close           # Close accounts, reclaim rent
+```
+
+---
+
+## 📦 SDK Integration
+
+### TypeScript SDK
+
+```typescript
+import { SolanaNoirVerifier } from '@solana-noir-verifier/sdk';
+
+const verifier = new SolanaNoirVerifier(connection, programId);
+
+// Upload VK (once per circuit)
+const { vkAccount } = await verifier.uploadVK(payer, vkBytes);
+
+// Verify proof
+const result = await verifier.verify(payer, proof, publicInputs, vkAccount);
+console.log(`Verified in ${result.totalCUs} CUs`);
+
+// Create receipt for CPI
+await verifier.createReceipt(payer, stateAccount, proofAccount, vkAccount, publicInputs);
+```
+
+### Rust SDK
+
+```rust
+use solana_noir_verifier_sdk::SolanaNoirVerifier;
+
+let verifier = SolanaNoirVerifier::new(rpc_client, program_id);
+
+// Upload VK
+let vk_result = verifier.upload_vk(&payer, &vk_bytes).await?;
+
+// Verify proof
+let result = verifier.verify(
+    &payer, &proof, &public_inputs, vk_result.vk_account, None
+).await?;
+
+// Create receipt for CPI
+verifier.create_receipt(&payer, state, proof_acc, vk_acc, &public_inputs).await?;
+```
+
+### CPI Integration
+
+For Solana programs that need to check if a proof was verified:
+
+```rust
+use solana_noir_verifier_cpi::{is_verified, get_verified_slot};
+
+// Check if proof was verified
+let receipt_pda = derive_receipt_pda(vk_account, &public_inputs, program_id);
+if is_verified(&receipt_account)? {
+    let slot = get_verified_slot(&receipt_account)?;
+    // Proceed with application logic...
+}
+```
+
+See `examples/sample-integrator/` for a complete example.
+
+---
 
 ## 🔄 How It Works
 
+### Architecture
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           BUILD PHASE (once per circuit)                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  1. Compile Circuit       2. Generate VK           3. Build Verifier        │
-│  ┌──────────────┐        ┌──────────────┐        ┌──────────────────┐      │
-│  │  main.nr     │───────▶│  bb prove    │───────▶│  vk-codegen      │      │
-│  │  (Noir)      │        │  --write_vk  │        │                  │      │
-│  └──────────────┘        └──────────────┘        └────────┬─────────┘      │
-│                                 │                         │                 │
-│                                 ▼                         ▼                 │
-│                          ┌──────────────┐        ┌──────────────────┐      │
-│                          │  vk (2KB)    │───────▶│ Solana Program   │      │
-│                          └──────────────┘        │ + embedded VK    │      │
-│                                                  └──────────────────┘      │
-│                                                           │                 │
-└───────────────────────────────────────────────────────────┼─────────────────┘
-                                                            │
-                                                            ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           RUNTIME (each verification)                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  4. User generates proof          5. Submit to on-chain verifier            │
-│  ┌──────────────────┐            ┌──────────────────────────┐              │
-│  │ bb prove         │            │  Transaction contains:   │              │
-│  │ (off-chain)      │───────────▶│  - proof (~5KB)          │              │
-│  └──────────────────┘            │  - public inputs         │              │
-│         │                        └───────────┬──────────────┘              │
-│         ▼                                    │                              │
-│  ┌──────────────────┐                        ▼                              │
-│  │ proof + inputs   │            ┌──────────────────────────┐              │
-│  └──────────────────┘            │  Verifier checks proof   │              │
-│                                  │  against embedded VK     │              │
-│                                  │  → OK / Error            │              │
-│                                  └──────────────────────────┘              │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    CIRCUIT DEPLOYMENT (once per circuit)         │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Create VK account                                            │
+│  2. Upload VK (2 chunks for 1,760 bytes)                        │
+│  → VK Account pubkey (save for proof verification)              │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   PROOF VERIFICATION (per proof)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Create proof + state accounts (1 TX)                        │
+│  2. Upload proof (16 chunks in parallel)                        │
+│  3. Run verification phases (8 TXs, ~5.4M CUs)                  │
+│  4. (Optional) Create verification receipt for CPI              │
+│  → Verification result + accounts closed (rent reclaimed)       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### What Gets Deployed?
+### Multi-Transaction Phased Verification
 
-| Artifact                 | Where               | When              |
-| ------------------------ | ------------------- | ----------------- |
-| **Solana Program (.so)** | On-chain            | Once per circuit  |
-| VK (verification key)    | Embedded in program | Compiled in       |
-| Proofs                   | Transaction data    | Each verification |
-| Public inputs            | Transaction data    | Each verification |
+Solana's **1.4M CU per-transaction limit** requires splitting UltraHonk verification across multiple transactions:
 
-### This Repo's Scope
+| Phase | Description                 | TXs | CUs     |
+| ----- | --------------------------- | --- | ------- |
+| 1     | Challenge generation        | 1   | ~287K   |
+| 2     | Sumcheck (rounds+relations) | 3   | ~3.8M   |
+| 3     | MSM (weights+fold+gemini)   | 3   | ~2.1M   |
+| 4     | Pairing check               | 1   | ~55K    |
+| **Total** |                         | **8** | **~5.4M** |
 
-- ✅ Circuit compilation and proof generation workflow
-- ✅ VK codegen → Rust constants
-- ✅ Verifier program template
-- ✅ Local testing with `solana-program-test`
-- ❌ Deployment to Solana (use `solana program deploy`)
-- ❌ Client SDK for submitting proofs
+State is stored in a verification account between transactions.
 
-## 🚀 Quick Start
+### Account Structure
+
+| Account      | Size        | Purpose                           |
+| ------------ | ----------- | --------------------------------- |
+| VK Buffer    | 1,763 bytes | Header (3) + VK (1,760)           |
+| Proof Buffer | ~16,261 bytes | Header (9) + PI (32×n) + Proof  |
+| State Buffer | 6,408 bytes | Verification state between TXs    |
+
+### Proof Formats
+
+| Mode            | Proof Size   | VK Size   | Use Case       |
+| --------------- | ------------ | --------- | -------------- |
+| Poseidon2       | ~16 KB       | ~3.6 KB   | Recursive      |
+| **Keccak + ZK** | **16,224 B** | **1,760** | **Solana** ✓   |
+
+**Always use `--oracle_hash keccak --zk` for Solana verification.**
+
+Note: bb 0.87 produces **fixed-size proofs** (16,224 bytes for ZK) regardless of circuit complexity due to `CONST_PROOF_SIZE_LOG_N=28` padding.
+
+---
+
+## 📊 Performance
+
+### Verified Test Circuits
+
+| Circuit              | log_n | Public Inputs | Transactions | CUs     |
+| -------------------- | ----- | ------------- | ------------ | ------- |
+| simple_square        | 12    | 1             | 24           | 5.44M   |
+| fib_chain_100        | 12    | 1             | 24           | 5.44M   |
+| iterated_square_100  | 12    | 1             | 24           | 5.44M   |
+| iterated_square_1000 | 13    | 1             | 25           | 5.70M   |
+| iterated_square_10k  | 14    | 1             | 25           | 5.96M   |
+| iterated_square_100k | 16    | 1             | 25           | 6.72M   |
+| hash_batch           | 17    | 32            | 26           | 6.99M   |
+| merkle_membership    | 18    | 32            | 26           | 7.25M   |
+| sapling_spend        | 16    | 4             | 25           | 6.49M   |
+
+All proofs are 16,224 bytes (fixed size in ZK mode). Verification takes ~10s on localnet.
+
+### Cost Estimates (Mainnet)
+
+| Component                      | Cost        |
+| ------------------------------ | ----------- |
+| Per proof verification         | ~$1.10 (8 TXs, priority fees) |
+| Circuit deployment (VK upload) | ~$0.003 (one-time) |
+| Rent deposits (recoverable)    | ~$33 per proof |
+
+---
+
+## 🔧 Development
 
 ### Prerequisites
 
 ```bash
-# Noir toolchain
-curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
-noirup
-
-# Barretenberg (bb) CLI
-curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
-bbup
-
-# Rust + Solana
+# Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Install Noir and Barretenberg (see Version Compatibility above)
+noirup -v 1.0.0-beta.8
+bbup
 ```
 
-### Version Requirements
-
-| Tool              | Version      | Notes                    |
-| ----------------- | ------------ | ------------------------ |
-| Noir (nargo)      | 1.0.0-beta.8 | UltraHonk/Keccak support |
-| Barretenberg (bb) | 0.87.x       | Auto-detected by bbup    |
-| Rust              | 1.75+        |                          |
-| Solana SDK        | 3.0+         | BN254 syscalls           |
-
-### First-Time Setup
-
-After cloning the repo, rebuild all test circuits and run tests:
+### Build & Test
 
 ```bash
-# 1. Build all test circuit proofs and VKs
+# Build all test circuits first (generates proofs + VKs)
 cd test-circuits && ./build_all.sh && cd ..
 
-# 2. Run tests (should see 58 passing)
+# Run all tests (58+ passing)
 cargo test
 
-# 3. (Optional) Test on Surfpool local validator
-cd programs/ultrahonk-verifier
-CIRCUIT=simple_square cargo build-sbf
-solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
-cd ../..
-CIRCUIT=simple_square node scripts/solana/test_phased.mjs
+# Core library tests only
+cargo test -p plonk-solana-core
+
+# Build the verifier program
+cd programs/ultrahonk-verifier && cargo build-sbf
 ```
 
-## 📋 E2E Workflow
-
-### Phase 1: Circuit Development & Proof Generation
-
-#### 1.1 Create a Noir Circuit
+### Generate Proofs
 
 ```bash
-mkdir -p test-circuits/my_circuit && cd test-circuits/my_circuit
-nargo init
-```
+cd test-circuits/simple_square
 
-Edit `src/main.nr`:
+# Compile and execute
+nargo compile && nargo execute
 
-```noir
-// Prove we know x such that x * x == y
-fn main(x: Field, y: pub Field) {
-    assert(x * x == y);
-}
-```
-
-Edit `Prover.toml` (test inputs for proof generation):
-
-```toml
-x = "3"
-y = "9"
-```
-
-#### 1.2 Compile & Generate Proof
-
-```bash
-nargo compile                    # → target/my_circuit.json
-nargo execute                    # → target/my_circuit.gz (witness)
-
+# Generate proof (ALWAYS use keccak + zk for Solana)
 ~/.bb/bb prove \
-    -b ./target/my_circuit.json \
-    -w ./target/my_circuit.gz \
-    --oracle_hash keccak \
-    --zk \                       # Use ZK mode for Solana (~16KB proofs)
-    -o ./target/keccak           # → proof, public_inputs
+    -b ./target/simple_square.json \
+    -w ./target/simple_square.gz \
+    --oracle_hash keccak --zk \
+    -o ./target/keccak
 
+# Generate VK
 ~/.bb/bb write_vk \
-    -b ./target/my_circuit.json \
+    -b ./target/simple_square.json \
     --oracle_hash keccak \
-    -o ./target/keccak           # → vk
+    -o ./target/keccak
+
+# Verify locally (sanity check)
+~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk \
+    --oracle_hash keccak --zk
 ```
 
-#### 1.3 Verify with bb (Sanity Check)
+Or use the helper script:
 
 ```bash
-~/.bb/bb verify -p ./target/keccak/proof -k ./target/keccak/vk --oracle_hash keccak --zk
-# Expected: "Proof verified successfully"
+cd test-circuits && ./build_all.sh simple_square
+```
+
+### Test on Local Validator
+
+```bash
+# 1. Start Surfpool (in separate terminal)
+surfpool
+
+# 2. Build & deploy
+cd programs/ultrahonk-verifier
+cargo build-sbf
+solana program deploy target/deploy/ultrahonk_verifier.so \
+    --url http://127.0.0.1:8899 --use-rpc
+# → Note the Program ID
+
+# 3. Test with CLI
+noir-solana upload-vk --vk ../../test-circuits/simple_square/target/keccak/vk \
+    --program-id <PROGRAM_ID> --network localnet
+
+noir-solana verify \
+    --proof ../../test-circuits/simple_square/target/keccak/proof \
+    --public-inputs ../../test-circuits/simple_square/target/keccak/public_inputs \
+    --vk-account <VK_ACCOUNT> \
+    --program-id <PROGRAM_ID> --network localnet
+
+# Or use the JS test script
+PROGRAM_ID=<id> node scripts/solana/test_phased.mjs
 ```
 
 ---
-
-### Phase 2: Generate Solana Verifier Program
-
-#### 2.1 Generate VK Constants
-
-The VK needs to be embedded in your Solana program as Rust constants:
-
-```bash
-# From repo root:
-cargo run -p plonk-solana-vk-codegen -- \
-    --vk ./test-circuits/my_circuit/target/keccak/vk \
-    --proof ./test-circuits/my_circuit/target/keccak/proof \
-    --public-inputs ./test-circuits/my_circuit/target/keccak/public_inputs \
-    --output ./programs/my_circuit_verifier/src/vk.rs \
-    --name my_circuit
-```
-
-This generates:
-
-```rust
-// programs/my_circuit_verifier/src/vk.rs
-pub const NUM_PUBLIC_INPUTS: usize = 1;
-pub const PROOF_SIZE: usize = 16224;  // ZK proof (fixed size in bb 0.87)
-pub const VK_SIZE: usize = 1760;      // VK size
-pub const VK_BYTES: [u8; 1760] = [ /* your circuit's VK */ ];
-```
-
-#### 2.2 Create Your Verifier Program
-
-Copy `programs/example-verifier/` as a template:
-
-```bash
-cp -r programs/example-verifier programs/my_circuit_verifier
-```
-
-Include the generated `vk.rs` in your `lib.rs`:
-
-```rust
-mod vk;
-use vk::{VK_BYTES, NUM_PUBLIC_INPUTS, PROOF_SIZE};
-```
-
-The program receives **proof + public inputs** in transaction data and verifies against the embedded VK.
-
----
-
-### Phase 3: Local Testing (simulates on-chain)
-
-```bash
-cargo test -p my_circuit_verifier --test integration_test
-```
-
-This uses `solana-program-test` which runs your program with the same BN254 syscalls available on mainnet - identical behavior to on-chain execution.
-
----
-
-### Phase 4: Deployment (out of scope for this repo)
-
-```bash
-# Build the BPF program
-cargo build-sbf -p my_circuit_verifier
-
-# Deploy to Solana (requires solana-cli + funded wallet)
-solana program deploy target/deploy/my_circuit_verifier.so
-# → Program ID: <your_program_id>
-```
-
-After deployment, users can submit verification transactions containing proof + public inputs.
-
----
-
-### Quick Script
-
-Run all of Phase 1 + 2.1 in one command:
-
-```bash
-./scripts/build-circuit-verifier.sh test-circuits/simple_square
-```
-
-## 📊 Proof Formats
-
-Barretenberg 0.87 supports two oracle hash modes:
-
-| Mode                | Proof Size   | VK Size   | Use Case         |
-| ------------------- | ------------ | --------- | ---------------- |
-| Poseidon2 (default) | ~16 KB       | ~3.6 KB   | Recursive proofs |
-| **Keccak + ZK**     | **16,224 B** | **1,760** | **EVM/Solana** ✓ |
-
-**Always use `--oracle_hash keccak --zk` for Solana verification.**
-
-Note: bb 0.87 produces **fixed-size proofs** (16,224 bytes for ZK) regardless of circuit complexity. This is due to `CONST_PROOF_SIZE_LOG_N=28` padding.
 
 ## 🏗️ Project Structure
 
 ```
 solana-noir-verifier/
 ├── crates/
-│   ├── plonk-core/              # Core verifier library (56 tests ✅)
+│   ├── plonk-core/              # Core verifier library (58 tests)
 │   │   ├── ops.rs               # BN254 ops via syscalls
 │   │   ├── transcript.rs        # Fiat-Shamir (Keccak256)
-│   │   ├── key.rs               # VK parsing (1,760 byte format)
-│   │   ├── proof.rs             # Proof parsing (16,224 byte format)
+│   │   ├── key.rs               # VK parsing (1,760 bytes)
+│   │   ├── proof.rs             # Proof parsing (16,224 bytes)
 │   │   ├── sumcheck.rs          # Sumcheck protocol
 │   │   ├── relations.rs         # 26 subrelations
 │   │   ├── shplemini.rs         # Batch opening verification
 │   │   └── verifier.rs          # Main verification logic
-│   └── vk-codegen/              # CLI: VK JSON → Rust constants
+│   ├── rust-sdk/                # Rust SDK + CLI
+│   │   ├── src/
+│   │   │   ├── client.rs        # SolanaNoirVerifier
+│   │   │   ├── instructions.rs  # Instruction builders
+│   │   │   └── bin/noir-solana/ # CLI binary
+│   │   └── examples/
+│   │       └── test_phased.rs   # E2E example
+│   ├── verifier-cpi/            # CPI helper for integrators
+│   └── vk-codegen/              # VK → Rust constants (legacy)
 ├── programs/
-│   ├── ultrahonk-verifier/      # Main Solana verifier program ✅
-│   └── example-verifier/        # Solana program template
-├── test-circuits/               # 7 verified circuits
+│   └── ultrahonk-verifier/      # Main Solana verifier program
+│       ├── src/
+│       │   ├── lib.rs           # Entry point + instructions
+│       │   └── phased.rs        # Verification state machine
+│       └── tests/
+│           └── integration_test.rs
+├── sdk/                         # TypeScript SDK
+│   └── src/
+│       ├── client.ts            # SolanaNoirVerifier class
+│       ├── instructions.ts      # Instruction builders
+│       └── types.ts             # TypeScript interfaces
+├── examples/
+│   └── sample-integrator/       # CPI integration example
+├── test-circuits/               # 9 verified test circuits
 │   ├── simple_square/           # Basic x² = y
 │   ├── iterated_square_*/       # Scalability tests
 │   ├── hash_batch/              # Blake3 hashing
-│   └── merkle_membership/       # Merkle proofs
+│   ├── merkle_membership/       # Merkle proofs
+│   └── sapling_spend/           # Zcash-style circuit
 ├── scripts/
-│   └── solana/                  # Surfpool testing scripts
+│   └── solana/
+│       ├── test_phased.mjs      # E2E verification script
+│       └── verify.mjs           # Simple verification
 └── docs/
     ├── theory.md                # UltraHonk protocol docs
     ├── knowledge.md             # Implementation notes
-    └── solana-testing.md        # On-chain testing guide
+    └── bpf-limitations.md       # Solana constraints
 ```
 
-## 🔧 Development
+---
 
-### Build
+## ✅ Implementation Status
 
-```bash
-cargo build --workspace
-```
+### Completed
 
-### Test
-
-```bash
-# Run all tests (58 tests across workspace)
-cargo test
-
-# Core library tests only
-cargo test -p plonk-solana-core
-
-# Test all 7 circuits with output
-cargo test -p plonk-solana-core test_all_available_circuits -- --nocapture
-```
-
-### Rebuild Test Circuits
-
-If you delete `target/` directories or want fresh proofs:
-
-```bash
-cd test-circuits
-
-# Build all circuits
-./build_all.sh
-
-# Or build a specific circuit
-./build_all.sh simple_square
-./build_all.sh merkle_membership
-```
-
-This runs: `nargo compile` → `nargo execute` → `bb prove` → `bb write_vk`
-
-### Test on Surfpool (Local Solana)
-
-[Surfpool](https://github.com/txtx/surfpool) provides a local Solana validator for testing.
-
-```bash
-# 1. Start Surfpool (in separate terminal)
-surfpool start
-
-# 2. Build & deploy (circuit VK is embedded at compile time)
-cd programs/ultrahonk-verifier
-CIRCUIT=simple_square cargo build-sbf
-solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
-
-# 3. Run verification test
-cd ../..
-CIRCUIT=simple_square node scripts/solana/test_phased.mjs
-```
-
-**Expected output:**
-
-```
-Phase 1 (Challenges): 287K CUs (1 TX)
-Phase 2 (Sumcheck):   3.82M CUs (3 TXs)
-Phase 3 (MSM):        2.48M CUs (4 TXs)
-Phase 4 (Pairing):    55K CUs (1 TX)
-Total: 6.64M CUs across 9 transactions
-🎉 All phases passed! Verification complete.
-```
-
-### Multi-Circuit Support
-
-The verifier embeds a circuit-specific VK at compile time. To verify different circuits:
-
-```bash
-# Build with specific circuit VK
-cd programs/ultrahonk-verifier
-CIRCUIT=hash_batch cargo build-sbf
-solana program deploy target/deploy/ultrahonk_verifier.so --url http://127.0.0.1:8899 --use-rpc
-
-# Test with matching circuit
-CIRCUIT=hash_batch node scripts/solana/test_phased.mjs
-```
-
-**Available circuits:** `simple_square`, `iterated_square_100`, `iterated_square_1000`, `iterated_square_10k`, `fib_chain_100`, `hash_batch`, `merkle_membership`
-
-**How it works:**
-
-1. `build.rs` reads `CIRCUIT` env var (defaults to `simple_square`)
-2. Copies VK from `test-circuits/$CIRCUIT/target/keccak/vk`
-3. Embeds it in the program at `$OUT_DIR/vk.bin`
-
-> **Production TODO:** Load VK from a Solana account instead of compile-time embedding to support any circuit without redeploying.
-
-### Generate VK Constants
-
-```bash
-cargo run -p plonk-solana-vk-codegen -- \
-    --input ./target/keccak/vk.json \
-    --output ./generated_vk.rs
-```
-
-## 📖 Documentation
-
-- [`SPEC.md`](./SPEC.md) - Detailed specification
-- [`tasks.md`](./tasks.md) - Implementation progress
-- [`docs/knowledge.md`](./docs/knowledge.md) - Implementation notes
-
-## ✅ Current Status
-
-**Complete!** End-to-end UltraHonk verification working with bb 0.87 / nargo 1.0.0-beta.8.
-
-### Performance (simple_square, log_n=12)
-
-| Metric               | Value            |
-| -------------------- | ---------------- |
-| Total CUs            | **6.64M**        |
-| Transactions         | **9**            |
-| Phase 1 (Challenges) | 287K CUs, 1 TX   |
-| Phase 2 (Sumcheck)   | 3.82M CUs, 3 TXs |
-| Phase 3 (MSM)        | 2.48M CUs, 4 TXs |
-| Phase 4 (Pairing)    | 55K CUs, 1 TX    |
-
-### Completed ✅
-
-- [x] Project structure and dependencies
 - [x] BN254 operations via syscalls
 - [x] Proof/VK parsing (bb 0.87 format with limbed G1 points)
 - [x] Fiat-Shamir transcript (Keccak256)
@@ -427,22 +395,35 @@ cargo run -p plonk-solana-vk-codegen -- \
 - [x] All 26 subrelations (arithmetic, permutation, lookup, range, elliptic, aux, poseidon)
 - [x] Shplemini batch opening verification
 - [x] KZG pairing check
-- [x] **58 unit tests passing**
-- [x] **7 test circuits verified** (log_n from 12 to 18)
-- [x] **Multi-transaction phased verification** (9 TXs total)
-- [x] **Zero-copy proof parsing** (saves 16KB heap)
+- [x] Multi-transaction phased verification
+- [x] Zero-copy proof parsing
+- [x] VK account support (circuit-agnostic)
+- [x] Verification receipts for CPI
+- [x] TypeScript SDK
+- [x] Rust SDK + CLI
+- [x] 9 test circuits verified
 
-### Test Circuits Verified ✅
+### Optimizations Applied
 
-| Circuit              | log_n | Public Inputs | Status |
-| -------------------- | ----- | ------------- | ------ |
-| simple_square        | 12    | 1             | ✅     |
-| iterated_square_100  | 12    | 1             | ✅     |
-| iterated_square_1000 | 13    | 1             | ✅     |
-| iterated_square_10k  | 14    | 1             | ✅     |
-| fib_chain_100        | 12    | 1             | ✅     |
-| hash_batch           | 17    | 32            | ✅     |
-| merkle_membership    | 18    | 32            | ✅     |
+| Optimization                  | Improvement                   |
+| ----------------------------- | ----------------------------- |
+| Montgomery multiplication     | **-87% CUs (7x faster)**      |
+| Batch inversion (sumcheck)    | **-38% CUs sumcheck**         |
+| Batch inversion (fold denoms) | **-60% CUs phase 3b1**        |
+| FrLimbs in sumcheck           | **-24% Phase 2**              |
+| FrLimbs in shplemini          | **-16% Phase 3**              |
+| Zero-copy Proof struct        | **-47% transactions**         |
+| Parallel proof upload         | 16 chunks in ~0.8s            |
+
+---
+
+## 📖 Documentation
+
+- [`SPEC.md`](./SPEC.md) - Detailed specification
+- [`tasks.md`](./tasks.md) - Implementation progress
+- [`docs/knowledge.md`](./docs/knowledge.md) - Implementation notes
+- [`docs/theory.md`](./docs/theory.md) - UltraHonk protocol
+- [`crates/rust-sdk/README.md`](./crates/rust-sdk/README.md) - Rust SDK & CLI docs
 
 ## 🔗 References
 
