@@ -180,81 +180,84 @@ Created `solana-noir-verifier-sdk` crate in `crates/rust-sdk/`:
   - Automatic account cleanup (`auto_close` option, default: true)
   - Rent reclaimed on both success and failure
 
-#### CLI Tool (In Progress 🚧)
+#### CLI Tool ✅
 
-Add CLI binary to the Rust SDK crate (`cargo install solana-noir-verifier-sdk`):
+CLI binary added to the Rust SDK crate. Install with:
+```bash
+cargo install --path crates/rust-sdk --features cli
+```
 
-- [ ] **CLI binary in SDK crate**
+- [x] **CLI binary in SDK crate**
   ```toml
   # crates/rust-sdk/Cargo.toml
   [[bin]]
   name = "noir-solana"
-  path = "src/bin/main.rs"
+  path = "src/bin/noir-solana/main.rs"
+  required-features = ["cli"]
   ```
   Structure:
   ```
-  crates/rust-sdk/src/bin/
+  crates/rust-sdk/src/bin/noir-solana/
   ├── main.rs           # Entry point + clap setup
-  ├── commands/
-  │   ├── mod.rs
-  │   ├── deploy.rs     # Deploy verifier program
-  │   ├── upload_vk.rs  # Upload VK to account
-  │   ├── verify.rs     # Submit and verify proof
-  │   ├── status.rs     # Check verification status
-  │   └── receipt.rs    # Create/check receipts
-  └── config.rs         # RPC/keypair config
+  ├── config.rs         # RPC/keypair config
+  └── commands/
+      ├── mod.rs
+      ├── deploy.rs     # Deploy verifier program
+      ├── upload_vk.rs  # Upload VK to account
+      ├── verify.rs     # Submit and verify proof
+      ├── status.rs     # Check verification status
+      ├── receipt.rs    # Create/check receipts
+      └── close.rs      # Close accounts, reclaim rent
   ```
 
-- [ ] **Core commands**
+- [x] **Core commands**
+  
   ```bash
   # Deploy the verifier program (returns program ID)
-  noir-solana deploy \
-    --keypair ~/.config/solana/id.json \
-    --network devnet
+  noir-solana deploy --keypair ~/.config/solana/id.json --network devnet
   
   # Upload a VK (returns VK account address)
-  noir-solana upload-vk \
-    --vk ./target/keccak/vk \
-    --program-id <pubkey> \
-    --network devnet
+  noir-solana upload-vk --vk ./target/keccak/vk \
+    --program-id <program_id> --network devnet
   
   # Verify a proof (full E2E workflow: upload + 9 TXs)
   noir-solana verify \
     --proof ./target/keccak/proof \
     --public-inputs ./target/keccak/public_inputs \
-    --vk-account <pubkey> \
-    --program-id <pubkey> \
-    --network devnet
+    --vk-account <vk_pubkey> \
+    --program-id <program_id>
   
   # Check verification state (during or after verification)
-  noir-solana status \
-    --state-account <pubkey> \
-    --program-id <pubkey>
+  noir-solana status --state-account <state_pubkey> \
+    --program-id <program_id>
   
   # Create verification receipt (after successful verification)
   noir-solana receipt create \
-    --state-account <pubkey> \
-    --vk-account <pubkey> \
+    --state-account <state_pubkey> \
+    --proof-account <proof_pubkey> \
+    --vk-account <vk_pubkey> \
     --public-inputs ./target/keccak/public_inputs \
-    --program-id <pubkey>
+    --program-id <program_id>
   
   # Check if a receipt exists
   noir-solana receipt check \
-    --vk-account <pubkey> \
+    --vk-account <vk_pubkey> \
     --public-inputs ./target/keccak/public_inputs \
-    --program-id <pubkey>
+    --program-id <program_id>
   
   # Close accounts and reclaim rent
   noir-solana close \
-    --state-account <pubkey> \
-    --proof-account <pubkey> \
-    --program-id <pubkey>
+    --state-account <state_pubkey> \
+    --proof-account <proof_pubkey> \
+    --program-id <program_id>
   ```
+  
+  **Tip:** Set env vars: `KEYPAIR_PATH`, `VERIFIER_PROGRAM_ID`, `SOLANA_RPC_URL`
   
   **Note:** We don't include `prove` commands - use `nargo` and `bb` directly for proof generation.
   This CLI focuses on **Solana-specific** operations (deploy, upload, verify, receipts).
 
-- [ ] **Configuration**
+- [x] **Configuration**
   - Support `~/.config/noir-solana/config.toml`
   - Example config:
     ```toml
@@ -273,15 +276,17 @@ Add CLI binary to the Rust SDK crate (`cargo install solana-noir-verifier-sdk`):
   - Environment variable fallbacks: `SOLANA_RPC_URL`, `KEYPAIR_PATH`, `VERIFIER_PROGRAM_ID`
   - CLI flags override config file which overrides env vars
 
-- [ ] **Output formats**
+- [x] **Output formats**
   - Human-readable (default)
   - JSON (`--output json`) for scripting
   - Quiet mode (`-q`) for CI pipelines
 
-- [ ] **Dependencies**
+- [x] **Dependencies**
   - `clap` for argument parsing
   - `indicatif` for progress bars
   - `console` for colored output
+  - `dirs` for config file paths
+  - `toml` for config parsing
   - `dirs` for config file locations
 
 ### 1.5 VK Account Support ✅

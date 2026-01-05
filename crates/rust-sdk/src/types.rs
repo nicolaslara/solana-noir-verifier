@@ -156,10 +156,8 @@ pub const BUFFER_HEADER_SIZE: usize = 9;
 pub const VK_HEADER_SIZE: usize = 3;
 
 /// Verification state account size
-/// NOTE: This must match the deployed on-chain program version.
-/// The program was updated to add vk_account field (6376 -> 6408),
-/// but until the program is redeployed, use the old size.
-pub const STATE_SIZE: usize = 6376;
+/// Includes: header + challenges + sumcheck state + vk_account field
+pub const STATE_SIZE: usize = 6408;
 
 /// Default chunk size for uploads
 pub const DEFAULT_CHUNK_SIZE: usize = 1020;

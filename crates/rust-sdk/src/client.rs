@@ -595,9 +595,10 @@ impl SolanaNoirVerifier {
 
         let sig = self.client.send_transaction_with_config(&tx, config)?;
 
-        // Poll for confirmation
-        for _ in 0..60 {
-            thread::sleep(Duration::from_millis(500));
+        // Poll for confirmation - matches test_phased.rs approach
+        // 30 attempts × 200ms = 6 second timeout per TX
+        for _ in 0..30 {
+            thread::sleep(Duration::from_millis(200));
             match self.client.get_signature_status(&sig)? {
                 Some(result) => {
                     if let Err(e) = result {
